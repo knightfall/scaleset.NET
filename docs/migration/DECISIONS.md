@@ -19,18 +19,23 @@ Recorded on 2026-10-02, Australia/Sydney.
 | D10 | Support both spare-capacity and total-floor scaling policies | Require a named policy in deployment examples; test both formulas |
 | D11 | Execute implementation using GPT-6 Luna subagents at max reasoning | Use `gpt-6-luna`, `reasoning_effort=max`, explicit work packages, and parent integration/review |
 | D12 | Normal shutdown uses A: drain and preserve | Stop new acquisition/provisioning, drain for a configurable period, retain the scale set, and leave unfinished/uncertain runners intact for reconciliation on restart |
+| D16 | Structured logging uses Microsoft ILogger with Serilog and its OpenTelemetry export sink | Code logs through ILogger<T>; the executable wires Serilog.Extensions.Hosting and Serilog.Sinks.OpenTelemetry |
+| D17 | Tracing and metrics are mandatory and follow OpenTelemetry best practices | Libraries emit ActivitySource/Meter instrumentation; the executable registers SDK providers and OTLP export with correlation, semantic conventions, bounded cardinality, and verification |
+| D18 | Environment-variable configuration first; Parameter Store and Secrets Manager focus in phase two | Replace proposed JSON/CLI configuration providers with environment binding; Parameter Store supplies settings and Secrets Manager supplies credentials in AWS |
+| D19 | Phase-two runtime providers with caching and credential refresh; operational changes remain restart-based initially | Load AWS sources in the application, cache complete validated settings, refresh credential generations safely, and apply operational changes on restart |
 
 ## Decisions currently being asked
 
-1. **D13 [ASK USER] Product/deployment defaults.** Proposed: JSON configuration,
-   environment/CLI overrides, mounted credential files, multiple scale sets,
-   Linux x64/arm64 images, Compose, structured logs, health endpoints, optional
-   OpenTelemetry/Prometheus, and no dashboard.
+1. **D13 [ASK USER] Remaining deployment defaults.** Multiple scale sets,
+   Linux x64/arm64 images, Compose, health endpoints, and no dashboard.
+   Logging, mandatory telemetry, and configuration are confirmed in D16-D19.
 2. **D14 [ASK USER] Phase-two infrastructure format.** C# CDK, Terraform, or
    CloudFormation YAML. Provider implementations remain C# in every case.
 3. **D15 [ASK USER] Engineering-default review.** Review the concrete defaults
    below: package family, test framework, restart-based configuration changes,
    configurable example timing/capacity values, and initial cloud scope.
+4. **D20 [ASK USER] Telemetry topology.** OpenTelemetry Collector with
+   configurable downstream destinations, or direct OTLP backend export?
 
 ## Proposed engineering defaults
 
@@ -46,6 +51,8 @@ They must be reviewed with the user before the plan is marked final.
   speculative version pins in this plan.
 - Configuration changes require restart in v1. Runtime capacity setters remain
   available through the listener library; hot reload is a later feature.
+  Confirmed D19 adds runtime credential refresh in phase two without hot-applying
+  operational setting changes.
 - Defaults proposed for examples: zero minimum, ten maximum runners per set,
   explicit `SpareCapacity` policy, two concurrent creations, 30-second inventory
   reconciliation, 15-minute startup deadline, five-minute shutdown drain, and
@@ -63,7 +70,7 @@ They must be reviewed with the user before the plan is marked final.
 
 ## Finalization gate
 
-Resolve D13-D15, including user review of the proposed defaults. Update the plan,
+Resolve D13-D15 and D20, including review of the proposed defaults. Update the plan,
 parity checklist, and concerns consistently; no unresolved `[ASK USER]`
 remains in the final documents. Implementation-only facts, such as exact
 package versions or measured throughput, may remain `[TODO]` with a milestone
@@ -83,9 +90,18 @@ was itself stopped.
 Runner resources must outlive the controller process/container. This policy
 assumes their Docker host/cloud compute remains available. Finished resources
 may wait for cleanup until the controller restarts. Deployment stop grace
-must exceed drain plus bounded acknowledgment/closure/persistence overhead.
+must exceed drain plus bounded acknowledgment/closure/persistence/telemetry-flush overhead.
 Force-stop and permanent scale-set deletion are separate explicit operator
 actions; reaching the normal drain timeout must never trigger either.
+
+## Confirmed observability/configuration contract (D16-D19)
+
+See [OBSERVABILITY-CONFIGURATION.md](OBSERVABILITY-CONFIGURATION.md) for the
+log pipeline, independent SDK tracing/metrics pipeline, environment schema,
+AWS source boundaries, instrumentation inventory, and acceptance tests.
+The executable must enable and export traces and metrics. Library consumers
+own their SDK/exporter composition. ILogger remains the public logging
+abstraction; Serilog is configured by the executable.
 
 ## Intent versus source reality
 

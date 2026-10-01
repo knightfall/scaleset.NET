@@ -74,6 +74,12 @@ Full transient log: `/private/tmp/scaleset-migration-go-tests.log`.
 
 ## Documentation verification
 
+The D16-D19 design was checked against current primary Serilog, Microsoft,
+OpenTelemetry, and AWS documentation linked in
+[OBSERVABILITY-CONFIGURATION.md](OBSERVABILITY-CONFIGURATION.md). This confirms
+source guidance only; no SDK/sink export or AWS configuration provider has
+been implemented or exercised in this branch.
+
 Completed during draft review:
 
 - All local Markdown links resolve.

@@ -18,8 +18,10 @@ dashboard, automatic failover, and cross-account AWS control are not presumed
 phase-one requirements.
 
 Confirmed and proposed choices are tracked in [DECISIONS.md](DECISIONS.md).
-[ASK USER] D13-D15, including review of engineering defaults, must be resolved before
-marking this plan final.
+[ASK USER] D13-D15 and D20, including review of engineering defaults, must be
+resolved before marking this plan final. D16-D19 require ILogger/Serilog OTLP
+logging, mandatory OpenTelemetry traces and metrics, environment configuration
+in phase one, and runtime Parameter Store/Secrets Manager providers in phase two.
 
 Success means protocol tests pass, Docker lifecycle/recovery/drain scenarios
 pass, a real workflow runs through the autoscaler in a dedicated test scope,
@@ -63,7 +65,7 @@ scaleset.NET/
     ScaleSet.Listener/            # Initial/poll/callback/ack contract
     ScaleSet.Hosting/             # Policy, reconciliation, ownership, lifecycle
     ScaleSet.Providers.Docker/    # Docker Engine adapter
-    ScaleSet.Autoscaler/          # Configuration, CLI, service, telemetry wiring
+    ScaleSet.Autoscaler/          # Environment config, commands, required telemetry
   tests/
     ScaleSet.Client.Tests/
     ScaleSet.Listener.Tests/
@@ -71,19 +73,23 @@ scaleset.NET/
     ScaleSet.Docker.IntegrationTests/
     ScaleSet.EndToEnd.Tests/
     fixtures/protocol/
-  deploy/docker/                 # Dockerfile, Compose, example config, runbook
+  deploy/docker/                 # Dockerfile, Compose, example env, runbook
   docs/migration/                # This plan, decisions, parity, validation
   docs/codebase/                 # Pinned upstream evidence
   # Phase two:
   src/ScaleSet.Providers.Ecs/
   src/ScaleSet.Providers.Ec2/
-  infra/                        # Format depends on D14
+  src/ScaleSet.Configuration.Aws/ # Parameter Store/Secrets Manager integration
+  infra/                         # Format depends on D14
 ```
 
 Client has no Docker/AWS/hosting dependency. Listener references Client only
 plus minimal logging abstractions. Hosting uses Client and Listener and
 defines the provider contract; adapters reference that contract. Executable
-composes concrete providers and telemetry exporters. Avoid cycles and avoid
+composes providers, Serilog, and mandatory trace/metric exporters. Libraries
+use Microsoft.Extensions.Logging abstractions and ActivitySource/Meter;
+SDKs, sinks, and AWS configuration providers stay in application composition.
+Avoid cycles and avoid
 putting AWS SDKs into reusable protocol packages.
 
 Use nullable references, explicit JSON wire names, async Task APIs with
@@ -145,8 +151,9 @@ contracts while documenting this safer transport-policy departure from Go's
 generic retries. Microsoft notes that [standard retries apply to all methods
 unless configured](https://learn.microsoft.com/en-us/dotnet/core/resilience/http-resilience).
 
-App/PAT descriptors are mutually exclusive. Load PEM/token files in the
-executable, keep token caches per target/credential scope, and publish token
+App/PAT descriptors are mutually exclusive. Bind credential values/references
+from environment configuration in the executable, keep token caches per
+target/credential scope, and publish token
 plus tenant URL together under one refresh gate. Queue refresh rechecks both
 session ID and credential generation. Do not hold a state lock across network
 I/O or share refresh errors forever.
@@ -184,14 +191,25 @@ ScaleSets[]:
   runnerProfile:
     imageOrTemplate, architecture, cpu, memory, workFolder
     mounts, network, environmentRefs, dockerBuildMode, privileged
-Credentials[]: named App/clientID/installationID/keyFile or PAT/tokenFile
+Credentials[]: named App/clientID/installationID/PEM or PAT; AWS secret references in phase two
 ```
 
-[ASK USER, D13] Finalize the JSON/environment/CLI mechanism, Compose, Linux
-image architectures, multiple-set support, and observability defaults.
-Proposed precedence is file < environment < command line; arrays/credential
-references need documented override semantics. Validate all sets before
-starting any listeners. Redact secrets from config dumps and diagnostics.
+Confirmed D18: phase one binds validated environment variables over code
+defaults, using a product prefix and double-underscore hierarchy. Remove
+implicit JSON/command-line configuration providers from the application's
+configuration chain. CLI arguments select commands/explicit action targets.
+Keep standard OTEL_* exporter/resource settings and deliberately bind any
+unsupported settings rather than assuming automatic SDK/sink support.
+Validate all sets and required telemetry configuration before listeners start;
+redact secrets from config dumps and diagnostics.
+
+Confirmed D19: phase two uses runtime Parameter Store settings and Secrets
+Manager credential providers, with caching and credential refresh in a separate
+AWS module. Operational settings are a validated startup snapshot and changes
+require restart initially. Define source precedence and safe credential-generation
+replacement/cache invalidation. [ASK USER, D13] Compose, Linux architectures,
+multiple sets, health endpoints, and no-dashboard defaults still need confirmation.
+See [the detailed design](OBSERVABILITY-CONFIGURATION.md).
 
 One serial loop per configured scale set; shared bounded provisioner and host
 budget across loops. Include reservations/Starting/Unknown resources in the
@@ -287,23 +305,31 @@ adding any durable asynchronous job queue.
 - Separate controller and runner resource lifetimes; deployment teardown must
   not implicitly remove preserved runners. Docker-host shutdown still stops
   those runners. Configure Compose's stop grace to exceed drain plus bounded
-  acknowledgment/closure/persistence overhead; its default alone is insufficient
+  acknowledgment/closure/persistence/telemetry-flush overhead; its default alone is insufficient
   for a multi-minute drain. Cleanup of runners that finish while the controller
   is absent happens on recovery. See [Compose stop grace](https://docs.docker.com/reference/compose-file/services/#stop_grace_period).
 
 ## 9. Operations and distribution
 
-[ASK USER, D09/D13] Finalize package identity and operating defaults at review.
+[ASK USER, D13/D15] Finalize package identity and remaining deployment defaults.
 Proposed artifacts: Client/Listener/Hosting NuGet packages, provider assembly,
 CLI binary, versioned multi-architecture controller image, Compose example,
-validated example config, upgrade/drain/recovery runbooks, and package notices.
+validated example environment configuration, recovery runbooks, and package notices.
 
-Use structured logs with scale-set/provider/operation/correlation IDs and no
-raw credentials/JIT payloads. Libraries emit ActivitySource/Meter telemetry;
-the executable configures optional exporters. Proposed metrics: assigned jobs,
-desired/idle/busy/starting/unknown runners, reserved capacity, provision/cleanup
-duration/failure, queue polls/acks/replays, and refresh failures. Avoid job IDs
-and runner names as unbounded metric dimensions.
+Confirmed D16-D17: use Microsoft ILogger<T>, routed by Serilog.Extensions.Hosting
+to Serilog.Sinks.OpenTelemetry for OTLP logs. The executable separately registers
+OpenTelemetry tracing/metrics SDK providers and exporters; do not register a
+duplicate OTel ILogger exporter or export Activity-derived spans through both
+pipelines. Resources and trace/span correlation agree across all three signals.
+Public libraries emit ActivitySource/Meter and accept ILogger without initializing
+the SDK. [ASK USER, D20] Select Collector versus direct-backend topology.
+
+Tracing and metrics are mandatory. Instrument HTTP/authentication, queue
+operations, scaling, provider lifecycle, recovery, and drain; standard HTTP/
+runtime instrumentation supplements custom business signals. Metric dimensions
+are bounded; job/runner/trace IDs are not labels. Sampling, semantic conventions,
+redaction, export lifecycle, and acceptance are specified in
+[OBSERVABILITY-CONFIGURATION.md](OBSERVABILITY-CONFIGURATION.md).
 
 Liveness indicates process progress. Readiness indicates valid ownership,
 configuration, and completed initial reconciliation; degraded GitHub/provider
@@ -385,6 +411,8 @@ EC2 container instances underneath ECS.
 [ASK USER, D14] Select the artifact format. Plan reusable modules/stacks for:
 
 - Controller deployment, owned state, configuration and credential references.
+- Parameter Store hierarchy, Secrets Manager references/permissions and
+  runtime provider configuration, plus required OTLP/resource settings.
 - ECS task definitions/cluster selection/capacity/network/logging and roles.
 - EC2 launch templates/AMI parameters/network/storage/roles and bootstrap.
 - Non-secret outputs, ownership tags, optional existing-resource inputs,
@@ -400,13 +428,13 @@ network/IAM/bootstrap details receive a dedicated design review in M6/M7.
 | Milestone | Deliverables | Dependencies | Gate |
 |---|---|---|---|
 | M0 Decisions/baseline | Final plan, pinned source, parity matrix, attribution inventory | User decisions | No unresolved product decision; source evidence verified |
-| M1 Solution/contracts | .NET 10 layout, shared conventions, test projects, public API skeleton, config schema | M0 | Build succeeds; dependency graph respects boundaries; public API review |
-| M2 Wire/transport/auth | DTOs, exceptions, target resolver, auth cache, HTTP policies, all admin/session APIs | M1 | Every parity row traced to fixtures; refresh concurrency/TLS/cancellation tests pass |
+| M1 Solution/contracts | .NET 10 layout, API/tests, env schema, ILogger/Serilog and OTel providers | M0 | Build/dependency/API review; all three signals reach a test OTLP receiver |
+| M2 Wire/transport/auth | DTOs, exceptions, auth cache, HTTP, admin/session APIs and telemetry | M1 | Parity, concurrency/TLS/cancellation and correlated/redacted HTTP telemetry tests pass |
 | M3 Listener | Initial/empty/real callbacks, dynamic capacity, acquire interface, ack sequencing | M2 | No ack before success; cancellation-safe bounded ack; replay/refresh tests pass |
 | M4 Docker lifecycle | Provider, policies, journal, discovery, idempotent cleanup, aggregate budgets | M3 | Restart/partial-create/duplicate-event/container-exit/drain scenarios pass |
-| M5 Docker release | CLI/service, config/docs/telemetry, Compose, NuGet/image CI | M4 | Install/config smoke, real GitHub.com repo+org canaries, retained-identity restart, operator runbook |
-| M6 ECS provider | Task lifecycle/bootstrap, infrastructure, provider contract tests | M5 | Dedicated AWS/GitHub canary, idempotent retry/recovery, workload compatibility, drain/cleanup |
-| M7 EC2 provider | Instance/AMI/bootstrap lifecycle, infrastructure, contract tests | M5 and bootstrap design | Dedicated canary, lost-response/restart/bootstrap-failure/termination recovery |
+| M5 Docker release | CLI/service, env/docs, required telemetry, Compose, NuGet/image CI | M4 | Repo+org canaries, config/install/recovery runbooks, correlation/metrics/export outage/shutdown tests |
+| M6 ECS provider | Task lifecycle/bootstrap, runtime AWS config sources, infra/tests | M5 | AWS/GitHub canary, retry/recovery/drain, source/credential rotation and all-signal export |
+| M7 EC2 provider | Instance/AMI/bootstrap, runtime AWS config sources, infra/tests | M5 and bootstrap design | Canary, lost-response/recovery, source/rotation/failure and provider telemetry tests |
 | M8 Release/maintenance | Supported environment matrix, upgrade checklist, published artifacts | Relevant release gates | Documented evidence for each advertised target/provider; recoverable upgrade |
 
 M6 and M7 may develop in parallel after common bootstrap/state contracts are
@@ -447,6 +475,11 @@ failure cleanup. Local PR tests do not silently acquire live credentials.
 
 No C# tests are executed in this planning branch because no implementation
 exists. Select and document the repository-compatible .NET test runner in M1.
+Mandatory telemetry tests verify registered sources/meters, log/trace and resource
+correlation, no duplicate exports, bounded metric dimensions, secret redaction,
+export during operations, outage behavior, and bounded flushing during D12 drain.
+Configuration tests cover environment hierarchy/arrays, validation/precedence,
+and phase-two caching/credential rotation with synthetic credentials.
 
 ## 15. Implementation delegation policy
 

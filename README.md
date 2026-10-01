@@ -12,6 +12,7 @@ separate ECS-task and direct EC2-instance providers.
 - [Migration plan](docs/migration/PLAN.md)
 - [Decisions and open questions](docs/migration/DECISIONS.md)
 - [Protocol parity checklist](docs/migration/PROTOCOL-PARITY.md)
+- [Observability and configuration design](docs/migration/OBSERVABILITY-CONFIGURATION.md)
 - [Analysis and validation evidence](docs/migration/VALIDATION.md)
 - [Upstream architecture](docs/codebase/ARCHITECTURE.md)
 - [Stack](docs/codebase/STACK.md), [structure](docs/codebase/STRUCTURE.md),
