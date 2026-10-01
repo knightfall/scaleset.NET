@@ -20,6 +20,7 @@ Recorded on 2026-10-02, Australia/Sydney.
 | D11 | Execute implementation using GPT-6 Luna subagents at max reasoning | Use `gpt-6-luna`, `reasoning_effort=max`, explicit work packages, and parent integration/review |
 | D12 | Normal shutdown uses A: drain and preserve | Stop new acquisition/provisioning, drain for a configurable period, retain the scale set, and leave unfinished/uncertain runners intact for reconciliation on restart |
 | D13 | Compose, Linux x64/arm64 images, multiple scale sets, health endpoints, and no dashboard | Product deployment/operations features extend the upstream Docker demonstration while preserving supported GitHub protocol contracts |
+| D14 | AWS infrastructure uses CDK v2 in TypeScript; detailed infrastructure planning is deferred until later | Reserve this direction for phase two; do not finalize cloud topology/stacks/IAM/deployment design in the phase-one plan |
 | D16 | Structured logging uses Microsoft ILogger with Serilog and its OpenTelemetry export sink | Code logs through ILogger<T>; the executable wires Serilog.Extensions.Hosting and Serilog.Sinks.OpenTelemetry |
 | D17 | Tracing and metrics are mandatory and follow OpenTelemetry best practices | Libraries emit ActivitySource/Meter instrumentation; the executable registers SDK providers and OTLP export with correlation, semantic conventions, bounded cardinality, and verification |
 | D18 | Environment-variable configuration first; Parameter Store and Secrets Manager focus in phase two | Replace proposed JSON/CLI configuration providers with environment binding; Parameter Store supplies settings and Secrets Manager supplies credentials in AWS |
@@ -28,11 +29,9 @@ Recorded on 2026-10-02, Australia/Sydney.
 
 ## Decisions currently being asked
 
-1. **D14 [ASK USER] Phase-two infrastructure format.** C# CDK, Terraform, or
-   CloudFormation YAML. Provider implementations remain C# in every case.
-2. **D15 [ASK USER] Engineering-default review.** Review the concrete defaults
+1. **D15 [ASK USER] Engineering-default review.** Review the concrete defaults
    below: package family, test framework, restart-based configuration changes,
-   configurable example timing/capacity values, and initial cloud scope.
+   and configurable example timing/capacity values.
 
 ## Proposed engineering defaults
 
@@ -61,17 +60,20 @@ They must be reviewed with the user before the plan is marked final.
 - Keep the repository's Apache-2.0 license and include upstream MIT attribution
   in a third-party notice when translating upstream code/fixtures. Verify
   actual copied material and include notices in NuGet/container distributions.
-- Phase two initially uses configured existing AWS accounts/regions/network
-  settings, On-Demand capacity, and one controller owner per scale set.
-  Cross-account management, Spot recovery, and automatic failover are extensions.
+- Phase-two infrastructure topology, account/network setup, capacity choices,
+  and cloud rollout details are deferred to later planning (D14). ECS/EC2
+  providers and runtime Parameter Store/Secrets Manager direction remain confirmed.
 
 ## Finalization gate
 
-Resolve D14-D15, including review of the proposed defaults. Update the plan,
+Resolve D15, including review of the proposed defaults. Update the plan,
 parity checklist, and concerns consistently; no unresolved `[ASK USER]`
 remains in the final documents. Implementation-only facts, such as exact
 package versions or measured throughput, may remain `[TODO]` with a milestone
 and verification requirement. This branch contains planning documents only.
+Detailed AWS infrastructure planning is intentionally deferred and does not
+block finalizing the phase-one migration plan. It is a prerequisite to the
+future cloud implementation milestones.
 
 ## Confirmed shutdown contract (D12)
 

@@ -18,11 +18,13 @@ dashboard, automatic failover, and cross-account AWS control are not presumed
 phase-one requirements.
 
 Confirmed and proposed choices are tracked in [DECISIONS.md](DECISIONS.md).
-[ASK USER] D14-D15, including review of engineering defaults, must be
+[ASK USER] D15, the engineering-default review, must be
 resolved before marking this plan final. D16-D20 require ILogger/Serilog OTLP
 logging, mandatory OpenTelemetry traces and metrics, environment configuration
 in phase one, runtime Parameter Store/Secrets Manager providers in phase two,
 and a configured OTLP endpoint without choosing/provisioning a backend.
+Confirmed D14: future AWS infrastructure will use CDK v2 in TypeScript;
+detailed infrastructure planning will happen later.
 
 Success means protocol tests pass, Docker lifecycle/recovery/drain scenarios
 pass, a real workflow runs through the autoscaler in a dedicated test scope,
@@ -105,7 +107,7 @@ scaleset.NET/
   src/ScaleSet.Providers.Ecs/
   src/ScaleSet.Providers.Ec2/
   src/ScaleSet.Configuration.Aws/ # Parameter Store/Secrets Manager integration
-  infra/                         # Format depends on D14
+  infra/                         # Reserved for AWS CDK v2 TypeScript; planning later
 ```
 
 Client has no Docker/AWS/hosting dependency. Listener references Client only
@@ -373,6 +375,10 @@ Never execute untrusted PR code with publishing/live-canary credentials.
 
 ## 10. Phase-two ECS provider
 
+Future provider requirements and design proposals follow. Detailed cloud
+infrastructure planning is deferred under D14; these do not finalize stacks,
+networking, roles, bootstrap deployment, or capacity choices.
+
 Provision one ephemeral runner task per requested resource through ECS RunTask,
 not an ECS service that automatically replaces completed one-job runners.
 Controller deployment may separately use an ECS service. Require configured
@@ -408,6 +414,9 @@ controllers and validate instance draining against long-running CI jobs.
 
 ## 11. Phase-two direct EC2 provider
 
+Future provider requirements/design proposals; deployment and infrastructure
+choices must be revisited during the deferred phase-two planning.
+
 Use versioned launch templates and a configured AMI/architecture/resource
 profile. Create one ephemeral runner instance per resource initially. Use
 stable client-token/ownership tags and recorded instance IDs. Discover and
@@ -434,22 +443,21 @@ baseline; Spot interruption/requeue behavior is a later capability with its
 own acceptance tests. Direct EC2 provider lifecycle is distinct from managing
 EC2 container instances underneath ECS.
 
-## 12. Infrastructure scope
+## 12. Deferred AWS infrastructure planning
 
-[ASK USER, D14] Select the artifact format. Plan reusable modules/stacks for:
+Confirmed D14: AWS CDK v2 in TypeScript is the selected infrastructure tool.
+C# remains the client/autoscaler/provider implementation language. The `infra/`
+path is reserved; no CDK project or cloud deployment is created in this branch.
 
-- Controller deployment, owned state, configuration and credential references.
-- Parameter Store hierarchy, Secrets Manager references/permissions and
-  runtime provider configuration, plus required OTLP/resource settings.
-- ECS task definitions/cluster selection/capacity/network/logging and roles.
-- EC2 launch templates/AMI parameters/network/storage/roles and bootstrap.
-- Non-secret outputs, ownership tags, optional existing-resource inputs,
-  local validation/synthesis, disposable test environment, and safe teardown.
+[TODO, later phase-two planning] Design the cloud topology/stacks, account and
+network assumptions, roles, controller state, runtime configuration sources,
+runner bootstrap delivery, capacity choices, teardown, and environment-specific
+acceptance criteria. Revisit sections 10/11 at that point rather than treating
+their preliminary provider ideas as finalized infrastructure decisions.
 
-Do not deploy AWS resources while executing a planning milestone. Regions,
-accounts, networks, resource profiles, and scale limits are configuration;
-deployment validation must use an explicitly selected environment. Cloud
-network/IAM/bootstrap details receive a dedicated design review in M6/M7.
+This deferred work does not block the phase-one Docker migration plan.
+Cloud implementation/deployment milestones depend on completing that later
+design; they do not start automatically when the Docker release finishes.
 
 ## 13. Milestones and acceptance gates
 
@@ -461,12 +469,12 @@ network/IAM/bootstrap details receive a dedicated design review in M6/M7.
 | M3 Listener | Initial/empty/real callbacks, dynamic capacity, acquire interface, ack sequencing | M2 | No ack before success; cancellation-safe bounded ack; replay/refresh tests pass |
 | M4 Docker lifecycle | Provider, policies, journal, discovery, idempotent cleanup, aggregate budgets | M3 | Restart/partial-create/duplicate-event/container-exit/drain scenarios pass |
 | M5 Docker release | CLI/service, env/docs, required telemetry, Compose, NuGet/image CI | M4 | Repo+org canaries, config/install/recovery runbooks, correlation/metrics/export outage/shutdown tests |
-| M6 ECS provider | Task lifecycle/bootstrap, runtime AWS config sources, infra/tests | M5 | AWS/GitHub canary, retry/recovery/drain, source/credential rotation and all-signal export |
-| M7 EC2 provider | Instance/AMI/bootstrap, runtime AWS config sources, infra/tests | M5 and bootstrap design | Canary, lost-response/recovery, source/rotation/failure and provider telemetry tests |
+| M6 ECS provider | Future task lifecycle/config/CDK TypeScript infra/tests | M5 and later AWS design | Later planning confirms scope/gates; AWS/GitHub canary, recovery/drain, credential rotation and telemetry |
+| M7 EC2 provider | Future instance/AMI/config/CDK TypeScript infra/tests | M5 and later AWS/bootstrap design | Later planning confirms scope/gates; canary, bootstrap/recovery, source/rotation and telemetry tests |
 | M8 Release/maintenance | Supported environment matrix, upgrade checklist, published artifacts | Relevant release gates | Documented evidence for each advertised target/provider; recoverable upgrade |
 
-M6 and M7 may develop in parallel after common bootstrap/state contracts are
-agreed. Each milestone produces a small reviewable change with evidence and
+After the deferred phase-two planning, M6 and M7 may develop in parallel once
+common bootstrap/state contracts are agreed. Each milestone produces a small reviewable change with evidence and
 updated docs. No time estimate is committed before workload measurements and
 provider/infrastructure dependencies are known.
 
