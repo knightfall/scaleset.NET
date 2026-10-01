@@ -18,7 +18,7 @@ dashboard, automatic failover, and cross-account AWS control are not presumed
 phase-one requirements.
 
 Confirmed and proposed choices are tracked in [DECISIONS.md](DECISIONS.md).
-[ASK USER] D13-D15, including review of engineering defaults, must be
+[ASK USER] D14-D15, including review of engineering defaults, must be
 resolved before marking this plan final. D16-D20 require ILogger/Serilog OTLP
 logging, mandatory OpenTelemetry traces and metrics, environment configuration
 in phase one, runtime Parameter Store/Secrets Manager providers in phase two,
@@ -49,6 +49,30 @@ The source analysis is in [seven codebase guides](../codebase/ARCHITECTURE.md).
   clone, not older ARC listener assumptions or mutable README examples.
 - The source's local race-enabled baseline has one failing macOS TLS assertion;
   details and unverified environments are in [VALIDATION.md](VALIDATION.md).
+
+### Product scope compared with the Go baseline
+
+| Area | Pinned Go source | Planned C# product |
+|---|---|---|
+| GitHub protocol | Client, sessions, listener and caller-owned provisioning | Preserve supported wire/auth/poll/acquire/ack contracts with idiomatic C# APIs |
+| Docker provisioning | Example directly calls Docker Engine APIs | Same provider primitive, with recovery, ownership and lifecycle management |
+| Deployment | Example installed/run as a Go CLI; development-container Dockerfile | Controller container images for Linux x64/arm64 plus Compose deployment |
+| Scale sets per process | Example has one registration URL/name and one session | Multiple configured scale sets with shared host-capacity limits; Go library can also be composed for multiple sets by a consumer |
+| Configuration/logging | Library constructor options; example CLI flags and slog | App environment configuration, ILogger/Serilog OTLP logs, required SDK traces/metrics; AWS runtime config in phase two |
+| Shutdown/state | Example in-memory maps; force-removes runners and deletes scale set | Confirmed drain-and-preserve with retained identity and restart reconciliation |
+| Scaling policies | Docker example uses additive minimum/spare capacity | SpareCapacity and TotalFloor selectable by configuration |
+| Health/UI | Example has no health host or dashboard | Health endpoints; no dashboard |
+| Initial GitHub support | Go also supports GHES, enterprise scope and external JWT signing | Phase one: GitHub.com repo/org scopes with App/PAT; other targets/signers deferred |
+
+Compose deploys the controller and its dependencies; runner containers are
+still created through the provider's Docker API. Multi-architecture packaging
+is a deployment deliverable, not a change to the GitHub runner protocol.
+These application additions follow D01 (full autoscaler product) and the
+confirmed operational decisions. Initial target coverage is narrower than
+the complete Go library and must be advertised explicitly. Compatibility is
+a planned/tested acceptance requirement, not a runtime result established by
+this documentation branch. Evidence: upstream example README/main/scaler,
+common client, config/JWT source, and the saved source tree.
 
 ## 3. Proposed solution layout and dependency rules
 
@@ -208,8 +232,8 @@ Confirmed D19: phase two uses runtime Parameter Store settings and Secrets
 Manager credential providers, with caching and credential refresh in a separate
 AWS module. Operational settings are a validated startup snapshot and changes
 require restart initially. Define source precedence and safe credential-generation
-replacement/cache invalidation. [ASK USER, D13] Compose, Linux architectures,
-multiple sets, health endpoints, and no-dashboard defaults still need confirmation.
+replacement/cache invalidation. Confirmed D13 adds Compose, Linux x64/arm64,
+multiple scale sets, health endpoints, and no dashboard.
 See [the detailed design](OBSERVABILITY-CONFIGURATION.md).
 
 One serial loop per configured scale set; shared bounded provisioner and host
@@ -312,7 +336,7 @@ adding any durable asynchronous job queue.
 
 ## 9. Operations and distribution
 
-[ASK USER, D13/D15] Finalize package identity and remaining deployment defaults.
+[ASK USER, D15] Finalize package identity and engineering defaults.
 Proposed artifacts: Client/Listener/Hosting NuGet packages, provider assembly,
 CLI binary, versioned multi-architecture controller image, Compose example,
 validated example environment configuration, recovery runbooks, and package notices.
