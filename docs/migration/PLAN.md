@@ -18,7 +18,7 @@ dashboard, automatic failover, and cross-account AWS control are not presumed
 phase-one requirements.
 
 Confirmed and proposed choices are tracked in [DECISIONS.md](DECISIONS.md).
-[ASK USER] D12-D15, including review of engineering defaults, must be resolved before
+[ASK USER] D13-D15, including review of engineering defaults, must be resolved before
 marking this plan final.
 
 Success means protocol tests pass, Docker lifecycle/recovery/drain scenarios
@@ -272,12 +272,24 @@ adding any durable asynchronous job queue.
   shrinking max capacity never terminates known busy/unknown runners just to
   force the count down. Configuration can explicitly select Docker builds or
   privileged mode; safe default is neither.
-- [ASK USER, D12] Shutdown/drain policy and scale-set retention must be fixed.
-  Proposed commands: run, validate-config, status, drain, and explicit delete.
-  Delete requires an explicit target and documented active-job behavior.
+- Confirmed shutdown policy (D12): drain and preserve. Stop new acquisitions
+  and provisioning, continue processing/acking lifecycle messages during the
+  configurable drain period, and remove only confirmed terminal resources.
+  At the deadline persist recovery state, close the session with a separate
+  bounded budget, and exit while busy/unknown runners continue independently.
+  Retain scale-set identity; reconcile survivors before acquiring on restart.
+  Reaching the deadline never implies force-stop or deletion. Proposed commands:
+  run, validate-config, status, drain, and explicit delete; destructive commands
+  require an explicit target and documented active-job behavior.
 - Handle SIGTERM as well as interactive cancellation. Separate stopping,
   successful-message acknowledgment, job drain, and cleanup budgets. Do not
   use the cancelled host token for post-success ack/session closure.
+- Separate controller and runner resource lifetimes; deployment teardown must
+  not implicitly remove preserved runners. Docker-host shutdown still stops
+  those runners. Configure Compose's stop grace to exceed drain plus bounded
+  acknowledgment/closure/persistence overhead; its default alone is insufficient
+  for a multi-minute drain. Cleanup of runners that finish while the controller
+  is absent happens on recovery. See [Compose stop grace](https://docs.docker.com/reference/compose-file/services/#stop_grace_period).
 
 ## 9. Operations and distribution
 
@@ -419,6 +431,11 @@ Docker integration exercises lost responses, crash before/after each durable
 write and provider side effect, duplicate/out-of-order events, restart with
 busy/unknown runners, failed starts/removals, orphan cleanup, capacity=0,
 min/max boundaries, both scaling policies, and multiple competing sets.
+For D12, verify both completion during drain and a job outlasting the drain
+timeout: no forced runner stop, stable scale-set identity, bounded controller
+exit, restart adoption, and later terminal-resource cleanup. Verify deployment
+grace permits the configured shutdown sequence and that host teardown is
+documented as outside the runner-preservation guarantee.
 Test bursts at configurable sizes; publish observed limits and avoid long
 sleep-dependent unit tests.
 

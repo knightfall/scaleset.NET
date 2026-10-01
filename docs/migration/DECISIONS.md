@@ -18,20 +18,17 @@ Recorded on 2026-10-02, Australia/Sydney.
 | D09 | NuGet client/listener libraries plus CLI/service and container image | Keep API/protocol packages reusable without Docker or AWS dependencies |
 | D10 | Support both spare-capacity and total-floor scaling policies | Require a named policy in deployment examples; test both formulas |
 | D11 | Execute implementation using GPT-6 Luna subagents at max reasoning | Use `gpt-6-luna`, `reasoning_effort=max`, explicit work packages, and parent integration/review |
+| D12 | Normal shutdown uses A: drain and preserve | Stop new acquisition/provisioning, drain for a configurable period, retain the scale set, and leave unfinished/uncertain runners intact for reconciliation on restart |
 
 ## Decisions currently being asked
 
-1. **D12 [ASK USER] Shutdown and scale-set lifecycle.** Proposed: stop new
-   acquisition, drain busy jobs, retain scale-set identity, and preserve still
-   active resources after a configurable timeout. Destructive deletion is a
-   separate explicit command.
-2. **D13 [ASK USER] Product/deployment defaults.** Proposed: JSON configuration,
+1. **D13 [ASK USER] Product/deployment defaults.** Proposed: JSON configuration,
    environment/CLI overrides, mounted credential files, multiple scale sets,
    Linux x64/arm64 images, Compose, structured logs, health endpoints, optional
    OpenTelemetry/Prometheus, and no dashboard.
-3. **D14 [ASK USER] Phase-two infrastructure format.** C# CDK, Terraform, or
+2. **D14 [ASK USER] Phase-two infrastructure format.** C# CDK, Terraform, or
    CloudFormation YAML. Provider implementations remain C# in every case.
-4. **D15 [ASK USER] Engineering-default review.** Review the concrete defaults
+3. **D15 [ASK USER] Engineering-default review.** Review the concrete defaults
    below: package family, test framework, restart-based configuration changes,
    configurable example timing/capacity values, and initial cloud scope.
 
@@ -66,11 +63,29 @@ They must be reviewed with the user before the plan is marked final.
 
 ## Finalization gate
 
-Resolve D12-D15, including user review of the proposed defaults. Update the plan,
+Resolve D13-D15, including user review of the proposed defaults. Update the plan,
 parity checklist, and concerns consistently; no unresolved `[ASK USER]`
 remains in the final documents. Implementation-only facts, such as exact
 package versions or measured throughput, may remain `[TODO]` with a milestone
 and verification requirement. This branch contains planning documents only.
+
+## Confirmed shutdown contract (D12)
+
+Normal stop/restart/upgrade stops new job acquisition and provisioning, allows
+existing jobs to finish within the configured drain period, and cleans up
+resources whose terminal state is confirmed. At the deadline the controller
+records recovery state, closes its session within a separate bounded budget,
+and exits without force-stopping busy or uncertain runners. Scale-set identity
+is retained. The next controller start discovers those owned resources before
+resuming acquisition. No job resumption is implied if a runner or its host
+was itself stopped.
+
+Runner resources must outlive the controller process/container. This policy
+assumes their Docker host/cloud compute remains available. Finished resources
+may wait for cleanup until the controller restarts. Deployment stop grace
+must exceed drain plus bounded acknowledgment/closure/persistence overhead.
+Force-stop and permanent scale-set deletion are separate explicit operator
+actions; reaching the normal drain timeout must never trigger either.
 
 ## Intent versus source reality
 

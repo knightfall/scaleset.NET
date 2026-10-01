@@ -9,7 +9,7 @@ not a comprehensive security audit or verified production defect inventory.
 | Priority | Concern and evidence | Migration response |
 |---|---|---|
 | High | Example loses runner maps at restart; `runnerState` | Discover owned resources and reconcile before acquiring/provisioning |
-| High | Example force-removes busy runners and deletes scale set on exit; `shutdown`, `run` | Define explicit drain and retained-identity policy |
+| High | Example force-removes busy runners and deletes scale set on exit; `shutdown`, `run` | Confirmed D12: bounded drain, preserve unfinished runners and scale-set identity, reconcile on restart |
 | High | Replay is possible; unknown runner events panic in example maps | Make lifecycle transitions and cleanup idempotent |
 | High | Completion drops mapping before container removal succeeds | Retain pending cleanup state until absence is confirmed |
 | High | Container creation can succeed before start fails; tracking happens after start | Persist operation intent and discover partial resources |

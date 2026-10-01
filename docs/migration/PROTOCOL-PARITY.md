@@ -120,6 +120,12 @@ telemetry. These are application changes, not invented changes to GitHub's
 HTTP/message semantics. Retry safety and bounded cleanup are documented
 transport-policy improvements and require explicit fixtures/fault tests.
 
+Confirmed D12 adds drain-and-preserve shutdown: stop acquisition/provisioning,
+allow a bounded drain, then exit without stopping busy/unknown runners or
+deleting the scale set. Session closure and post-success acknowledgment remain
+bounded and independent of host cancellation. Recovery adopts surviving owned
+resources; preservation does not guarantee survival of Docker-host shutdown.
+
 ## Evidence
 
 - [Client](https://github.com/actions/scaleset/blob/e6daac702355cdb5b880b4fbdcf6d85dcd9e48e5/client.go)
