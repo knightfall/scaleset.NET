@@ -23,6 +23,7 @@ Recorded on 2026-10-02, Australia/Sydney.
 | D17 | Tracing and metrics are mandatory and follow OpenTelemetry best practices | Libraries emit ActivitySource/Meter instrumentation; the executable registers SDK providers and OTLP export with correlation, semantic conventions, bounded cardinality, and verification |
 | D18 | Environment-variable configuration first; Parameter Store and Secrets Manager focus in phase two | Replace proposed JSON/CLI configuration providers with environment binding; Parameter Store supplies settings and Secrets Manager supplies credentials in AWS |
 | D19 | Phase-two runtime providers with caching and credential refresh; operational changes remain restart-based initially | Load AWS sources in the application, cache complete validated settings, refresh credential generations safely, and apply operational changes on restart |
+| D20 | Keep telemetry export simple: a configured OTLP endpoint | Export logs, traces, and metrics to the supplied endpoint; backend selection and Collector deployment stay outside the product scope |
 
 ## Decisions currently being asked
 
@@ -34,8 +35,6 @@ Recorded on 2026-10-02, Australia/Sydney.
 3. **D15 [ASK USER] Engineering-default review.** Review the concrete defaults
    below: package family, test framework, restart-based configuration changes,
    configurable example timing/capacity values, and initial cloud scope.
-4. **D20 [ASK USER] Telemetry topology.** OpenTelemetry Collector with
-   configurable downstream destinations, or direct OTLP backend export?
 
 ## Proposed engineering defaults
 
@@ -70,7 +69,7 @@ They must be reviewed with the user before the plan is marked final.
 
 ## Finalization gate
 
-Resolve D13-D15 and D20, including review of the proposed defaults. Update the plan,
+Resolve D13-D15, including review of the proposed defaults. Update the plan,
 parity checklist, and concerns consistently; no unresolved `[ASK USER]`
 remains in the final documents. Implementation-only facts, such as exact
 package versions or measured throughput, may remain `[TODO]` with a milestone
@@ -94,7 +93,7 @@ must exceed drain plus bounded acknowledgment/closure/persistence/telemetry-flus
 Force-stop and permanent scale-set deletion are separate explicit operator
 actions; reaching the normal drain timeout must never trigger either.
 
-## Confirmed observability/configuration contract (D16-D19)
+## Confirmed observability/configuration contract (D16-D20)
 
 See [OBSERVABILITY-CONFIGURATION.md](OBSERVABILITY-CONFIGURATION.md) for the
 log pipeline, independent SDK tracing/metrics pipeline, environment schema,
@@ -102,6 +101,9 @@ AWS source boundaries, instrumentation inventory, and acceptance tests.
 The executable must enable and export traces and metrics. Library consumers
 own their SDK/exporter composition. ILogger remains the public logging
 abstraction; Serilog is configured by the executable.
+All signals use the configured OTLP destination. Require a valid endpoint
+and honor the selected protocol; operators supply the receiving service.
+No backend-specific deployment or Collector provisioning is required.
 
 ## Intent versus source reality
 

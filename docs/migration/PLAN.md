@@ -18,10 +18,11 @@ dashboard, automatic failover, and cross-account AWS control are not presumed
 phase-one requirements.
 
 Confirmed and proposed choices are tracked in [DECISIONS.md](DECISIONS.md).
-[ASK USER] D13-D15 and D20, including review of engineering defaults, must be
-resolved before marking this plan final. D16-D19 require ILogger/Serilog OTLP
+[ASK USER] D13-D15, including review of engineering defaults, must be
+resolved before marking this plan final. D16-D20 require ILogger/Serilog OTLP
 logging, mandatory OpenTelemetry traces and metrics, environment configuration
-in phase one, and runtime Parameter Store/Secrets Manager providers in phase two.
+in phase one, runtime Parameter Store/Secrets Manager providers in phase two,
+and a configured OTLP endpoint without choosing/provisioning a backend.
 
 Success means protocol tests pass, Docker lifecycle/recovery/drain scenarios
 pass, a real workflow runs through the autoscaler in a dedicated test scope,
@@ -322,7 +323,10 @@ OpenTelemetry tracing/metrics SDK providers and exporters; do not register a
 duplicate OTel ILogger exporter or export Activity-derived spans through both
 pipelines. Resources and trace/span correlation agree across all three signals.
 Public libraries emit ActivitySource/Meter and accept ILogger without initializing
-the SDK. [ASK USER, D20] Select Collector versus direct-backend topology.
+the SDK. Confirmed D20: export all three signals to the configured OTLP endpoint.
+The receiving service is operator-supplied; backend selection and Collector
+deployment are outside the product scope. Validate the endpoint/protocol and
+consistent SDK/sink settings, keeping signal-specific overrides explicit.
 
 Tracing and metrics are mandatory. Instrument HTTP/authentication, queue
 operations, scaling, provider lifecycle, recovery, and drain; standard HTTP/

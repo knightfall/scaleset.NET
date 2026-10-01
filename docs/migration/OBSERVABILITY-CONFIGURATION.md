@@ -1,7 +1,7 @@
 # Observability and Configuration Design
 
-Status: requirements confirmed in D16-D19; technical design, not implemented
-runtime behavior. D13/D20 and general engineering review remain open. This
+Status: requirements confirmed in D16-D20; technical design, not implemented
+runtime behavior. D13 and general engineering review remain open. This
 supplements [PLAN.md](PLAN.md) and [DECISIONS.md](DECISIONS.md).
 
 ## 1. Required pipelines and ownership
@@ -12,16 +12,16 @@ flowchart LR
     S --> LS[Serilog OpenTelemetry sink]
     A[ActivitySource and HTTP instrumentation] --> T[OpenTelemetry TracerProvider]
     M[Meter and runtime instrumentation] --> MP[OpenTelemetry MeterProvider]
-    LS --> E[OTLP destination]
+    LS --> E[Configured OTLP endpoint]
     T --> E
     MP --> E
-    E --> B[Monitoring backend]
 ```
 
-The destination is a Collector or backend, pending D20. Logs, traces, and
-metrics are required in the autoscaler. Invalid exporter configuration fails
-startup. A temporary destination outage must not interrupt jobs or create
-an unbounded queue.
+Confirmed D20: send all three signals to the configured OTLP endpoint supplied
+by the operator. Logs, traces, and metrics are required in the autoscaler.
+Require a valid endpoint and supported protocol at startup. Backend selection
+and Collector deployment are outside product scope. A temporary destination
+outage must not interrupt jobs or create an unbounded queue.
 
 Reusable packages accept `Microsoft.Extensions.Logging.ILogger<T>` and emit
 `ActivitySource`/`Meter` signals; they do not initialize SDK providers or
@@ -136,10 +136,10 @@ SCALESET__CREDENTIALS__GITHUBAPP__PRIVATEKEYPEM=<secret-injected-at-runtime>
 OTEL_SERVICE_NAME=scaleset-autoscaler
 OTEL_RESOURCE_ATTRIBUTES=service.namespace=scaleset,deployment.environment.name=development
 OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
-OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318
+OTEL_EXPORTER_OTLP_ENDPOINT=https://telemetry.example.com
 ```
 
-The Collector hostname is illustrative pending D20. Standard `OTEL_*` settings
+The example hostname is a placeholder for the configured receiver. Standard `OTEL_*` settings
 configure endpoints/protocols, resource identity, headers, and sampling where
 supported. Explicitly bind/adapt any unsupported settings; verify effective
 SDK and sink settings instead of assuming identical environment support.
