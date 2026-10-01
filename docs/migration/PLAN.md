@@ -1,6 +1,7 @@
 # Go to C# Migration Plan
 
-Status: **draft; do not begin implementation until planning decisions are resolved**.
+Status: **phase-one migration plan finalized; user decisions resolved**.
+Detailed AWS infrastructure planning remains deferred until later.
 Date: 2026-10-02. Branch: `codex/go-to-csharp-migration-plan`.
 Source baseline: [actions/scaleset at e6daac702355cdb5b880b4fbdcf6d85dcd9e48e5](https://github.com/actions/scaleset/tree/e6daac702355cdb5b880b4fbdcf6d85dcd9e48e5).
 Target starting commit: `ab0c4cf` (README, Apache-2.0 license, gitignore;
@@ -17,9 +18,9 @@ authentication. GHES, enterprise scope, concrete remote JWT signers, a web
 dashboard, automatic failover, and cross-account AWS control are not presumed
 phase-one requirements.
 
-Confirmed and proposed choices are tracked in [DECISIONS.md](DECISIONS.md).
-[ASK USER] D15, the engineering-default review, must be
-resolved before marking this plan final. D16-D20 require ILogger/Serilog OTLP
+Confirmed choices are tracked in [DECISIONS.md](DECISIONS.md). D15 accepts the
+package/test/default settings; D21 requires Roslynator for C# code quality.
+D16-D20 require ILogger/Serilog OTLP
 logging, mandatory OpenTelemetry traces and metrics, environment configuration
 in phase one, runtime Parameter Store/Secrets Manager providers in phase two,
 and a configured OTLP endpoint without choosing/provisioning a backend.
@@ -76,9 +77,9 @@ a planned/tested acceptance requirement, not a runtime result established by
 this documentation branch. Evidence: upstream example README/main/scaler,
 common client, config/JWT source, and the saved source tree.
 
-## 3. Proposed solution layout and dependency rules
+## 3. Solution layout and dependency rules
 
-Names below are proposed until the final review; none is an existing project.
+Project names below are accepted; none is an existing implementation project.
 
 ```text
 scaleset.NET/
@@ -124,6 +125,33 @@ CancellationToken, immutable session snapshots, validated options, and
 TimeProvider for clocks/delays. Do not use Task.Run to wrap synchronous HTTP.
 Client factories validate local config without network access; opening a
 message session is explicitly asynchronous.
+
+### Roslynator code-quality requirements (D21)
+
+Include `Roslynator.Analyzers` in all handwritten production and test C#
+projects from M1. Manage its version centrally and set `PrivateAssets=all`
+so published libraries do not impose analyzer dependencies on consumers.
+The [current package](https://www.nuget.org/packages/Roslynator.Analyzers) is
+5.0.0 as inspected on 2026-10-02; verify compiler compatibility with the pinned
+.NET 10 SDK in M1 before selecting the exact dependency version.
+
+Use `.editorconfig` as the shared rule/options/severity authority. Enable
+applicable quality rules, supply required options, and document generated-code
+exclusions. CI builds treat enabled quality warnings as errors; style choices
+are explicitly configured to avoid conflicting policies. Suppressions must
+be narrow and explain the public/wire contract or generated-code reason.
+Do not mass-suppress diagnostics or automatically fix code in ways that change
+API/protocol behavior. Coordinate formatting with built-in .NET analyzers.
+
+NuGet analyzers provide repeatable local/build/CI diagnostics; an IDE extension
+is not a CI prerequisite. Ordinary product code does not need the Roslyn
+API-specific analyzer package. No global CLI installation is required.
+Verify analyzer loading and demonstrate that an enabled diagnostic fails the
+quality gate during M1 setup, then remove the temporary probe and record the
+enforcement evidence. All delegated implementation work packages must pass
+the same quality gate alongside their behavioral checks.
+[Roslynator tools](https://github.com/dotnet/roslynator),
+[configuration](https://josefpihrt.github.io/docs/roslynator/configuration/).
 
 ## 4. Component migration map
 
@@ -338,8 +366,7 @@ adding any durable asynchronous job queue.
 
 ## 9. Operations and distribution
 
-[ASK USER, D15] Finalize package identity and engineering defaults.
-Proposed artifacts: Client/Listener/Hosting NuGet packages, provider assembly,
+Accepted artifacts: Client/Listener/Hosting NuGet packages, provider assembly,
 CLI binary, versioned multi-architecture controller image, Compose example,
 validated example environment configuration, recovery runbooks, and package notices.
 
@@ -367,7 +394,8 @@ connectivity should be visible without causing a restart loop that destroys
 recovery context. No management mutation API or dashboard is included unless
 requested; health/metrics listeners should be restricted to intended networks.
 
-CI: Linux protocol tests; Docker integration tests; library portability tests
+CI: Roslynator/build diagnostics, Linux protocol tests, Docker integration tests,
+library portability tests
 on macOS/Windows where feasible without claiming their runner backends are
 supported; release packaging; image scans/signing/provenance appropriate to
 the publishing destination; opt-in live canaries isolated from ordinary PRs.
@@ -438,9 +466,9 @@ diagnostics appropriate to the chosen AMI. [TODO, M7] Validate the bootstrap
 design and instance-token idempotency against current EC2 documentation.
 
 Terminate only owned resources with known terminal/drained state, subject to
-an explicit configured forced-cleanup policy. On-Demand is the initial cloud
-baseline; Spot interruption/requeue behavior is a later capability with its
-own acceptance tests. Direct EC2 provider lifecycle is distinct from managing
+an explicit configured forced-cleanup policy. On-Demand/Spot selection and
+interruption handling are decisions for the later AWS design, with their own
+acceptance tests. Direct EC2 provider lifecycle is distinct from managing
 EC2 container instances underneath ECS.
 
 ## 12. Deferred AWS infrastructure planning
@@ -464,11 +492,11 @@ design; they do not start automatically when the Docker release finishes.
 | Milestone | Deliverables | Dependencies | Gate |
 |---|---|---|---|
 | M0 Decisions/baseline | Final plan, pinned source, parity matrix, attribution inventory | User decisions | No unresolved product decision; source evidence verified |
-| M1 Solution/contracts | .NET 10 layout, API/tests, env schema, ILogger/Serilog and OTel providers | M0 | Build/dependency/API review; all three signals reach a test OTLP receiver |
+| M1 Solution/contracts | .NET 10 layout, API/tests, env schema, Roslynator, ILogger/Serilog and OTel providers | M0 | Build/dependency/API review; analyzer loading/severity enforcement verified; all three signals reach a test OTLP receiver |
 | M2 Wire/transport/auth | DTOs, exceptions, auth cache, HTTP, admin/session APIs and telemetry | M1 | Parity, concurrency/TLS/cancellation and correlated/redacted HTTP telemetry tests pass |
 | M3 Listener | Initial/empty/real callbacks, dynamic capacity, acquire interface, ack sequencing | M2 | No ack before success; cancellation-safe bounded ack; replay/refresh tests pass |
 | M4 Docker lifecycle | Provider, policies, journal, discovery, idempotent cleanup, aggregate budgets | M3 | Restart/partial-create/duplicate-event/container-exit/drain scenarios pass |
-| M5 Docker release | CLI/service, env/docs, required telemetry, Compose, NuGet/image CI | M4 | Repo+org canaries, config/install/recovery runbooks, correlation/metrics/export outage/shutdown tests |
+| M5 Docker release | CLI/service, env/docs, telemetry, Compose, analyzer/package/image CI | M4 | Roslynator gate passes; repo+org canaries, config/install/recovery, correlation/metrics/export outage/shutdown tests |
 | M6 ECS provider | Future task lifecycle/config/CDK TypeScript infra/tests | M5 and later AWS design | Later planning confirms scope/gates; AWS/GitHub canary, recovery/drain, credential rotation and telemetry |
 | M7 EC2 provider | Future instance/AMI/config/CDK TypeScript infra/tests | M5 and later AWS/bootstrap design | Later planning confirms scope/gates; canary, bootstrap/recovery, source/rotation and telemetry tests |
 | M8 Release/maintenance | Supported environment matrix, upgrade checklist, published artifacts | Relevant release gates | Documented evidence for each advertised target/provider; recoverable upgrade |

@@ -1,7 +1,7 @@
 # Observability and Configuration Design
 
-Status: requirements confirmed in D16-D20; technical design, not implemented
-runtime behavior. General engineering review remains open. This
+Status: phase-one design finalized; requirements confirmed in D16-D20,
+engineering defaults accepted in D15. This is not implemented runtime behavior. This
 supplements [PLAN.md](PLAN.md) and [DECISIONS.md](DECISIONS.md).
 
 ## 1. Required pipelines and ownership

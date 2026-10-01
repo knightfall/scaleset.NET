@@ -80,7 +80,7 @@ OpenTelemetry, and AWS documentation linked in
 source guidance only; no SDK/sink export or AWS configuration provider has
 been implemented or exercised in this branch.
 
-Completed during draft review:
+Completed during final document review:
 
 - All local Markdown links resolve.
 - Exactly the seven required codebase guides exist and each has its required
@@ -89,7 +89,12 @@ Completed during draft review:
 - Target branch matches the planning branch; `git diff --check` passes.
 - Every public network operation in `Client` and `MessageSessionClient` is
   represented in the protocol inventory.
+- All 21 decision IDs are recorded and no unresolved user-question markers
+  remain. D14 explicitly defers AWS infrastructure planning.
+- Roslynator package/configuration guidance was checked against its primary
+  repository, docs and NuGet page, linked in the plan. Analyzer compatibility,
+  installation and enforcement remain implementation milestone M1 work.
 
-[TODO] Repeat document consistency/decision-marker checks after the remaining
-user decisions and final review are incorporated. No claim of successful
-upstream tests or implemented C# follows from documentation checks.
+Document consistency and decision-marker checks passed after incorporating
+the accepted defaults and Roslynator. No claim of successful upstream tests,
+analyzer execution or implemented C# follows from these documentation checks.

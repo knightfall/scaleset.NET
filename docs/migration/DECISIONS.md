@@ -1,6 +1,7 @@
 # Migration Decisions
 
-Status: **draft; final operational decisions pending**.
+Status: **phase-one decisions finalized**. Detailed AWS infrastructure planning
+is deferred under D14.
 Recorded on 2026-10-02, Australia/Sydney.
 
 ## Confirmed by the user
@@ -21,22 +22,24 @@ Recorded on 2026-10-02, Australia/Sydney.
 | D12 | Normal shutdown uses A: drain and preserve | Stop new acquisition/provisioning, drain for a configurable period, retain the scale set, and leave unfinished/uncertain runners intact for reconciliation on restart |
 | D13 | Compose, Linux x64/arm64 images, multiple scale sets, health endpoints, and no dashboard | Product deployment/operations features extend the upstream Docker demonstration while preserving supported GitHub protocol contracts |
 | D14 | AWS infrastructure uses CDK v2 in TypeScript; detailed infrastructure planning is deferred until later | Reserve this direction for phase two; do not finalize cloud topology/stacks/IAM/deployment design in the phase-one plan |
+| D15 | Accept the package family, xUnit and configurable starting limits/timers | Use the accepted engineering defaults below; package availability/performance still need release verification |
 | D16 | Structured logging uses Microsoft ILogger with Serilog and its OpenTelemetry export sink | Code logs through ILogger<T>; the executable wires Serilog.Extensions.Hosting and Serilog.Sinks.OpenTelemetry |
 | D17 | Tracing and metrics are mandatory and follow OpenTelemetry best practices | Libraries emit ActivitySource/Meter instrumentation; the executable registers SDK providers and OTLP export with correlation, semantic conventions, bounded cardinality, and verification |
 | D18 | Environment-variable configuration first; Parameter Store and Secrets Manager focus in phase two | Replace proposed JSON/CLI configuration providers with environment binding; Parameter Store supplies settings and Secrets Manager supplies credentials in AWS |
 | D19 | Phase-two runtime providers with caching and credential refresh; operational changes remain restart-based initially | Load AWS sources in the application, cache complete validated settings, refresh credential generations safely, and apply operational changes on restart |
 | D20 | Keep telemetry export simple: a configured OTLP endpoint | Export logs, traces, and metrics to the supplied endpoint; backend selection and Collector deployment stay outside the product scope |
+| D21 | Include Roslynator for C# code quality | Reference Roslynator.Analyzers in production/test builds, configure shared rule options/severities, and enforce selected diagnostics in CI |
 
-## Decisions currently being asked
+## Decision resolution
 
-1. **D15 [ASK USER] Engineering-default review.** Review the concrete defaults
-   below: package family, test framework, restart-based configuration changes,
-   and configurable example timing/capacity values.
+All phase-one intent questions have been answered. There are no outstanding
+user decisions blocking this plan. Future AWS infrastructure details remain
+intentionally deferred rather than inferred.
 
-## Proposed engineering defaults
+## Accepted engineering defaults
 
-These are concrete proposals, not statements about existing implementation.
-They must be reviewed with the user before the plan is marked final.
+These are accepted design requirements, not existing implementation or measured
+runtime results.
 
 - Public package/namespace family: `ScaleSet.Client`, `ScaleSet.Listener`,
   `ScaleSet.Hosting`; executable `ScaleSet.Autoscaler`. Provider assemblies:
@@ -45,14 +48,17 @@ They must be reviewed with the user before the plan is marked final.
 - xUnit tests with local HTTP fixtures and deterministic clocks/fake providers.
   Resolve exact compatible package versions during implementation, not from
   speculative version pins in this plan.
+- Roslynator.Analyzers is a build-time dependency with private package assets.
+  Configure repository-wide analyzer rules/options in .editorconfig, include
+  it in production/test builds, and enforce selected diagnostics in CI.
 - Configuration changes require restart in v1. Runtime capacity setters remain
   available through the listener library; hot reload is a later feature.
   Confirmed D19 adds runtime credential refresh in phase two without hot-applying
   operational setting changes.
-- Defaults proposed for examples: zero minimum, ten maximum runners per set,
+- Accepted starting defaults: zero minimum, ten maximum runners per set,
   explicit `SpareCapacity` policy, two concurrent creations, 30-second inventory
   reconciliation, 15-minute startup deadline, five-minute shutdown drain, and
-  a 60-second bounded acknowledgment/cleanup operation. All are configurable;
+  a 60-second control-operation budget including acknowledgment/cleanup. All are configurable;
   these numbers are design starting points, not measured performance targets.
 - Docker workloads are trusted by default. Privileged mode and Docker daemon
   exposure require explicit resource-profile configuration. No claim of a
@@ -64,13 +70,13 @@ They must be reviewed with the user before the plan is marked final.
   and cloud rollout details are deferred to later planning (D14). ECS/EC2
   providers and runtime Parameter Store/Secrets Manager direction remain confirmed.
 
-## Finalization gate
+## Finalization result
 
-Resolve D15, including review of the proposed defaults. Update the plan,
-parity checklist, and concerns consistently; no unresolved `[ASK USER]`
-remains in the final documents. Implementation-only facts, such as exact
-package versions or measured throughput, may remain `[TODO]` with a milestone
-and verification requirement. This branch contains planning documents only.
+All user decisions, including D15 and D21, are incorporated. The plan,
+parity checklist, concerns and operational design are consistent, with no
+unresolved user questions. Implementation-only facts such as verified package
+compatibility or throughput remain milestone-owned `[TODO]` items. This branch
+contains planning documents only; no C# runtime behavior is verified yet.
 Detailed AWS infrastructure planning is intentionally deferred and does not
 block finalizing the phase-one migration plan. It is a prerequisite to the
 future cloud implementation milestones.

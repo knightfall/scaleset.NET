@@ -54,11 +54,13 @@ Recent commits changed listener callback responsibilities and added external
 JWT signing. Freeze wire fixtures and concurrency/ack contracts before
 restructuring; compare future upstream commits against the pinned baseline.
 
-## 6) `[ASK USER]` Questions
+## 6) Intent Questions and Resolutions
 
-All product decisions and remaining questions are centralized in
-[DECISIONS.md](../migration/DECISIONS.md). An unresolved item there blocks
-finalizing the affected part of the migration plan.
+All phase-one intent questions are resolved in
+[DECISIONS.md](../migration/DECISIONS.md). The finalized plan records the
+production-product additions, narrower initial GitHub support, drain-and-preserve
+shutdown, required telemetry, configuration, deployment defaults, and Roslynator.
+Detailed AWS infrastructure planning remains intentionally deferred.
 
 ## 7) Evidence
 

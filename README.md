@@ -10,7 +10,7 @@ separate ECS-task and direct EC2-instance providers.
 ## Planning documents
 
 - [Migration plan](docs/migration/PLAN.md)
-- [Decisions and open questions](docs/migration/DECISIONS.md)
+- [Confirmed decisions](docs/migration/DECISIONS.md)
 - [Protocol parity checklist](docs/migration/PROTOCOL-PARITY.md)
 - [Observability and configuration design](docs/migration/OBSERVABILITY-CONFIGURATION.md)
 - [Analysis and validation evidence](docs/migration/VALIDATION.md)
@@ -21,6 +21,7 @@ separate ECS-task and direct EC2-instance providers.
   [testing](docs/codebase/TESTING.md), and
   [concerns](docs/codebase/CONCERNS.md)
 
-Planning status: **draft; user decisions are being collected**. There is no
-C# implementation yet. The analysis baseline is
+Planning status: **phase-one migration plan finalized**. Roslynator is required
+for C# code quality. Detailed AWS infrastructure planning is deferred.
+There is no C# implementation yet. The analysis baseline is
 [`actions/scaleset` at e6daac7](https://github.com/actions/scaleset/tree/e6daac702355cdb5b880b4fbdcf6d85dcd9e48e5).
