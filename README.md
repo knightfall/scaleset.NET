@@ -23,11 +23,16 @@ separate ECS-task and direct EC2-instance providers.
 
 Implementation status: **foundation merged; GitHub client milestone implemented
 and locally verified**. Wire contracts, a serial listener, validated environment
-settings, scaling policies and OTLP composition are implemented. The client now
-supports App/PAT authentication, administration APIs and message sessions, with
-protocol, concurrency, cancellation and redaction tests. See the
-[client milestone and verification table](docs/implementation/CLIENT.md).
-Docker provisioning, controller recovery and deployment remain subsequent work.
+settings, scaling policies, OTLP composition, a Docker Engine provider,
+non-secret operation journal and shared host-capacity primitives are implemented.
+The client supports App/PAT authentication, administration APIs and message
+sessions. The provider creates, inspects and discovers owned containers without
+forcing runners to stop when its client is disposed. See the
+[client evidence](docs/implementation/CLIENT.md) and
+[Docker provider evidence](docs/implementation/DOCKER-PROVIDER.md). The
+autoscaler orchestration loop, drain/shutdown integration, health endpoints,
+Compose deployment, release images and a live GitHub workflow remain subsequent
+work.
 Detailed AWS infrastructure planning is deferred. The analysis baseline is
 [`actions/scaleset` at e6daac7](https://github.com/actions/scaleset/tree/e6daac702355cdb5b880b4fbdcf6d85dcd9e48e5).
 

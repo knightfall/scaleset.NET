@@ -84,7 +84,11 @@ public sealed partial class OtlpTelemetryIntegrationTests
             request => OtlpProtobufReader.ReadLogRecords(request.Body).Any(static record =>
                 record.Body?.StartsWith("telemetry-acceptance log", StringComparison.Ordinal) == true),
             TimeSpan.FromSeconds(10));
-        var tracesRequest = await receiver.WaitForRequestAsync("/otlp/foundation/v1/traces", TimeSpan.FromSeconds(10));
+        var tracesRequest = await receiver.WaitForMatchingRequestAsync(
+            "/otlp/foundation/v1/traces",
+            request => OtlpProtobufReader.ReadTraceSpans(request.Body).Any(span =>
+                span.Name == "telemetry.acceptance" && span.TraceId == expectedTraceId),
+            TimeSpan.FromSeconds(10));
         var metricsRequest = await receiver.WaitForMatchingRequestAsync(
             "/otlp/foundation/v1/metrics",
             request => OtlpProtobufReader.ReadMetricNames(request.Body).Contains("scaleset.operations", StringComparer.Ordinal),
@@ -124,7 +128,7 @@ public sealed partial class OtlpTelemetryIntegrationTests
         Assert.DoesNotContain("exception-secret-sentinel", serializedLogs, StringComparison.Ordinal);
         Assert.DoesNotContain("export-header-secret", serializedLogs, StringComparison.Ordinal);
         Assert.Equal(1, logs.Count(static record => record.Body?.StartsWith("telemetry-acceptance log", StringComparison.Ordinal) == true));
-        Assert.Single(spans);
+        Assert.Equal(1, spans.Count(static span => span.Name == "telemetry.acceptance"));
     }
 
     private static void AssertResourceMatches(

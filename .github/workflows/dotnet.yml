@@ -28,6 +28,8 @@ jobs:
         run: dotnet build ScaleSet.slnx --configuration Release --no-restore
       - name: Test solution discovery and behavior
         run: dotnet test --solution ScaleSet.slnx --configuration Release --no-build
+        env:
+          SCALESET_DOCKER_INTEGRATION: ${{ runner.os == 'Linux' && '1' || '0' }}
       - name: Package libraries
         if: runner.os == 'Linux'
         run: dotnet pack ScaleSet.slnx --configuration Release --no-build --output artifacts/packages
