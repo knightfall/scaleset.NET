@@ -294,7 +294,9 @@ public sealed partial class ScaleSetClient
                     "ScaleSet HTTP request timed out.",
                     statusCode: null,
                     method: method.Method,
-                    safeUri: ScaleSetClientDiagnostics.CreateSafeUri(uri).AbsoluteUri);
+                    safeUri: ScaleSetClientDiagnostics.CreateSafeUri(
+                        uri,
+                        redactPath: dependency == "queue").AbsoluteUri);
                 LogFailure(exception, uri);
                 throw exception;
             }
@@ -323,7 +325,9 @@ public sealed partial class ScaleSetClient
                     "ScaleSet HTTP transport failed.",
                     statusCode: null,
                     method: method.Method,
-                    safeUri: ScaleSetClientDiagnostics.CreateSafeUri(uri).AbsoluteUri);
+                    safeUri: ScaleSetClientDiagnostics.CreateSafeUri(
+                        uri,
+                        redactPath: dependency == "queue").AbsoluteUri);
                 LogFailure(exception, uri);
                 throw exception;
             }
@@ -368,6 +372,7 @@ public sealed partial class ScaleSetClient
                             [],
                             truncated: false,
                             queueTokenOnUnauthorized: false,
+                            redactPath: dependency == "queue",
                             knownSecrets: knownSecrets,
                             message: "ScaleSet response body read timed out.");
                         LogFailure(wrapped, uri);
@@ -384,6 +389,7 @@ public sealed partial class ScaleSetClient
                             [],
                             truncated: false,
                             queueTokenOnUnauthorized: false,
+                            redactPath: dependency == "queue",
                             knownSecrets: knownSecrets,
                             message: "ScaleSet response body could not be read.");
                         LogFailure(wrapped, uri);
@@ -409,6 +415,7 @@ public sealed partial class ScaleSetClient
                             responseBody,
                             truncated: false,
                             queueTokenOnUnauthorized: false,
+                            redactPath: dependency == "queue",
                             knownSecrets: knownSecrets,
                             message: "ScaleSet response body could not be decoded.");
                         LogFailure(wrapped, uri);
@@ -468,6 +475,7 @@ public sealed partial class ScaleSetClient
                         [],
                         truncated: false,
                         queueTokenOnUnauthorized: queueTokenOnUnauthorized,
+                        redactPath: dependency == "queue",
                         knownSecrets: knownSecrets,
                         message: "ScaleSet error response body read timed out.");
                     LogFailure(wrapped, uri);
@@ -482,6 +490,7 @@ public sealed partial class ScaleSetClient
                         [],
                         truncated: false,
                         queueTokenOnUnauthorized: queueTokenOnUnauthorized,
+                        redactPath: dependency == "queue",
                         knownSecrets: knownSecrets,
                         message: "ScaleSet error response body could not be read.");
                     LogFailure(wrapped, uri);
@@ -500,8 +509,9 @@ public sealed partial class ScaleSetClient
                     uri,
                     boundedBody.Body,
                     boundedBody.Truncated,
-                    queueTokenOnUnauthorized,
-                    knownSecrets);
+                    queueTokenOnUnauthorized: queueTokenOnUnauthorized,
+                    redactPath: dependency == "queue",
+                    knownSecrets: knownSecrets);
                 LogFailure(failure, uri);
                 throw failure;
             }
@@ -576,6 +586,7 @@ public sealed partial class ScaleSetClient
         ReadOnlySpan<byte> body,
         bool truncated,
         bool queueTokenOnUnauthorized,
+        bool redactPath,
         IReadOnlyCollection<string> knownSecrets,
         string? message = null)
     {
@@ -583,7 +594,7 @@ public sealed partial class ScaleSetClient
         var domainError = queueTokenOnUnauthorized && response.StatusCode == HttpStatusCode.Unauthorized
             ? ScaleSetDomainError.MessageQueueTokenExpired
             : ScaleSetClientDiagnostics.ParseDomainError(body);
-        var safeUri = ScaleSetClientDiagnostics.CreateSafeUri(uri, knownSecrets).AbsoluteUri;
+        var safeUri = ScaleSetClientDiagnostics.CreateSafeUri(uri, knownSecrets, redactPath).AbsoluteUri;
         var activityId = ScaleSetClientDiagnostics.CorrelationHeader(response, "ActivityId", knownSecrets);
         var githubRequestId = ScaleSetClientDiagnostics.CorrelationHeader(response, "X-GitHub-Request-Id", knownSecrets);
         var bodyPreview = ScaleSetClientDiagnostics.CreateBodyPreview(body, truncated, knownSecrets);

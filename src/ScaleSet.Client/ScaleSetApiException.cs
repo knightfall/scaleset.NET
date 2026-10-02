@@ -80,7 +80,7 @@ public sealed class ScaleSetApiException : Exception
     /// <summary>HTTP method associated with the request failure.</summary>
     public string? Method { get; }
 
-    /// <summary>Request URI with query and fragment removed.</summary>
+    /// <summary>Request URI with userinfo, query, and fragment removed; queue request paths and known secret values are redacted.</summary>
     public string? SafeUri { get; }
 
     /// <summary>Actions activity correlation identifier, when supplied.</summary>
