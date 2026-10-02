@@ -1,7 +1,10 @@
 # Protocol Parity Checklist
 
 Baseline: [actions/scaleset, e6daac702355cdb5b880b4fbdcf6d85dcd9e48e5](https://github.com/actions/scaleset/tree/e6daac702355cdb5b880b4fbdcf6d85dcd9e48e5).
-Status: planning checklist; no C# row is implemented or verified yet.
+Status: the phase-one C# client and listener inventory is implemented and verified
+with deterministic wire/fake-handler tests. See the
+[client milestone evidence](../implementation/CLIENT.md). Live GitHub workflow
+and Docker lifecycle validation remain subsequent work.
 
 ## URL and credential domains
 

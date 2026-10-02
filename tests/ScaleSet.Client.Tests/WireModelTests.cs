@@ -107,6 +107,21 @@ public sealed class WireModelTests
     }
 
     [Fact]
+    public void DiagnosticToStringRedactsCredentialBearingQueueUrlWithoutChangingWireJson()
+    {
+        const string queueUrl = "https://queue.example/path-secret?access_token=url-token-secret";
+        var session = new RunnerScaleSetSession { MessageQueueUrl = queueUrl };
+
+        string diagnostic = session.ToString();
+
+        Assert.Contains("MessageQueueUrl = [REDACTED]", diagnostic, StringComparison.Ordinal);
+        Assert.DoesNotContain("path-secret", diagnostic, StringComparison.Ordinal);
+        Assert.DoesNotContain("url-token-secret", diagnostic, StringComparison.Ordinal);
+        using var wire = JsonDocument.Parse(ScaleSetJson.Serialize(session));
+        Assert.Equal(queueUrl, wire.RootElement.GetProperty("messageQueueUrl").GetString());
+    }
+
+    [Fact]
     public void DiagnosticToStringRedactsQueueTokenAndEncodedJitConfig()
     {
         const string queueSecret = "queue-token-sentinel";

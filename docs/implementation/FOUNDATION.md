@@ -1,5 +1,9 @@
 # Phase-one foundation
 
+The foundation was merged in PR #2. Subsequent GitHub transport/authentication
+and session work is recorded in [CLIENT.md](CLIENT.md); the evidence below
+records the original foundation milestone.
+
 Started after planning PR #1 merged into main at
 `30017791ad8a898ca06d5d7fd27a4405dc8a01f0`. Implementation branch:
 `codex/phase-one-foundation`.
