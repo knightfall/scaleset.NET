@@ -301,6 +301,7 @@ public sealed class ScaleSetClientTransportTests
     [Fact]
     public async Task QueueUnauthorizedIsClassifiedWithoutTransportRetry()
     {
+        const string pathSecret = "opaque-queue-route-secret";
         var handler = new RecordingHttpMessageHandler((_, _) =>
             Task.FromResult(TestResponses.Json(HttpStatusCode.Unauthorized, "{\"message\":\"queue-secret\"}")));
         using var httpClient = new HttpClient(handler);
@@ -308,8 +309,8 @@ public sealed class ScaleSetClientTransportTests
 
         var exception = await Assert.ThrowsAsync<ScaleSetApiException>(() => client.SendQueueAsync(
             HttpMethod.Get,
-            new Uri("https://queue.example/poll?sig=queue-secret"),
-            "queue-secret",
+            new Uri($"https://queue.example/{pathSecret}/poll?sig=queue"),
+            "queue-token",
             body: null,
             headers: null,
             allowAccepted: true,
@@ -317,9 +318,60 @@ public sealed class ScaleSetClientTransportTests
 
         Assert.Equal((int)HttpStatusCode.Unauthorized, exception.StatusCode);
         Assert.Equal(ScaleSetDomainError.MessageQueueTokenExpired, exception.DomainError);
+        Assert.Equal("https://queue.example/", exception.SafeUri);
+        Assert.DoesNotContain(pathSecret, exception.SafeUri, StringComparison.Ordinal);
         Assert.DoesNotContain("sig=", exception.SafeUri, StringComparison.Ordinal);
         Assert.DoesNotContain("queue-secret", exception.BodyPreview, StringComparison.Ordinal);
         Assert.Single(handler.Requests);
+    }
+
+    [Fact]
+    public async Task QueueTransportFailureRedactsPathFromSafeUri()
+    {
+        const string pathSecret = "opaque-queue-route-secret";
+        var handler = new RecordingHttpMessageHandler((_, _) =>
+            Task.FromException<HttpResponseMessage>(new HttpRequestException("transport failure")));
+        using var httpClient = new HttpClient(handler);
+        using var client = CreateClient(httpClient);
+
+        var exception = await Assert.ThrowsAsync<ScaleSetApiException>(() => client.SendQueueAsync(
+            HttpMethod.Get,
+            new Uri($"https://queue.example/{pathSecret}/poll?sig=queue"),
+            "queue-token",
+            body: null,
+            headers: null,
+            allowAccepted: true,
+            TestContext.Current.CancellationToken));
+
+        Assert.Null(exception.StatusCode);
+        Assert.Equal("https://queue.example/", exception.SafeUri);
+        Assert.DoesNotContain(pathSecret, exception.SafeUri, StringComparison.Ordinal);
+        Assert.DoesNotContain("sig=", exception.SafeUri, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task QueueResponseDecodeFailureRedactsPathFromSafeUri()
+    {
+        const string pathSecret = "opaque-queue-route-secret";
+        var handler = new RecordingHttpMessageHandler((_, _) =>
+            Task.FromResult(TestResponses.Json(HttpStatusCode.OK, "invalid response")));
+        using var httpClient = new HttpClient(handler);
+        using var client = CreateClient(httpClient);
+
+        var exception = await Assert.ThrowsAsync<ScaleSetApiException>(() => client.SendQueueAsync<string>(
+            HttpMethod.Get,
+            new Uri($"https://queue.example/{pathSecret}/poll?sessionId=unused"),
+            "queue-token",
+            body: null,
+            headers: null,
+            allowAccepted: true,
+            TestContext.Current.CancellationToken,
+            static _ => throw new System.Text.Json.JsonException("invalid message")));
+
+        Assert.Equal((int)HttpStatusCode.OK, exception.StatusCode);
+        Assert.Equal("https://queue.example/", exception.SafeUri);
+        Assert.DoesNotContain(pathSecret, exception.SafeUri, StringComparison.Ordinal);
+        Assert.DoesNotContain("sessionId=", exception.SafeUri, StringComparison.Ordinal);
     }
 
     [Theory]

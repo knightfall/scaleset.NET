@@ -234,7 +234,10 @@ internal static partial class ScaleSetClientDiagnostics
         return sanitized[..Math.Min(MaximumCorrelationCharacters, sanitized.Length)];
     }
 
-    internal static Uri CreateSafeUri(Uri uri, IReadOnlyCollection<string>? knownSecrets = null)
+    internal static Uri CreateSafeUri(
+        Uri uri,
+        IReadOnlyCollection<string>? knownSecrets = null,
+        bool redactPath = false)
     {
         var safe = new UriBuilder(uri)
         {
@@ -243,7 +246,12 @@ internal static partial class ScaleSetClientDiagnostics
             Query = string.Empty,
             Fragment = string.Empty,
         };
-        if (knownSecrets is null || knownSecrets.Count == 0)
+        if (redactPath)
+        {
+            safe.Path = "/";
+        }
+
+        if (redactPath || knownSecrets is null || knownSecrets.Count == 0)
         {
             return safe.Uri;
         }
