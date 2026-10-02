@@ -74,12 +74,12 @@ runtime results.
 
 All user decisions, including D15 and D21, are incorporated. The plan,
 parity checklist, concerns and operational design are consistent, with no
-unresolved user questions. Implementation-only facts such as verified package
-compatibility or throughput remain milestone-owned `[TODO]` items. This branch
-contains planning documents only; no C# runtime behavior is verified yet.
-Detailed AWS infrastructure planning is intentionally deferred and does not
-block finalizing the phase-one migration plan. It is a prerequisite to the
-future cloud implementation milestones.
+unresolved phase-one product questions. At plan finalization, implementation-
+only facts such as verified package compatibility or throughput remained
+milestone-owned `[TODO]` items; current implementation and verification status
+is tracked in [WORK-STATE.md](../implementation/WORK-STATE.md). Detailed AWS
+infrastructure planning is intentionally deferred and does not block the
+phase-one migration. It remains a prerequisite to future cloud implementation.
 
 ## Confirmed shutdown contract (D12)
 

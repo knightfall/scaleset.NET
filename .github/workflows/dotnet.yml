@@ -9,6 +9,22 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 jobs:
+  container:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Validate Docker Compose configuration
+        run: docker compose --env-file examples/docker-compose/.env.example -f examples/docker-compose/compose.yaml config --quiet
+      - name: Create container-backed multi-platform builder
+        run: |
+          docker buildx create --name scaleset-ci --driver docker-container --use
+          docker buildx inspect --bootstrap
+      - name: Build Linux x64 and arm64 OCI image without publishing
+        env:
+          OCI_PATH: ${{ runner.temp }}/scaleset-autoscaler.oci.tar
+        run: docker buildx build --platform linux/amd64,linux/arm64 --output "type=oci,dest=${OCI_PATH}" .
   foundation:
     strategy:
       matrix:
@@ -28,6 +44,8 @@ jobs:
         run: dotnet build ScaleSet.slnx --configuration Release --no-restore
       - name: Test solution discovery and behavior
         run: dotnet test --solution ScaleSet.slnx --configuration Release --no-build
+        env:
+          SCALESET_DOCKER_INTEGRATION: ${{ runner.os == 'Linux' && '1' || '0' }}
       - name: Package libraries
         if: runner.os == 'Linux'
         run: dotnet pack ScaleSet.slnx --configuration Release --no-build --output artifacts/packages

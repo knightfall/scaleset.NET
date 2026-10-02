@@ -13,6 +13,7 @@ public static class AutoscalerApplicationConfiguration
     private static readonly IReadOnlyDictionary<string, string?> Defaults =
         new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase)
         {
+            ["Health:ListenUrl"] = "http://0.0.0.0:8080",
             ["Telemetry:Otlp:Protocol"] = "http/protobuf",
             ["Telemetry:Otlp:TimeoutMilliseconds"] = "5000",
             ["Telemetry:FlushTimeoutMilliseconds"] = "3000",

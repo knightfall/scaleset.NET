@@ -10,5 +10,7 @@
     <Project Path="tests/ScaleSet.Client.Tests/ScaleSet.Client.Tests.csproj" />
     <Project Path="tests/ScaleSet.Listener.Tests/ScaleSet.Listener.Tests.csproj" />
     <Project Path="tests/ScaleSet.Hosting.Tests/ScaleSet.Hosting.Tests.csproj" />
+    <Project Path="tests/ScaleSet.Docker.Tests/ScaleSet.Docker.Tests.csproj" />
+    <Project Path="tests/ScaleSet.Docker.IntegrationTests/ScaleSet.Docker.IntegrationTests.csproj" />
   </Folder>
 </Solution>
