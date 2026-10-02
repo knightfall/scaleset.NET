@@ -3,7 +3,9 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using ScaleSet.Autoscaler.Configuration;
+using ScaleSet.Autoscaler.Runtime;
 using ScaleSet.Autoscaler.Telemetry;
+using ScaleSet.Hosting.Capacity;
 using ScaleSet.Hosting.Configuration;
 using ScaleSet.Hosting.Telemetry;
 
@@ -36,6 +38,11 @@ public static partial class AutoscalerCommandRunner
         if (args[0].Equals("telemetry-smoke", StringComparison.OrdinalIgnoreCase))
         {
             return await RunTelemetrySmokeAsync(output, error).ConfigureAwait(false);
+        }
+
+        if (args[0].Equals("run", StringComparison.OrdinalIgnoreCase))
+        {
+            return await RunAutoscalerAsync(error).ConfigureAwait(false);
         }
 
         await WriteUsageAsync(error).ConfigureAwait(false);
@@ -121,9 +128,74 @@ public static partial class AutoscalerCommandRunner
         }
     }
 
+    /// <summary>Builds a production host from validated environment configuration.</summary>
+    public static IHost BuildRunHost(
+        IConfigurationRoot configuration,
+        IScaleSetRuntimeFactory? runtimeFactory = null)
+    {
+        ArgumentNullException.ThrowIfNull(configuration);
+        AutoscalerOptions options = AutoscalerConfiguration.Bind(configuration);
+        AutoscalerTelemetryConfiguration telemetry = AutoscalerTelemetryConfiguration.Bind(configuration);
+        HostCapacityCoordinator capacityCoordinator = new(options.HostCapacity, options.ScaleSets);
+        var builder = Host.CreateEmptyApplicationBuilder(new HostApplicationBuilderSettings
+        {
+            Args = Array.Empty<string>(),
+        });
+        builder.Configuration.AddConfiguration(configuration);
+        builder.Logging.ClearProviders();
+        builder.Services.AddSingleton(options);
+        builder.Services.AddSingleton(capacityCoordinator);
+        builder.Services.AddSingleton<TimeProvider>(TimeProvider.System);
+        builder.Services.AddScaleSetTelemetry(telemetry, options.ScaleSets.Select(static scaleSet => scaleSet.Key!));
+        if (runtimeFactory is null)
+        {
+            builder.Services.AddSingleton<IScaleSetRuntimeFactory, ScaleSetRuntimeFactory>();
+        }
+        else
+        {
+            builder.Services.AddSingleton(runtimeFactory);
+        }
+
+        builder.Services.AddHostedService<ScaleSetAutoscalerService>();
+        return builder.Build();
+    }
+
+    private static async Task<int> RunAutoscalerAsync(TextWriter error)
+    {
+        try
+        {
+            IConfigurationRoot configuration = AutoscalerApplicationConfiguration.BuildFromEnvironment();
+            try
+            {
+                using IHost host = BuildRunHost(configuration);
+                await host.RunAsync().ConfigureAwait(false);
+                return 0;
+            }
+            finally
+            {
+                (configuration as IDisposable)?.Dispose();
+            }
+        }
+        catch (AutoscalerConfigurationException exception)
+        {
+            error.WriteLine(exception.Message);
+            return 2;
+        }
+        catch (TelemetryConfigurationException exception)
+        {
+            error.WriteLine(exception.Message);
+            return 2;
+        }
+        catch
+        {
+            error.WriteLine("The autoscaler stopped after a runtime failure. Check structured logs for sanitized diagnostics.");
+            return 1;
+        }
+    }
+
     private static Task WriteUsageAsync(TextWriter output)
     {
-        output.WriteLine("Usage: scaleset-autoscaler <validate-config|telemetry-smoke>");
+        output.WriteLine("Usage: scaleset-autoscaler <validate-config|telemetry-smoke|run>");
         return Task.CompletedTask;
     }
 

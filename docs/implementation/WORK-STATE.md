@@ -77,26 +77,40 @@ recovered resources are adopted as `Unknown`. An unresolved `Creating` intent
 becomes `Unknown` and fails closed instead of blindly recreating a runner.
 Overlapping calls are coalesced by `(ownership scope, operation ID)`; separate
 operations/scopes remain concurrent, and a canceled waiter cannot release the
-active operation's gate. The provisioner is not yet wired into the executable
-or a hosted controller.
+active operation's gate. M5.3 now wires the provisioner into the executable host.
 
 ### M5.2 per-scale-set message handling
 
-Branch: `codex/scale-set-worker`, stacked above PR #5. Added deterministic
-request-to-runner identity mapping and a provider-neutral message handler. It
-acquires offered requests before provisioning only GitHub-confirmed IDs, keeps
-the latest `TotalAssignedJobs` when queue messages omit statistics, and records
+Branch: `codex/scale-set-worker`, stacked above PR #5. PR #6 is open; CI run #9
+passed on Ubuntu, Windows, and macOS after the OTLP test was hardened to
+aggregate separate metric export batches. Added deterministic request-to-runner
+identity mapping and a provider-neutral message handler. It acquires offered
+requests before provisioning only GitHub-confirmed IDs, keeps the latest
+`TotalAssignedJobs` when queue messages omit statistics, and records
 assigned/started/completed activity only when request and runner identities
 match. Handler failures propagate so the listener leaves the message
 unacknowledged. Focused Hosting Release tests passed 141/141 with no skips.
-This handler is not yet wired to a hosted worker or host-capacity planner.
+
+### M5.3 executable host and per-scale-set runtime
+
+Branch: `codex/autoscaler-host`, stacked above PR #6. Added the environment-only
+`run` host, a shared capacity coordinator, and a Docker-backed runtime factory.
+Each scale set resolves or creates its GitHub group/set, atomically records a
+non-secret identity marker before opening its journal, reconciles provider and
+journal inventory into shared capacity, then opens a session and listener.
+Normal process stop cancels polling and closes sessions within the per-set
+cleanup timeout; it never removes runner resources or deletes scale sets.
+Focused Hosting Release tests passed 144/144 with no skips, including fake-backed
+multi-set startup ordering and marker recovery checks. This branch is not yet
+committed or pushed.
 
 PR #4 targets `codex/github-client-transport`; keep the stack until PR #3 merges.
-Next is the per-scale-set hosted worker and startup reconciliation, then shared
-capacity planning, bounded drain/session close, health endpoints, CLI/container
-composition, Compose and release images. Linux Docker integration ran against
-`/var/run/docker.sock`; cleanup is scoped to unique test ownership labels. Do
-not prune or remove unrelated containers or images.
+Next is capacity-aware admission/reservations, minimum-spare reconciliation,
+the full bounded D12 drain, health endpoints, CLI/container composition, Compose
+and release images. Runner inventory remains capacity-accounted as `Unknown`
+until authoritative lifecycle evidence resolves it. Linux Docker integration
+ran against `/var/run/docker.sock`; cleanup is scoped to unique test ownership
+labels. Do not prune or remove unrelated containers or images.
 
 ## Constraints for resumed execution
 

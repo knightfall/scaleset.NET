@@ -1,0 +1,155 @@
+using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
+using ScaleSet.Hosting.Capacity;
+using ScaleSet.Hosting.Configuration;
+
+namespace ScaleSet.Autoscaler.Runtime;
+
+/// <summary>Starts all configured scale-set runtimes after shared capacity is rebuilt.</summary>
+public sealed partial class ScaleSetAutoscalerService : BackgroundService
+{
+    private readonly AutoscalerOptions _options;
+    private readonly HostCapacityCoordinator _capacityCoordinator;
+    private readonly IScaleSetRuntimeFactory _runtimeFactory;
+    private readonly ILogger<ScaleSetAutoscalerService> _logger;
+    private readonly List<IScaleSetRuntime> _runtimes = [];
+    private int _cleanupStarted;
+
+    /// <summary>Creates the process-wide autoscaler service.</summary>
+    public ScaleSetAutoscalerService(
+        AutoscalerOptions options,
+        HostCapacityCoordinator capacityCoordinator,
+        IScaleSetRuntimeFactory runtimeFactory,
+        ILogger<ScaleSetAutoscalerService> logger)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+        ArgumentNullException.ThrowIfNull(capacityCoordinator);
+        ArgumentNullException.ThrowIfNull(runtimeFactory);
+        ArgumentNullException.ThrowIfNull(logger);
+        _options = options;
+        _capacityCoordinator = capacityCoordinator;
+        _runtimeFactory = runtimeFactory;
+        _logger = logger;
+    }
+
+    /// <inheritdoc />
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        try
+        {
+            foreach (ScaleSetOptions scaleSet in _options.ScaleSets)
+            {
+                IScaleSetRuntime runtime = await _runtimeFactory.CreateAsync(
+                    scaleSet,
+                    _capacityCoordinator,
+                    stoppingToken).ConfigureAwait(false);
+                if (runtime is null)
+                {
+                    throw new InvalidOperationException("The runtime factory returned no scale-set runtime.");
+                }
+
+                if (!string.Equals(runtime.ScaleSetKey, scaleSet.Key, StringComparison.OrdinalIgnoreCase))
+                {
+                    await runtime.DisposeAsync().ConfigureAwait(false);
+                    throw new InvalidOperationException("The runtime factory returned a runtime for a different scale-set key.");
+                }
+
+                _runtimes.Add(runtime);
+            }
+
+            foreach (IScaleSetRuntime runtime in _runtimes)
+            {
+                await runtime.InitializeAsync(stoppingToken).ConfigureAwait(false);
+            }
+
+            // Every provider inventory is adopted before any listener begins to
+            // advertise capacity or acquire a job. Runtime implementations open
+            // their sessions here and preserve the runner resources on stop.
+            using CancellationTokenSource workersCancellation =
+                CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
+            Task[] workers = _runtimes
+                .Select(runtime => RunWorkerAsync(runtime, workersCancellation))
+                .ToArray();
+            await Task.WhenAll(workers).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+        {
+            // Normal host shutdown reaches the cleanup path below.
+        }
+        catch (Exception exception)
+        {
+            RuntimeFailed(_logger, exception);
+            throw;
+        }
+        finally
+        {
+            await StopAndDisposeRuntimesAsync(CancellationToken.None).ConfigureAwait(false);
+        }
+    }
+
+    /// <inheritdoc />
+    public override async Task StopAsync(CancellationToken cancellationToken)
+    {
+        await base.StopAsync(cancellationToken).ConfigureAwait(false);
+        await StopAndDisposeRuntimesAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task StopAndDisposeRuntimesAsync(CancellationToken cancellationToken)
+    {
+        if (Interlocked.Exchange(ref _cleanupStarted, 1) != 0)
+        {
+            return;
+        }
+
+        foreach (IScaleSetRuntime runtime in _runtimes.AsEnumerable().Reverse())
+        {
+            try
+            {
+                await runtime.StopAsync(cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception exception)
+            {
+                RuntimeStopFailed(_logger, runtime.ScaleSetKey, exception);
+            }
+
+            try
+            {
+                await runtime.DisposeAsync().ConfigureAwait(false);
+            }
+            catch (Exception exception)
+            {
+                RuntimeDisposeFailed(_logger, runtime.ScaleSetKey, exception);
+            }
+        }
+    }
+
+    private static async Task RunWorkerAsync(IScaleSetRuntime runtime, CancellationTokenSource workersCancellation)
+    {
+        try
+        {
+            await runtime.RunAsync(workersCancellation.Token).ConfigureAwait(false);
+            if (!workersCancellation.IsCancellationRequested)
+            {
+                throw new InvalidOperationException($"The listener for scale set '{runtime.ScaleSetKey}' stopped unexpectedly.");
+            }
+        }
+        catch (OperationCanceledException) when (workersCancellation.IsCancellationRequested)
+        {
+            // One listener may observe host cancellation before its peers.
+        }
+        catch
+        {
+            workersCancellation.Cancel();
+            throw;
+        }
+    }
+
+    [LoggerMessage(EventId = 1, Level = LogLevel.Critical, Message = "Autoscaler runtime failed; stopping all scale-set workers.")]
+    private static partial void RuntimeFailed(ILogger logger, Exception exception);
+
+    [LoggerMessage(EventId = 2, Level = LogLevel.Error, Message = "Failed to close the message session for scale set {ScaleSetKey}.")]
+    private static partial void RuntimeStopFailed(ILogger logger, string scaleSetKey, Exception exception);
+
+    [LoggerMessage(EventId = 3, Level = LogLevel.Error, Message = "Failed to dispose runtime resources for scale set {ScaleSetKey}.")]
+    private static partial void RuntimeDisposeFailed(ILogger logger, string scaleSetKey, Exception exception);
+}
