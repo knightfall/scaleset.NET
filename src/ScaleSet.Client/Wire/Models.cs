@@ -243,10 +243,10 @@ public sealed record RunnerScaleSetSession
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public RunnerScaleSetStatistic? Statistics { get; init; }
 
-    /// <summary>Returns a diagnostic summary without exposing the queue token.</summary>
+    /// <summary>Returns a diagnostic summary without exposing the queue token or credential-bearing queue URL.</summary>
     public override string ToString() =>
         $"RunnerScaleSetSession {{ SessionId = {SessionId}, OwnerName = {OwnerName}, " +
-        $"RunnerScaleSet = {RunnerScaleSet?.Name}, MessageQueueUrl = {MessageQueueUrl}, " +
+        $"RunnerScaleSet = {RunnerScaleSet?.Name}, MessageQueueUrl = [REDACTED], " +
         "MessageQueueAccessToken = [REDACTED], Statistics = " +
         $"{Statistics} }}";
 }

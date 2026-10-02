@@ -79,7 +79,9 @@ common client, config/JWT source, and the saved source tree.
 
 ## 3. Solution layout and dependency rules
 
-Project names below are accepted; none is an existing implementation project.
+Project names below are accepted. They did not exist when this plan was approved;
+the [foundation](../implementation/FOUNDATION.md) and
+[client milestone](../implementation/CLIENT.md) now record implementation progress.
 
 ```text
 scaleset.NET/

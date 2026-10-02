@@ -49,7 +49,12 @@ public sealed class ScaleSetApiException : Exception
         string message,
         int? statusCode,
         ScaleSetDomainError? domainError = null,
-        Exception? innerException = null)
+        Exception? innerException = null,
+        string? method = null,
+        string? safeUri = null,
+        string? activityId = null,
+        string? githubRequestId = null,
+        string? bodyPreview = null)
         : base(message, innerException)
     {
         if (statusCode is < 100 or > 599)
@@ -59,6 +64,11 @@ public sealed class ScaleSetApiException : Exception
 
         StatusCode = statusCode;
         DomainError = domainError;
+        Method = method;
+        SafeUri = safeUri;
+        ActivityId = activityId;
+        GitHubRequestId = githubRequestId;
+        BodyPreview = bodyPreview;
     }
 
     /// <summary>HTTP status code, or <see langword="null"/> when no response was received.</summary>
@@ -66,4 +76,19 @@ public sealed class ScaleSetApiException : Exception
 
     /// <summary>Recognized domain classification, or <see langword="null"/> when none was identified.</summary>
     public ScaleSetDomainError? DomainError { get; }
+
+    /// <summary>HTTP method associated with the request failure.</summary>
+    public string? Method { get; }
+
+    /// <summary>Request URI with query and fragment removed.</summary>
+    public string? SafeUri { get; }
+
+    /// <summary>Actions activity correlation identifier, when supplied.</summary>
+    public string? ActivityId { get; }
+
+    /// <summary>GitHub request correlation identifier, when supplied.</summary>
+    public string? GitHubRequestId { get; }
+
+    /// <summary>Bounded, redacted preview of the response body.</summary>
+    public string? BodyPreview { get; }
 }
