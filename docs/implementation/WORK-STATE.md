@@ -2,12 +2,12 @@
 
 Status: **M4 committed and pushed** on `codex/docker-provider-recovery` at
 `c5c7173`. PR #4 is open and stacked on the client branch in PR #3. Ubuntu and
-macOS CI passed; the Windows Release build passed, but one hosting test failed
-because Windows reports `UnauthorizedAccessException` where the test only
-allowed `IOException`. The test now accepts both platform-specific I/O failure
-types while retaining the no-temporary-file checks; its focused local Release
-run passed. The fix is being pushed to trigger CI again. No PR was merged during
-this pass.
+macOS CI passed on its first run. Windows also built, but one hosting test
+failed because Windows reports `UnauthorizedAccessException` where the test
+only allowed `IOException`. Commit `c5330d8` accepts both platform-specific I/O
+failure types while retaining the no-temporary-file checks. The focused local
+Release test passed, and workflow run #5 passed on Ubuntu, Windows, and macOS.
+No PR was merged during this pass.
 
 ## Docker milestone implementation and verification
 
@@ -46,10 +46,9 @@ changed or removed.
 Detailed verification logs and the heuristic Roslyn source-pairing report are
 under `/private/tmp/scaleset-docker-m4-tests`. The workflow matrix targets
 Ubuntu, Windows, and macOS; Docker integration is opt-in on Linux and package
-creation runs only on Linux. The first PR #4 run passed Ubuntu and macOS.
-Windows built cleanly but exposed the platform-specific exception assertion
-described above. Private-registry auth remains unsupported. No package was
-published or infrastructure deployed.
+creation runs only on Linux. PR #4 workflow run #5 is green on all three
+platforms. Private-registry auth remains unsupported. No package was published
+or infrastructure deployed.
 
 ## Completed
 
@@ -63,11 +62,10 @@ published or infrastructure deployed.
 
 Branch: `codex/docker-provider-recovery`, based on client commit `ae063d4`.
 PR #4 targets `codex/github-client-transport`; preserve that stack until PR #3
-merges. The Windows portability correction passed its focused local Release
-test and is being pushed for a full CI rerun. Once CI is green, implement the
-autoscaler controller run loop, reconciliation, drain and recovery hosting,
-health endpoints, and deployment artifacts. Linux Docker integration ran
-against `/var/run/docker.sock`; cleanup is scoped to unique test ownership
+merges. The Windows portability correction is pushed, and PR #4 CI is green.
+Next is the autoscaler controller run loop, reconciliation, drain and recovery
+hosting, health endpoints, and deployment artifacts. Linux Docker integration
+ran against `/var/run/docker.sock`; cleanup is scoped to unique test ownership
 labels. Do not prune or remove unrelated containers or images.
 
 ## Constraints for resumed execution
