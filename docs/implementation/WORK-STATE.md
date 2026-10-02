@@ -60,16 +60,17 @@ or infrastructure deployed.
 
 ## Current work
 
-### M5 durable runner provisioning slice
+### M5.1 durable runner provisioning
 
 Branch: `codex/controller-orchestration`, stacked above the green PR #4 head
-`dbf1ad8`. Added a provider-neutral provisioner and a JIT-client adapter. It
-persists reservation, JIT, GitHub runner association, create, and start intents
-before their corresponding side effects. JIT data stays in memory. Ownership
-scoped discovery and exact-resource inspection prevent duplicate creates.
+`dbf1ad8`. PR #5 is open and CI is green on Ubuntu, Windows, and macOS. The
+provider-neutral provisioner and JIT-client adapter persist reservation, JIT,
+GitHub runner association, create, and start intents before their corresponding
+side effects. JIT data stays in memory. Ownership-scoped discovery and exact
+resource inspection prevent duplicate creates.
 
 The Hosting Release test project passed 135/135 tests with no skips, including
-nine new ordering, recovery, and concurrency cases. Recovery retries start once
+nine ordering, recovery, and concurrency cases. Recovery retries start once
 only when a journaled `Starting` operation inspects as `Created` with no
 start/finish time; it adopts the result as `Unknown`. Running and other
 recovered resources are adopted as `Unknown`. An unresolved `Creating` intent
@@ -77,15 +78,25 @@ becomes `Unknown` and fails closed instead of blindly recreating a runner.
 Overlapping calls are coalesced by `(ownership scope, operation ID)`; separate
 operations/scopes remain concurrent, and a canceled waiter cannot release the
 active operation's gate. The provisioner is not yet wired into the executable
-or a hosted controller. No M5 commit or PR has been created yet.
+or a hosted controller.
+
+### M5.2 per-scale-set message handling
+
+Branch: `codex/scale-set-worker`, stacked above PR #5. Added deterministic
+request-to-runner identity mapping and a provider-neutral message handler. It
+acquires offered requests before provisioning only GitHub-confirmed IDs, keeps
+the latest `TotalAssignedJobs` when queue messages omit statistics, and records
+assigned/started/completed activity only when request and runner identities
+match. Handler failures propagate so the listener leaves the message
+unacknowledged. Focused Hosting Release tests passed 141/141 with no skips.
+This handler is not yet wired to a hosted worker or host-capacity planner.
 
 PR #4 targets `codex/github-client-transport`; keep the stack until PR #3 merges.
-Its Windows correction is pushed and its CI is green. Next is per-scale-set
-startup/reconciliation and listener orchestration, then process-wide capacity
-planning, bounded drain/session close, health endpoints, and deployment
-artifacts. Linux Docker integration ran against `/var/run/docker.sock`; cleanup
-is scoped to unique test ownership labels. Do not prune or remove unrelated
-containers or images.
+Next is the per-scale-set hosted worker and startup reconciliation, then shared
+capacity planning, bounded drain/session close, health endpoints, CLI/container
+composition, Compose and release images. Linux Docker integration ran against
+`/var/run/docker.sock`; cleanup is scoped to unique test ownership labels. Do
+not prune or remove unrelated containers or images.
 
 ## Constraints for resumed execution
 
