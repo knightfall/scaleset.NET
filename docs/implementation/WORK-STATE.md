@@ -136,8 +136,8 @@ drain timeout/recovery, non-forced terminal cleanup, and changed-profile
 capacity accounting.
 
 The full local .NET 10 solution test command
-`dotnet test --solution ScaleSet.slnx --configuration Release` passed: 366
-total, 364 succeeded, 0 failed, 2 skipped. The skipped cases require
+`dotnet test --solution ScaleSet.slnx --configuration Release` passed: 365
+total, 363 succeeded, 0 failed, 2 skipped. The skipped cases require
 `SCALESET_DOCKER_INTEGRATION=1` and a Linux Docker daemon. This run was on the
 local arm64 host.
 
@@ -154,9 +154,10 @@ Compose file and builds a multi-platform OCI image without publishing it.
 `docker compose ... config --quiet` passed with `.env.example`. A local Buildx
 OCI export compiled the final app for both `linux/amd64` and `linux/arm64` and
 completed successfully under `/private/tmp`; the image was not loaded into a
-registry. Cross-platform GitHub CI is pending push/PR validation. A dedicated
-live GitHub/Docker canary still requires a designated test scale set; no package
-or container image was published and no infrastructure was deployed.
+registry. The first hosted PR run exposed the default Buildx driver limitation;
+the workflow now creates a container-backed multi-platform builder. A
+dedicated live GitHub/Docker canary still requires a designated test scale set;
+no package or container image was published and no infrastructure was deployed.
 
 After cross-platform CI passes, the work reaches the Phase 2 planning boundary.
 ECS tasks, direct EC2 runners, and runtime Parameter Store / Secrets Manager

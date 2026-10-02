@@ -17,6 +17,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Validate Docker Compose configuration
         run: docker compose --env-file examples/docker-compose/.env.example -f examples/docker-compose/compose.yaml config --quiet
+      - name: Create container-backed multi-platform builder
+        run: |
+          docker buildx create --name scaleset-ci --driver docker-container --use
+          docker buildx inspect --bootstrap
       - name: Build Linux x64 and arm64 OCI image without publishing
         env:
           OCI_PATH: ${{ runner.temp }}/scaleset-autoscaler.oci.tar
