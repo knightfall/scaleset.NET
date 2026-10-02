@@ -155,7 +155,8 @@ public sealed class FileRunnerStateJournalTests
         using TemporaryStateDirectory directory = new();
         Directory.CreateDirectory(Path.Combine(directory.Path, "runner-state.json"));
 
-        await Assert.ThrowsAnyAsync<IOException>(() => FileRunnerStateJournal.OpenAsync(directory.Path, CreateScope(), cancellationToken: TestContext.Current.CancellationToken));
+        Exception exception = await Assert.ThrowsAnyAsync<Exception>(() => FileRunnerStateJournal.OpenAsync(directory.Path, CreateScope(), cancellationToken: TestContext.Current.CancellationToken));
+        Assert.True(exception is IOException or UnauthorizedAccessException, $"Unexpected failure type: {exception.GetType().Name}.");
 
         Assert.True(Directory.Exists(Path.Combine(directory.Path, "runner-state.json")));
         Assert.Empty(Directory.EnumerateFiles(directory.Path, "*.tmp"));

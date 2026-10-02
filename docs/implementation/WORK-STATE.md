@@ -1,21 +1,24 @@
 # Migration execution checkpoint
 
-Status: **M4 locally verified on `codex/docker-provider-recovery`** (2026-10-02,
-Australia/Sydney). The work remains uncommitted and depends on PR #3; no PR was
-created, merged, or pushed during this pass.
+Status: **M4 committed and pushed** on `codex/docker-provider-recovery` at
+`c5c7173`. PR #4 is open and stacked on the client branch in PR #3. Ubuntu and
+macOS CI passed; the Windows Release build passed, but one hosting test failed
+because Windows reports `UnauthorizedAccessException` where the test only
+allowed `IOException`. The test now accepts both platform-specific I/O failure
+types while retaining the no-temporary-file checks; its focused local Release
+run passed. The fix is being pushed to trigger CI again. No PR was merged during
+this pass.
 
 ## Docker milestone implementation and verification
 
-Uncommitted work is preserved on `codex/docker-provider-recovery`: provider
-contracts, lifecycle/file journal, Docker Engine adapter, capacity coordinator,
-direct unit tests, two opt-in live integration cases, test project/solution
-wiring, Linux CI integration opt-in and Docker package activation.
-Hosting and Docker production diagnostics were corrected; the latest build
-reached the unit test projects. State now drains admitted/queued reads and
-writes before releasing its exclusive lease, with a concurrency regression.
-Docker uses an injected TimeProvider, 60-second control defaults and added
-timeout, missing-inspect and GitHub-ID-mismatch tests. Root fixed an array
-Length access and a journal documentation diagnostic. No suppressions added.
+The M4 implementation is committed and pushed at `c5c7173` on
+`codex/docker-provider-recovery`: provider contracts, lifecycle/file journal,
+Docker Engine adapter, capacity coordinator, direct unit tests, two opt-in live
+integration cases, test project/solution wiring, Linux CI integration opt-in
+and Docker package activation. State drains admitted/queued reads and writes
+before releasing its exclusive lease, with a concurrency regression. Docker
+uses an injected TimeProvider, 60-second control defaults and added timeout,
+missing-inspect and GitHub-ID-mismatch tests. No suppressions were added.
 
 The escalated Release solution build succeeded with 0 warnings and 0 errors
 (build-coordinated-6.log). Hosting passed 126/126, Docker provider 46/46, and
@@ -41,11 +44,12 @@ Their scoped cleanup left no containers matching the fixture's product and
 changed or removed.
 
 Detailed verification logs and the heuristic Roslyn source-pairing report are
-under `/private/tmp/scaleset-docker-m4-tests`. GitHub Actions was not run during
-this local pass. The workflow matrix targets Ubuntu, Windows, and macOS; Docker
-integration is opt-in on Linux and package creation runs only on Linux. Private
-registry auth remains unsupported. No Docker work was committed or pushed;
-PR #3 remains the last verified milestone.
+under `/private/tmp/scaleset-docker-m4-tests`. The workflow matrix targets
+Ubuntu, Windows, and macOS; Docker integration is opt-in on Linux and package
+creation runs only on Linux. The first PR #4 run passed Ubuntu and macOS.
+Windows built cleanly but exposed the platform-specific exception assertion
+described above. Private-registry auth remains unsupported. No package was
+published or infrastructure deployed.
 
 ## Completed
 
@@ -57,12 +61,14 @@ PR #3 remains the last verified milestone.
 
 ## Current work
 
-Branch: `codex/docker-provider-recovery`, based on the verified client commit.
-It depends on PR #3; preserve that branch relationship until #3 merges.
-Next work: controller orchestration, drain/recovery, health hosting, and
-deployment artifacts. Linux Docker integration ran against the configured
-daemon through `/var/run/docker.sock`; cleanup remains scoped to test ownership
-labels. Do not prune or remove unrelated containers/images.
+Branch: `codex/docker-provider-recovery`, based on client commit `ae063d4`.
+PR #4 targets `codex/github-client-transport`; preserve that stack until PR #3
+merges. The Windows portability correction passed its focused local Release
+test and is being pushed for a full CI rerun. Once CI is green, implement the
+autoscaler controller run loop, reconciliation, drain and recovery hosting,
+health endpoints, and deployment artifacts. Linux Docker integration ran
+against `/var/run/docker.sock`; cleanup is scoped to unique test ownership
+labels. Do not prune or remove unrelated containers or images.
 
 ## Constraints for resumed execution
 
