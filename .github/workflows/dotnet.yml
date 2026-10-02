@@ -1,0 +1,33 @@
+name: .NET
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  foundation:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      CI: true
+      TESTINGPLATFORM_TELEMETRY_OPTOUT: 1
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+        with:
+          global-json-file: global.json
+      - name: Restore
+        run: dotnet restore ScaleSet.slnx
+      - name: Build with analyzer warnings as errors
+        run: dotnet build ScaleSet.slnx --configuration Release --no-restore
+      - name: Test solution discovery and behavior
+        run: dotnet test --solution ScaleSet.slnx --configuration Release --no-build
+      - name: Package libraries
+        if: runner.os == 'Linux'
+        run: dotnet pack ScaleSet.slnx --configuration Release --no-build --output artifacts/packages
