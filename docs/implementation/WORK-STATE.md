@@ -155,17 +155,21 @@ Compose file and builds a multi-platform OCI image without publishing it.
 OCI export compiled the final app for both `linux/amd64` and `linux/arm64` and
 completed successfully under `/private/tmp`; the image was not loaded into a
 registry. The first hosted PR run exposed the default Buildx driver limitation;
-the workflow now creates a container-backed multi-platform builder. A
-dedicated live GitHub/Docker canary still requires a designated test scale set;
-no package or container image was published and no infrastructure was deployed.
+the workflow now creates a container-backed multi-platform builder. PR #8 is
+open, stacked above PR #7. Hosted workflow run `37041745255` passed on Linux,
+Windows, macOS, and the multi-platform container job. A dedicated live
+GitHub/Docker canary still requires a designated test
+scale set; no package or container image was published and no infrastructure
+was deployed.
 
-After cross-platform CI passes, the work reaches the Phase 2 planning boundary.
-ECS tasks, direct EC2 runners, and runtime Parameter Store / Secrets Manager
-remain the confirmed scope, but AWS topology, bootstrap, roles, state, and
-rollout planning are deferred by D14 and must precede cloud implementation.
-Linux Docker integration ran against `/var/run/docker.sock`; cleanup is scoped
-to unique test ownership labels. Do not prune or remove unrelated containers
-or images.
+The work has reached the Phase 2 planning boundary. ECS tasks, direct EC2
+runners, and runtime Parameter Store / Secrets Manager remain the confirmed
+scope, but AWS topology, bootstrap, roles, state, and rollout planning are
+deferred by D14 and must precede cloud implementation. The live GitHub/Docker
+canary and two opt-in Docker integration cases remain unrun; they require a
+designated test scale set and a Linux Docker daemon. Linux Docker integration
+cleanup is scoped to unique test ownership labels. Do not prune or remove
+unrelated containers or images.
 
 ## Constraints for resumed execution
 
