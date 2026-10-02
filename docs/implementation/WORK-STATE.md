@@ -98,6 +98,7 @@ Branch: `codex/autoscaler-host`, stacked above PR #6. Added the environment-only
 Each scale set resolves or creates its GitHub group/set, atomically records a
 non-secret identity marker before opening its journal, reconciles provider and
 journal inventory into shared capacity, then opens a session and listener.
+New scale sets use the Go sample's disabled automatic runner-update setting.
 Normal process stop cancels polling and closes sessions within the per-set
 cleanup timeout; it never removes runner resources or deletes scale sets.
 Focused Hosting Release tests passed 144/144 with no skips, including fake-backed
@@ -106,11 +107,11 @@ committed or pushed.
 
 PR #4 targets `codex/github-client-transport`; keep the stack until PR #3 merges.
 Next is capacity-aware admission/reservations, minimum-spare reconciliation,
-the full bounded D12 drain, health endpoints, CLI/container composition, Compose
-and release images. Runner inventory remains capacity-accounted as `Unknown`
-until authoritative lifecycle evidence resolves it. Linux Docker integration
-ran against `/var/run/docker.sock`; cleanup is scoped to unique test ownership
-labels. Do not prune or remove unrelated containers or images.
+profile-change accounting, the full bounded D12 drain, health endpoints,
+Compose and release images. Runner inventory remains capacity-accounted as
+`Unknown` until authoritative lifecycle evidence resolves it. Linux Docker
+integration ran against `/var/run/docker.sock`; cleanup is scoped to unique
+test ownership labels. Do not prune or remove unrelated containers or images.
 
 ## Constraints for resumed execution
 

@@ -515,6 +515,7 @@ public sealed partial class ScaleSetRuntimeFactory : IScaleSetRuntimeFactory
                 RunnerGroupId = group.Id,
                 RunnerGroupName = group.Name,
                 Labels = CreateScaleSetLabels(_scaleSetOptions),
+                RunnerSetting = new RunnerSetting { DisableUpdate = true },
             };
 
             try

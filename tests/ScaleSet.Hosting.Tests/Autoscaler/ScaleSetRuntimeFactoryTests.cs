@@ -26,6 +26,7 @@ public sealed class ScaleSetRuntimeFactoryTests
         {
             OnCreate = async (request, _) =>
             {
+                Assert.True(request.RunnerSetting.DisableUpdate);
                 string pendingJson = await File.ReadAllTextAsync(Path.Combine(setStateDirectory, "scale-set-identity.json"), TestContext.Current.CancellationToken);
                 using JsonDocument pending = JsonDocument.Parse(pendingJson);
                 Assert.True(pending.RootElement.GetProperty("CreationInProgress").GetBoolean());
