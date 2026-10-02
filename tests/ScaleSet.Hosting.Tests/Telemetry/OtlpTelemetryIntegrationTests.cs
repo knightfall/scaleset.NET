@@ -93,6 +93,10 @@ public sealed partial class OtlpTelemetryIntegrationTests
             "/otlp/foundation/v1/metrics",
             request => OtlpProtobufReader.ReadMetricNames(request.Body).Contains("scaleset.operations", StringComparer.Ordinal),
             TimeSpan.FromSeconds(10));
+        _ = await receiver.WaitForMatchingRequestAsync(
+            "/otlp/foundation/v1/metrics",
+            request => OtlpProtobufReader.ReadMetricNames(request.Body).Contains("scaleset.runners", StringComparer.Ordinal),
+            TimeSpan.FromSeconds(10));
 
         Assert.Equal("export-header-secret", logsRequest.AuthorizationHeader);
         Assert.NotNull(logsRequest.ContentType);
@@ -103,7 +107,11 @@ public sealed partial class OtlpTelemetryIntegrationTests
         var applicationLog = Assert.Single(logs, static record => record.Body?.StartsWith("telemetry-acceptance log", StringComparison.Ordinal) == true);
         var spans = OtlpProtobufReader.ReadTraceSpans(tracesRequest.Body);
         var applicationSpan = Assert.Single(spans, static span => span.Name == "telemetry.acceptance");
-        var metricNames = OtlpProtobufReader.ReadMetricNames(metricsRequest.Body);
+        var metricNames = receiver.Requests
+            .Where(static request => request.Path == "/otlp/foundation/v1/metrics")
+            .SelectMany(static request => OtlpProtobufReader.ReadMetricNames(request.Body))
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
 
         Assert.Equal(expectedTraceId, applicationSpan.TraceId);
         Assert.Equal(expectedSpanId, applicationSpan.SpanId);
