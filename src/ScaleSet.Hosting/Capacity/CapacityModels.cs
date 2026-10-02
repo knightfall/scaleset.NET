@@ -1,3 +1,4 @@
+using System.Text.Json.Serialization;
 using ScaleSet.Hosting.Configuration;
 using ScaleSet.Hosting.Providers;
 using ScaleSet.Hosting.Scaling;
@@ -8,6 +9,7 @@ namespace ScaleSet.Hosting.Capacity;
 public readonly record struct CapacityResourceQuantities
 {
     /// <summary>Creates known or partially known CPU and memory quantities.</summary>
+    [JsonConstructor]
     public CapacityResourceQuantities(decimal? cpuCores, long? memoryMiB)
     {
         if (cpuCores is < 0)

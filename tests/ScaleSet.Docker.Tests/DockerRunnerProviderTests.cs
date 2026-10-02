@@ -1,6 +1,7 @@
 using System.Collections.Immutable;
 using System.Net;
 using System.Text.Json;
+using ScaleSet.Hosting.Capacity;
 using ScaleSet.Hosting.Configuration;
 using ScaleSet.Hosting.Providers;
 using ScaleSet.Providers.Docker;
@@ -748,6 +749,29 @@ public sealed class DockerRunnerProviderTests
         Assert.Equal(new DateTimeOffset(2026, 10, 1, 0, 0, 0, TimeSpan.Zero), inspected.StartedAt);
         Assert.Equal(expectedTerminal ? new DateTimeOffset(2026, 10, 1, 0, 30, 0, TimeSpan.Zero) : null, inspected.FinishedAt);
         Assert.DoesNotContain(privateEnvironment, JsonSerializer.Serialize(inspected), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task InspectAsync_MapsObservedCpuAndMemoryForCapacityAccounting()
+    {
+        RunnerIdentity identity = DockerProviderTestContext.CreateIdentity();
+        string containerId = new('7', 64);
+        using DockerProviderTestContext context = new(new DockerTestHttpMessageHandler(
+            (request, _) => Task.FromResult(request.Uri.AbsolutePath.EndsWith("/json", StringComparison.Ordinal)
+                ? DockerTestHttpMessageHandler.Json(HttpStatusCode.OK, DockerProviderTestContext.CreateInspectJson(
+                    identity,
+                    state: "running",
+                    id: containerId,
+                    nanoCpus: 1_500_000_000,
+                    memoryBytes: 1_073_741_825))
+                : DockerTestHttpMessageHandler.Json(HttpStatusCode.NotFound, "{}"))));
+
+        RunnerResource? inspected = await context.Provider.InspectAsync(
+            new RunnerResource(containerId, identity, RunnerResourceStatus.Unknown),
+            TestContext.Current.CancellationToken);
+
+        Assert.NotNull(inspected);
+        Assert.Equal(new CapacityResourceQuantities(1.5m, 1025), inspected.CapacityResources);
     }
 
     [Fact]

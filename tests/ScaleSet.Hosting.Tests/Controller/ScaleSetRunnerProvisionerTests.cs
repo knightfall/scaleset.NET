@@ -68,6 +68,70 @@ public sealed class ScaleSetRunnerProvisionerTests
     }
 
     [Fact]
+    public async Task ReconcileCompletedAsync_RequiresTerminalEvidenceAndRemovesWithoutForce()
+    {
+        RunnerOwnershipScope scope = CreateScope();
+        RunnerIdentity identity = CreateIdentity(scope);
+        InMemoryRunnerStateJournal journal = new(scope);
+        int inspectCount = 0;
+        int removeCount = 0;
+        bool forceUsed = true;
+        FakeRunnerProvider provider = new(scope)
+        {
+            OnInspect = (resource, _) =>
+            {
+                int attempt = Interlocked.Increment(ref inspectCount);
+                RunnerResourceStatus status = attempt switch
+                {
+                    1 => RunnerResourceStatus.Running,
+                    2 => RunnerResourceStatus.Exited,
+                    _ => RunnerResourceStatus.Missing,
+                };
+                return Task.FromResult<RunnerResource?>(new RunnerResource(
+                    resource.ProviderResourceId,
+                    resource.Identity,
+                    status));
+            },
+            OnRemove = (_, force, _) =>
+            {
+                Interlocked.Increment(ref removeCount);
+                forceUsed = force;
+                return Task.CompletedTask;
+            },
+        };
+        FakeJitConfigClient client = new((_, setting, _) => Task.FromResult<RunnerScaleSetJitRunnerConfig?>(
+            new RunnerScaleSetJitRunnerConfig
+            {
+                Runner = new RunnerReference { Id = 704, Name = setting.Name },
+                EncodedJitConfig = SyntheticJit,
+            }));
+        using ScaleSetRunnerProvisioner provisioner = CreateProvisioner(provider, client, journal);
+        using RunnerLifecycleManager lifecycle = new(journal, TimeProvider.System, NullLogger<RunnerLifecycleManager>.Instance);
+        RunnerProvisioningResult provisioned = await provisioner.ProvisionAsync(identity, TestContext.Current.CancellationToken);
+        _ = await lifecycle.RecordActivityAsync(
+            provisioned.Resource.Identity,
+            RunnerActivityEvidence.JobAssigned,
+            TestContext.Current.CancellationToken);
+        _ = await lifecycle.RecordActivityAsync(
+            provisioned.Resource.Identity,
+            RunnerActivityEvidence.JobCompleted,
+            TestContext.Current.CancellationToken);
+
+        Assert.False(await provisioner.ReconcileCompletedAsync(provisioned.Resource.Identity, TestContext.Current.CancellationToken));
+        RunnerOperationState stillCompleted = Assert.IsType<RunnerOperationState>(
+            await journal.FindAsync(identity.OperationId, TestContext.Current.CancellationToken));
+        Assert.Equal(RunnerLifecycleStage.Completed, stillCompleted.Stage);
+        Assert.Equal(0, removeCount);
+
+        Assert.True(await provisioner.ReconcileCompletedAsync(provisioned.Resource.Identity, TestContext.Current.CancellationToken));
+        RunnerOperationState gone = Assert.IsType<RunnerOperationState>(
+            await journal.FindAsync(identity.OperationId, TestContext.Current.CancellationToken));
+        Assert.Equal(RunnerLifecycleStage.Gone, gone.Stage);
+        Assert.Equal(1, removeCount);
+        Assert.False(forceUsed);
+    }
+
+    [Fact]
     public async Task ProvisionAsync_ConcurrentSameIdentityCoalescesAndReturnsOneResult()
     {
         RunnerOwnershipScope scope = CreateScope();
@@ -534,6 +598,8 @@ public sealed class ScaleSetRunnerProvisionerTests
 
         public Func<RunnerResource, CancellationToken, Task<RunnerResource?>>? OnInspect { get; init; }
 
+        public Func<RunnerResource, bool, CancellationToken, Task>? OnRemove { get; init; }
+
         private int _createCount;
 
         private int _startCount;
@@ -572,8 +638,11 @@ public sealed class ScaleSetRunnerProvisionerTests
                 ?? Task.FromResult<RunnerResource?>(null);
         }
 
-        public Task RemoveAsync(RunnerResource resource, bool force, CancellationToken cancellationToken = default) =>
-            throw new NotSupportedException();
+        public Task RemoveAsync(RunnerResource resource, bool force, CancellationToken cancellationToken = default)
+        {
+            Calls.Enqueue($"remove:{resource.ProviderResourceId}:{force}");
+            return OnRemove?.Invoke(resource, force, cancellationToken) ?? throw new NotSupportedException();
+        }
     }
 
     private sealed class TemporaryStateDirectory : IDisposable

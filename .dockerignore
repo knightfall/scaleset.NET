@@ -1,0 +1,14 @@
+.git/
+.github/
+.vs/
+**/bin/
+**/obj/
+artifacts/
+.artifacts/
+**/TestResults/
+**/state/
+*.nupkg
+*.snupkg
+.env
+.env.*
+!.env.example

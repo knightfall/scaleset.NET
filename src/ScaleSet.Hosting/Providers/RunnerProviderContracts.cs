@@ -1,5 +1,6 @@
 using System.Collections.Immutable;
 using System.Text.Json.Serialization;
+using ScaleSet.Hosting.Capacity;
 using ScaleSet.Hosting.Configuration;
 
 namespace ScaleSet.Hosting.Providers;
@@ -36,7 +37,8 @@ public sealed record RunnerIdentity
         RunnerOwnershipScope scope,
         Guid operationId,
         string runnerName,
-        long? gitHubRunnerId = null)
+        long? gitHubRunnerId = null,
+        CapacityResourceQuantities? capacityResources = null)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentException.ThrowIfNullOrWhiteSpace(runnerName);
@@ -51,10 +53,16 @@ public sealed record RunnerIdentity
             throw new ArgumentOutOfRangeException(nameof(gitHubRunnerId), gitHubRunnerId, "The GitHub runner ID must be positive when present.");
         }
 
+        if (capacityResources is { IsFullyKnown: false })
+        {
+            throw new ArgumentException("A persisted runner profile must include known CPU and memory quantities.", nameof(capacityResources));
+        }
+
         Scope = scope;
         OperationId = operationId;
         RunnerName = runnerName;
         GitHubRunnerId = gitHubRunnerId;
+        CapacityResources = capacityResources;
     }
 
     public RunnerOwnershipScope Scope { get; }
@@ -64,6 +72,9 @@ public sealed record RunnerIdentity
     public string RunnerName { get; }
 
     public long? GitHubRunnerId { get; }
+
+    /// <summary>Gets the CPU and memory profile requested when this runner operation was created.</summary>
+    public CapacityResourceQuantities? CapacityResources { get; }
 }
 
 /// <summary>Provider-observed lifecycle evidence for a runner resource.</summary>
@@ -86,7 +97,8 @@ public sealed record RunnerResource
         RunnerResourceStatus status,
         int? exitCode = null,
         DateTimeOffset? startedAt = null,
-        DateTimeOffset? finishedAt = null)
+        DateTimeOffset? finishedAt = null,
+        CapacityResourceQuantities? capacityResources = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(providerResourceId);
         ArgumentNullException.ThrowIfNull(identity);
@@ -107,6 +119,7 @@ public sealed record RunnerResource
         ExitCode = exitCode;
         StartedAt = startedAt;
         FinishedAt = finishedAt;
+        CapacityResources = capacityResources;
     }
 
     public string ProviderResourceId { get; }
@@ -120,6 +133,9 @@ public sealed record RunnerResource
     public DateTimeOffset? StartedAt { get; }
 
     public DateTimeOffset? FinishedAt { get; }
+
+    /// <summary>Gets provider-observed CPU and memory quantities when available.</summary>
+    public CapacityResourceQuantities? CapacityResources { get; }
 }
 
 /// <summary>Creates one runner resource using short-lived JIT configuration.</summary>

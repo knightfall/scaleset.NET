@@ -261,6 +261,7 @@ public sealed partial class ScaleSetRuntimeFactory : IScaleSetRuntimeFactory
         private ScaleSetRunnerProvisioner? _provisioner;
         private IScaleSetRuntimeSession? _session;
         private ScaleSetListener? _listener;
+        private ScaleSetMessageHandler? _handler;
         private CancellationTokenSource? _listenerCancellation;
         private long _scaleSetId;
         private bool _initialized;
@@ -392,18 +393,19 @@ public sealed partial class ScaleSetRuntimeFactory : IScaleSetRuntimeFactory
                 throw new InvalidOperationException("The scale-set runtime must finish initialization before it runs.");
             }
 
+            lock (_sync)
+            {
+                if (_stopRequested || _disposed)
+                {
+                    return;
+                }
+            }
+
             cancellationToken.ThrowIfCancellationRequested();
             IScaleSetRuntimeSession session = await _client.CreateMessageSessionAsync(
                 _scaleSetId,
                 _controllerOptions.Identity,
                 cancellationToken).ConfigureAwait(false);
-            ScaleSetMessageHandler handler = new(
-                _journal.Scope,
-                session,
-                _provisioner,
-                _lifecycle,
-                _journal,
-                _loggerFactory.CreateLogger<ScaleSetMessageHandler>());
             ScaleSetListener listener = new(
                 session,
                 new ScaleSetListenerOptions
@@ -414,18 +416,41 @@ public sealed partial class ScaleSetRuntimeFactory : IScaleSetRuntimeFactory
                 },
                 _loggerFactory.CreateLogger<ScaleSetListener>(),
                 _timeProvider);
+            ScaleSetCapacityContext capacityContext = new(
+                _scaleSetOptions,
+                _capacityCoordinator,
+                _capacityCoordinator.DemandRegistry,
+                listener.SetMaxRunners);
+            ScaleSetMessageHandler handler = new(
+                _journal.Scope,
+                session,
+                _provisioner,
+                _lifecycle,
+                _journal,
+                _loggerFactory.CreateLogger<ScaleSetMessageHandler>(),
+                capacityContext);
             CancellationTokenSource poll = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
 
+            bool stopBeforeListen;
             lock (_sync)
             {
-                if (_stopRequested || _disposed)
+                stopBeforeListen = _stopRequested || _disposed;
+                if (!stopBeforeListen)
                 {
-                    poll.Cancel();
+                    _session = session;
+                    _listener = listener;
+                    _handler = handler;
+                    _listenerCancellation = poll;
                 }
+            }
 
-                _session = session;
-                _listener = listener;
-                _listenerCancellation = poll;
+            if (stopBeforeListen)
+            {
+                poll.Cancel();
+                poll.Dispose();
+                using CancellationTokenSource cleanup = new(_scaleSetOptions.Lifecycle.CleanupTimeout, _timeProvider);
+                await session.CloseAsync(cleanup.Token).ConfigureAwait(false);
+                return;
             }
 
             try
@@ -452,26 +477,57 @@ public sealed partial class ScaleSetRuntimeFactory : IScaleSetRuntimeFactory
             _ = cancellationToken;
             IScaleSetRuntimeSession? session;
             CancellationTokenSource? polling;
+            ScaleSetMessageHandler? handler;
             lock (_sync)
             {
                 _stopRequested = true;
                 _listener?.SetMaxRunners(0);
+                handler = _handler;
                 polling = _listenerCancellation;
                 session = _session;
                 _session = null;
             }
 
+            handler?.BeginDrain();
             polling?.Cancel();
             if (session is null)
             {
                 return;
             }
 
-            // This M5.3 stop path cancels polling and preserves all runners.
-            // The full configurable job-drain sequence is added in M5.4.
+            // The service performs the bounded drain before its BackgroundService token is canceled.
+            // Here the listener is stopped and the independent session-cleanup budget is applied.
             using CancellationTokenSource cleanup = new(_scaleSetOptions.Lifecycle.CleanupTimeout, _timeProvider);
             await session.CloseAsync(cleanup.Token).ConfigureAwait(false);
             RuntimeSessionClosed(_logger, ScaleSetKey);
+        }
+
+        public async Task DrainAsync(CancellationToken cancellationToken)
+        {
+            ScaleSetMessageHandler? handler;
+            ScaleSetListener? listener;
+            lock (_sync)
+            {
+                _stopRequested = true;
+                handler = _handler;
+                listener = _listener;
+                handler?.BeginDrain();
+            }
+
+            listener?.SetMaxRunners(0);
+            if (handler is null)
+            {
+                return;
+            }
+
+            bool drained = await handler.WaitForDrainAsync(
+                _scaleSetOptions.Lifecycle.ShutdownDrainTimeout,
+                _timeProvider,
+                cancellationToken).ConfigureAwait(false);
+            if (!drained)
+            {
+                RuntimeDrainDeadline(_logger, ScaleSetKey, _scaleSetOptions.Lifecycle.ShutdownDrainTimeout);
+            }
         }
 
         public async ValueTask DisposeAsync()
@@ -539,7 +595,6 @@ public sealed partial class ScaleSetRuntimeFactory : IScaleSetRuntimeFactory
             ImmutableArray<RunnerOperationState> journalStates = await journal.ReadAllAsync(cancellationToken).ConfigureAwait(false);
             Dictionary<Guid, RunnerOperationState> statesById = journalStates.ToDictionary(static state => state.Identity.OperationId);
             HashSet<Guid> reconciled = [];
-            CapacityResourceQuantities resources = CapacityResourceQuantities.FromRunnerProfile(_scaleSetOptions.RunnerProfile);
             int adoptedCount = 0;
 
             foreach (RunnerResource resource in discovered)
@@ -560,19 +615,43 @@ public sealed partial class ScaleSetRuntimeFactory : IScaleSetRuntimeFactory
                     continue;
                 }
 
+                if (statesById.TryGetValue(resource.Identity.OperationId, out RunnerOperationState? completedPrior)
+                    && completedPrior.Stage is (RunnerLifecycleStage.Completed or RunnerLifecycleStage.Removing))
+                {
+                    EnsureResourceMatchesJournal(resource, completedPrior, scope);
+                    if (_provisioner is not null
+                        && await _provisioner.ReconcileCompletedAsync(completedPrior.Identity, cancellationToken).ConfigureAwait(false))
+                    {
+                        continue;
+                    }
+
+                    AdoptCapacity(
+                        completedPrior.Identity,
+                        GetObservedCapacityResources(resource, completedPrior.Identity),
+                        CapacityOccupancyState.Unknown);
+                    adoptedCount++;
+                    continue;
+                }
+
                 if (statesById.TryGetValue(resource.Identity.OperationId, out RunnerOperationState? prior)
                     && IsStartingCreatedRecovery(prior, resource))
                 {
                     EnsureResourceMatchesJournal(resource, prior, scope);
                     // Keep the durable Starting intent: the provisioner can
                     // safely retry StartAsync on this exact Created resource.
-                    AdoptCapacity(prior.Identity, resources, CapacityOccupancyState.Unknown);
+                    AdoptCapacity(
+                        prior.Identity,
+                        GetObservedCapacityResources(resource, prior.Identity),
+                        CapacityOccupancyState.Unknown);
                     adoptedCount++;
                     continue;
                 }
 
                 RunnerOperationState adopted = await lifecycle.AdoptDiscoveredAsync(resource, cancellationToken).ConfigureAwait(false);
-                AdoptCapacity(adopted.Identity, resources, CapacityOccupancyState.Unknown);
+                AdoptCapacity(
+                    adopted.Identity,
+                    GetObservedCapacityResources(resource, journalIdentity: null),
+                    CapacityOccupancyState.Unknown);
                 adoptedCount++;
             }
 
@@ -607,13 +686,19 @@ public sealed partial class ScaleSetRuntimeFactory : IScaleSetRuntimeFactory
                     if (IsStartingCreatedRecovery(state, inspected))
                     {
                         EnsureResourceMatchesJournal(inspected, state, scope);
-                        AdoptCapacity(state.Identity, resources, CapacityOccupancyState.Unknown);
+                        AdoptCapacity(
+                            state.Identity,
+                            GetObservedCapacityResources(inspected, state.Identity),
+                            CapacityOccupancyState.Unknown);
                         adoptedCount++;
                         continue;
                     }
 
                     RunnerOperationState adopted = await lifecycle.AdoptDiscoveredAsync(inspected, cancellationToken).ConfigureAwait(false);
-                    AdoptCapacity(adopted.Identity, resources, CapacityOccupancyState.Unknown);
+                    AdoptCapacity(
+                        adopted.Identity,
+                        GetObservedCapacityResources(inspected, state.Identity),
+                        CapacityOccupancyState.Unknown);
                     adoptedCount++;
                     continue;
                 }
@@ -624,7 +709,10 @@ public sealed partial class ScaleSetRuntimeFactory : IScaleSetRuntimeFactory
                         state.Identity,
                         RunnerLifecycleStage.Unknown,
                         cancellationToken: cancellationToken).ConfigureAwait(false);
-                AdoptCapacity(uncertain.Identity, resources, CapacityOccupancyState.Unknown);
+                AdoptCapacity(
+                    uncertain.Identity,
+                    state.Identity.CapacityResources ?? new CapacityResourceQuantities(null, null),
+                    CapacityOccupancyState.Unknown);
                 adoptedCount++;
             }
 
@@ -643,9 +731,23 @@ public sealed partial class ScaleSetRuntimeFactory : IScaleSetRuntimeFactory
                 throw new InvalidDataException($"Capacity inventory could not adopt runner operation {identity.OperationId}.");
             }
 
+            if (attempt.Handle is not null)
+            {
+                _capacityCoordinator.DemandRegistry.StoreCapacityLease(
+                    new CapacityReservationLease(attempt.Handle, attempt.Revision));
+            }
+
             // ResourceConflict deliberately remains Unknown in the shared ledger;
             // its unknown dimensions block further use of that host budget.
         }
+
+        private static CapacityResourceQuantities GetObservedCapacityResources(
+            RunnerResource resource,
+            RunnerIdentity? journalIdentity) =>
+            resource.CapacityResources
+                ?? resource.Identity.CapacityResources
+                ?? journalIdentity?.CapacityResources
+                ?? new CapacityResourceQuantities(null, null);
 
         private static Label[] CreateScaleSetLabels(ScaleSetOptions options)
         {
@@ -728,6 +830,9 @@ public sealed partial class ScaleSetRuntimeFactory : IScaleSetRuntimeFactory
 
         [LoggerMessage(EventId = 3, Level = LogLevel.Information, Message = "Closed the message session for scale set {ScaleSetKey}.")]
         private static partial void RuntimeSessionClosed(ILogger logger, string scaleSetKey);
+
+        [LoggerMessage(EventId = 4, Level = LogLevel.Warning, Message = "The shutdown drain deadline of {DrainTimeout} elapsed for scale set {ScaleSetKey}; unfinished and uncertain runners will be preserved.")]
+        private static partial void RuntimeDrainDeadline(ILogger logger, string scaleSetKey, TimeSpan drainTimeout);
     }
 
     private sealed class ScaleSetBootstrapLease : IAsyncDisposable

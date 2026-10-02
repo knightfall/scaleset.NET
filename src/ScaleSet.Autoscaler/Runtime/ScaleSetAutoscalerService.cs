@@ -12,15 +12,19 @@ public sealed partial class ScaleSetAutoscalerService : BackgroundService
     private readonly HostCapacityCoordinator _capacityCoordinator;
     private readonly IScaleSetRuntimeFactory _runtimeFactory;
     private readonly ILogger<ScaleSetAutoscalerService> _logger;
+    private readonly AutoscalerHealthState _healthState;
     private readonly List<IScaleSetRuntime> _runtimes = [];
+    private readonly object _runtimeSync = new();
     private int _cleanupStarted;
+    private bool _shutdownRequested;
 
     /// <summary>Creates the process-wide autoscaler service.</summary>
     public ScaleSetAutoscalerService(
         AutoscalerOptions options,
         HostCapacityCoordinator capacityCoordinator,
         IScaleSetRuntimeFactory runtimeFactory,
-        ILogger<ScaleSetAutoscalerService> logger)
+        ILogger<ScaleSetAutoscalerService> logger,
+        AutoscalerHealthState? healthState = null)
     {
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(capacityCoordinator);
@@ -30,15 +34,25 @@ public sealed partial class ScaleSetAutoscalerService : BackgroundService
         _capacityCoordinator = capacityCoordinator;
         _runtimeFactory = runtimeFactory;
         _logger = logger;
+        _healthState = healthState ?? new AutoscalerHealthState();
     }
 
     /// <inheritdoc />
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        _healthState.MarkNotReady();
         try
         {
             foreach (ScaleSetOptions scaleSet in _options.ScaleSets)
             {
+                lock (_runtimeSync)
+                {
+                    if (_shutdownRequested)
+                    {
+                        return;
+                    }
+                }
+
                 IScaleSetRuntime runtime = await _runtimeFactory.CreateAsync(
                     scaleSet,
                     _capacityCoordinator,
@@ -54,12 +68,44 @@ public sealed partial class ScaleSetAutoscalerService : BackgroundService
                     throw new InvalidOperationException("The runtime factory returned a runtime for a different scale-set key.");
                 }
 
-                _runtimes.Add(runtime);
+                bool retainRuntime;
+                lock (_runtimeSync)
+                {
+                    retainRuntime = !_shutdownRequested;
+                    if (retainRuntime)
+                    {
+                        _runtimes.Add(runtime);
+                    }
+                }
+
+                if (!retainRuntime)
+                {
+                    await runtime.DisposeAsync().ConfigureAwait(false);
+                    return;
+                }
             }
 
-            foreach (IScaleSetRuntime runtime in _runtimes)
+            foreach (IScaleSetRuntime runtime in SnapshotRuntimes())
             {
+                lock (_runtimeSync)
+                {
+                    if (_shutdownRequested)
+                    {
+                        return;
+                    }
+                }
+
                 await runtime.InitializeAsync(stoppingToken).ConfigureAwait(false);
+            }
+
+            _healthState.MarkReady();
+
+            lock (_runtimeSync)
+            {
+                if (_shutdownRequested)
+                {
+                    return;
+                }
             }
 
             // Every provider inventory is adopted before any listener begins to
@@ -67,9 +113,19 @@ public sealed partial class ScaleSetAutoscalerService : BackgroundService
             // their sessions here and preserve the runner resources on stop.
             using CancellationTokenSource workersCancellation =
                 CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
-            Task[] workers = _runtimes
-                .Select(runtime => RunWorkerAsync(runtime, workersCancellation))
-                .ToArray();
+            Task[] workers;
+            lock (_runtimeSync)
+            {
+                if (_shutdownRequested)
+                {
+                    return;
+                }
+
+                workers = _runtimes
+                    .Select(runtime => RunWorkerAsync(runtime, workersCancellation))
+                    .ToArray();
+            }
+
             await Task.WhenAll(workers).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
@@ -78,11 +134,13 @@ public sealed partial class ScaleSetAutoscalerService : BackgroundService
         }
         catch (Exception exception)
         {
+            _healthState.MarkFailed();
             RuntimeFailed(_logger, exception);
             throw;
         }
         finally
         {
+            _healthState.MarkNotReady();
             await StopAndDisposeRuntimesAsync(CancellationToken.None).ConfigureAwait(false);
         }
     }
@@ -90,6 +148,15 @@ public sealed partial class ScaleSetAutoscalerService : BackgroundService
     /// <inheritdoc />
     public override async Task StopAsync(CancellationToken cancellationToken)
     {
+        _healthState.MarkStopping();
+        IScaleSetRuntime[] runtimes;
+        lock (_runtimeSync)
+        {
+            _shutdownRequested = true;
+            runtimes = _runtimes.ToArray();
+        }
+
+        await Task.WhenAll(runtimes.Select(runtime => DrainRuntimeAsync(runtime, cancellationToken))).ConfigureAwait(false);
         await base.StopAsync(cancellationToken).ConfigureAwait(false);
         await StopAndDisposeRuntimesAsync(cancellationToken).ConfigureAwait(false);
     }
@@ -101,7 +168,7 @@ public sealed partial class ScaleSetAutoscalerService : BackgroundService
             return;
         }
 
-        foreach (IScaleSetRuntime runtime in _runtimes.AsEnumerable().Reverse())
+        foreach (IScaleSetRuntime runtime in SnapshotRuntimes().Reverse())
         {
             try
             {
@@ -120,6 +187,26 @@ public sealed partial class ScaleSetAutoscalerService : BackgroundService
             {
                 RuntimeDisposeFailed(_logger, runtime.ScaleSetKey, exception);
             }
+        }
+    }
+
+    private async Task DrainRuntimeAsync(IScaleSetRuntime runtime, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await runtime.DrainAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception exception)
+        {
+            RuntimeDrainFailed(_logger, runtime.ScaleSetKey, exception);
+        }
+    }
+
+    private IScaleSetRuntime[] SnapshotRuntimes()
+    {
+        lock (_runtimeSync)
+        {
+            return _runtimes.ToArray();
         }
     }
 
@@ -152,4 +239,7 @@ public sealed partial class ScaleSetAutoscalerService : BackgroundService
 
     [LoggerMessage(EventId = 3, Level = LogLevel.Error, Message = "Failed to dispose runtime resources for scale set {ScaleSetKey}.")]
     private static partial void RuntimeDisposeFailed(ILogger logger, string scaleSetKey, Exception exception);
+
+    [LoggerMessage(EventId = 4, Level = LogLevel.Error, Message = "Failed to drain jobs for scale set {ScaleSetKey}; runner resources are preserved.")]
+    private static partial void RuntimeDrainFailed(ILogger logger, string scaleSetKey, Exception exception);
 }

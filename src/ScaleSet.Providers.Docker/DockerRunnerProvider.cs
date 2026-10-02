@@ -6,6 +6,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Microsoft.Extensions.Logging;
+using ScaleSet.Hosting.Capacity;
 using ScaleSet.Hosting.Configuration;
 using ScaleSet.Hosting.Providers;
 
@@ -382,13 +383,14 @@ public sealed partial class DockerRunnerProvider : IRunnerProvider, IDisposable
             throw ProviderFailure("inspect-container", "invalid-engine-response");
         }
 
-        return MapResource(id, actualIdentity, inspected.State);
+        return MapResource(id, actualIdentity, inspected.State, inspected.HostConfig);
     }
 
     private static RunnerResource MapResource(
         string id,
         RunnerIdentity identity,
-        DockerContainerStateDto? state)
+        DockerContainerStateDto? state,
+        DockerContainerHostConfigDto? hostConfig)
     {
         RunnerResourceStatus status = state?.Status?.ToLowerInvariant() switch
         {
@@ -411,7 +413,24 @@ public sealed partial class DockerRunnerProvider : IRunnerProvider, IDisposable
             ParseDockerTimestamp(state?.StartedAt),
             status is RunnerResourceStatus.Exited or RunnerResourceStatus.Dead
                 ? ParseDockerTimestamp(state?.FinishedAt)
-                : null);
+                : null,
+            MapCapacityResources(hostConfig));
+    }
+
+    private static CapacityResourceQuantities? MapCapacityResources(DockerContainerHostConfigDto? hostConfig)
+    {
+        if (hostConfig is null)
+        {
+            return null;
+        }
+
+        decimal? cpuCores = hostConfig.NanoCpus is > 0
+            ? hostConfig.NanoCpus.Value / 1_000_000_000m
+            : null;
+        long? memoryMiB = hostConfig.Memory is > 0
+            ? (hostConfig.Memory.Value / 1_048_576) + (hostConfig.Memory.Value % 1_048_576 == 0 ? 0 : 1)
+            : null;
+        return new CapacityResourceQuantities(cpuCores, memoryMiB);
     }
 
     private static DateTimeOffset? ParseDockerTimestamp(string? value)
@@ -531,7 +550,12 @@ public sealed partial class DockerRunnerProvider : IRunnerProvider, IDisposable
         }
 
         actual = expected.GitHubRunnerId is null
-            ? new RunnerIdentity(expected.Scope, expected.OperationId, expected.RunnerName, runnerId)
+            ? new RunnerIdentity(
+                expected.Scope,
+                expected.OperationId,
+                expected.RunnerName,
+                runnerId,
+                expected.CapacityResources)
             : expected;
         return true;
     }
@@ -715,6 +739,9 @@ public sealed partial class DockerRunnerProvider : IRunnerProvider, IDisposable
 
         [JsonPropertyName("State")]
         public DockerContainerStateDto? State { get; init; }
+
+        [JsonPropertyName("HostConfig")]
+        public DockerContainerHostConfigDto? HostConfig { get; init; }
     }
 
     private sealed class DockerContainerConfigDto
@@ -736,5 +763,14 @@ public sealed partial class DockerRunnerProvider : IRunnerProvider, IDisposable
 
         [JsonPropertyName("FinishedAt")]
         public string? FinishedAt { get; init; }
+    }
+
+    private sealed class DockerContainerHostConfigDto
+    {
+        [JsonPropertyName("NanoCpus")]
+        public long? NanoCpus { get; init; }
+
+        [JsonPropertyName("Memory")]
+        public long? Memory { get; init; }
     }
 }

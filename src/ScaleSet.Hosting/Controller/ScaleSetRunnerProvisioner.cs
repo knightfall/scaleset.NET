@@ -174,7 +174,12 @@ public sealed partial class ScaleSetRunnerProvisioner : IDisposable
         }
 
         await _lifecycle.TransitionAsync(identity, RunnerLifecycleStage.JitIssued, cancellationToken: cancellationToken).ConfigureAwait(false);
-        RunnerIdentity linkedIdentity = new(identity.Scope, identity.OperationId, identity.RunnerName, jit.Runner.Id);
+        RunnerIdentity linkedIdentity = new(
+            identity.Scope,
+            identity.OperationId,
+            identity.RunnerName,
+            jit.Runner.Id,
+            identity.CapacityResources);
         await _lifecycle.AssociateGitHubRunnerAsync(linkedIdentity, cancellationToken).ConfigureAwait(false);
         await _lifecycle.TransitionAsync(linkedIdentity, RunnerLifecycleStage.Creating, cancellationToken: cancellationToken).ConfigureAwait(false);
 

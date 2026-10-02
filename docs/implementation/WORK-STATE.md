@@ -99,19 +99,72 @@ Each scale set resolves or creates its GitHub group/set, atomically records a
 non-secret identity marker before opening its journal, reconciles provider and
 journal inventory into shared capacity, then opens a session and listener.
 New scale sets use the Go sample's disabled automatic runner-update setting.
-Normal process stop cancels polling and closes sessions within the per-set
-cleanup timeout; it never removes runner resources or deletes scale sets.
-Focused Hosting Release tests passed 144/144 with no skips, including fake-backed
-multi-set startup ordering and marker recovery checks. PR #7 is open, stacked
-above PR #6, at head `68f6972`; hosted workflow run #11 is in progress.
+The initial stop implementation preserved runners and closed sessions within
+the per-set cleanup timeout; M5.4 replaces this with the confirmed bounded
+drain sequence. Focused Hosting Release tests passed 144/144 with no skips,
+including fake-backed multi-set startup ordering and marker recovery checks.
+PR #7 is stacked above PR #6 at `bfb0415`; hosted workflow run #12 passed on
+Ubuntu, Windows, and macOS.
 
 PR #4 targets `codex/github-client-transport`; keep the stack until PR #3 merges.
-Next is capacity-aware admission/reservations, minimum-spare reconciliation,
-profile-change accounting, the full bounded D12 drain, health endpoints,
-Compose and release images. Runner inventory remains capacity-accounted as
-`Unknown` until authoritative lifecycle evidence resolves it. Linux Docker
-integration ran against `/var/run/docker.sock`; cleanup is scoped to unique
-test ownership labels. Do not prune or remove unrelated containers or images.
+
+### M5.4 capacity, lifecycle cleanup, and bounded drain
+
+Branch: `codex/autoscaler-capacity-drain`, based on the M5.3 PR #7 head. The
+capacity-aware handler updates shared demand and reserves feasible host permits
+before acquiring GitHub requests. Provisioning demand comes from
+`TotalAssignedJobs` with the selected SpareCapacity or TotalFloor policy;
+message counts only bound admission. Admission permits do not count as
+materialized runners, and per-runner creation uses the shared concurrency gate.
+Job activity resolves against the exact scoped GitHub runner ID and name.
+
+Runner identities persist their creation-time CPU/memory profile. Docker
+discovery reports observed NanoCPUs and memory, so restart accounting uses the
+existing runner's observed resources after configuration changes; missing
+observations remain unknown and block constrained budgets. Completed runners
+are removed only after provider inspection confirms terminal state, always
+without force, then the lifecycle tombstone and capacity release are recorded.
+
+Normal shutdown now closes admission before the drain, keeps the listener alive
+to process activity until the bounded deadline, then cancels polling and closes
+sessions with the independent cleanup timeout. Busy and uncertain runners and
+the scale-set identity are preserved. Generic Host shutdown timeout covers the
+parallel drain, sequential session cleanup, acknowledgment/control budget, and
+telemetry flush. Added focused tests cover policy demand, message-count
+independence, fresh-stat acquisition, host-limit rejection, drain ordering,
+drain timeout/recovery, non-forced terminal cleanup, and changed-profile
+capacity accounting.
+
+The full local .NET 10 solution test command
+`dotnet test --solution ScaleSet.slnx --configuration Release` passed: 366
+total, 364 succeeded, 0 failed, 2 skipped. The skipped cases require
+`SCALESET_DOCKER_INTEGRATION=1` and a Linux Docker daemon. This run was on the
+local arm64 host.
+
+### M5.5 health, container, and Compose release path
+
+Implemented `/health/live` and `/health/ready`; readiness becomes true only
+after all scale-set identities and inventories initialize. The health listener
+is configurable through `SCALESET__Health__ListenUrl`, and `health-probe` is
+used by container health checks. Added a non-root Linux x64/arm64 Dockerfile,
+Compose deployment, environment template, and
+[`DOCKER-DEPLOYMENT.md`](DOCKER-DEPLOYMENT.md). The CI workflow validates the
+Compose file and builds a multi-platform OCI image without publishing it.
+
+`docker compose ... config --quiet` passed with `.env.example`. A local Buildx
+OCI export compiled the final app for both `linux/amd64` and `linux/arm64` and
+completed successfully under `/private/tmp`; the image was not loaded into a
+registry. Cross-platform GitHub CI is pending push/PR validation. A dedicated
+live GitHub/Docker canary still requires a designated test scale set; no package
+or container image was published and no infrastructure was deployed.
+
+After cross-platform CI passes, the work reaches the Phase 2 planning boundary.
+ECS tasks, direct EC2 runners, and runtime Parameter Store / Secrets Manager
+remain the confirmed scope, but AWS topology, bootstrap, roles, state, and
+rollout planning are deferred by D14 and must precede cloud implementation.
+Linux Docker integration ran against `/var/run/docker.sock`; cleanup is scoped
+to unique test ownership labels. Do not prune or remove unrelated containers
+or images.
 
 ## Constraints for resumed execution
 

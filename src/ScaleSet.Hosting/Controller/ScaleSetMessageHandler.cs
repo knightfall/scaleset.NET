@@ -1,11 +1,56 @@
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using ScaleSet.Client;
+using ScaleSet.Hosting.Capacity;
+using ScaleSet.Hosting.Configuration;
 using ScaleSet.Hosting.Providers;
 using ScaleSet.Hosting.State;
 using ScaleSet.Listener;
 
 namespace ScaleSet.Hosting.Controller;
+
+/// <summary>Shared process-wide capacity services for one scale-set message handler.</summary>
+public sealed class ScaleSetCapacityContext
+{
+    /// <summary>Creates the capacity context for one configured scale set.</summary>
+    public ScaleSetCapacityContext(
+        ScaleSetOptions scaleSet,
+        HostCapacityCoordinator coordinator,
+        ScaleSetDemandRegistry demandRegistry,
+        Action<int> setListenerMaximum)
+    {
+        ArgumentNullException.ThrowIfNull(scaleSet);
+        ArgumentNullException.ThrowIfNull(coordinator);
+        ArgumentNullException.ThrowIfNull(demandRegistry);
+        ArgumentNullException.ThrowIfNull(setListenerMaximum);
+        ArgumentException.ThrowIfNullOrWhiteSpace(scaleSet.Key);
+        if (ScaleSetCapacityDefinition.FromOptions(scaleSet) != coordinator.GetDefinition(scaleSet.Key!))
+        {
+            throw new ArgumentException("The scale-set scaling limits and runner profile must match the shared capacity coordinator.", nameof(scaleSet));
+        }
+
+        ScaleSet = scaleSet;
+        Coordinator = coordinator;
+        DemandRegistry = demandRegistry;
+        SetListenerMaximum = setListenerMaximum;
+        Resources = CapacityResourceQuantities.FromRunnerProfile(scaleSet.RunnerProfile);
+    }
+
+    /// <summary>Gets the per-scale-set policy and resource profile.</summary>
+    public ScaleSetOptions ScaleSet { get; }
+
+    /// <summary>Gets the host-wide, concurrency-safe capacity ledger.</summary>
+    public HostCapacityCoordinator Coordinator { get; }
+
+    /// <summary>Gets the latest statistics shared among set workers.</summary>
+    public ScaleSetDemandRegistry DemandRegistry { get; }
+
+    /// <summary>Updates this set's GitHub queue-advertised capacity.</summary>
+    public Action<int> SetListenerMaximum { get; }
+
+    /// <summary>Gets this set's configured runner resource quantities.</summary>
+    public CapacityResourceQuantities Resources { get; }
+}
 
 /// <summary>
 /// Handles one scale set's queue messages, acquiring offered jobs before
@@ -19,6 +64,7 @@ public sealed partial class ScaleSetMessageHandler : IScaleSetMessageHandler
     private readonly RunnerLifecycleManager _lifecycle;
     private readonly IRunnerStateJournal _journal;
     private readonly ILogger<ScaleSetMessageHandler> _logger;
+    private readonly ScaleSetCapacityContext? _capacity;
     private int _latestAssignedJobs = -1;
 
     /// <summary>Creates a message handler bound to one ownership scope and its durable journal.</summary>
@@ -28,7 +74,8 @@ public sealed partial class ScaleSetMessageHandler : IScaleSetMessageHandler
         ScaleSetRunnerProvisioner provisioner,
         RunnerLifecycleManager lifecycle,
         IRunnerStateJournal journal,
-        ILogger<ScaleSetMessageHandler>? logger = null)
+        ILogger<ScaleSetMessageHandler>? logger = null,
+        ScaleSetCapacityContext? capacity = null)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(session);
@@ -40,12 +87,18 @@ public sealed partial class ScaleSetMessageHandler : IScaleSetMessageHandler
             throw new ArgumentException("The journal must match the message-handler ownership scope.", nameof(journal));
         }
 
+        if (capacity is not null && !string.Equals(capacity.ScaleSet.Key, scope.ScaleSetKey, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new ArgumentException("The capacity context must match the message-handler scale-set key.", nameof(capacity));
+        }
+
         _scope = scope;
         _session = session;
         _provisioner = provisioner;
         _lifecycle = lifecycle;
         _journal = journal;
         _logger = logger ?? NullLogger<ScaleSetMessageHandler>.Instance;
+        _capacity = capacity;
     }
 
     /// <summary>Gets the latest assigned-job count, or null until statistics arrive.</summary>
@@ -65,14 +118,22 @@ public sealed partial class ScaleSetMessageHandler : IScaleSetMessageHandler
     /// </remarks>
     public async Task HandleAsync(RunnerScaleSetMessage? message, CancellationToken cancellationToken)
     {
+        using IDisposable callbackLease = EnterCallback();
         if (message?.Statistics is { } statistics)
         {
-            if (statistics.TotalAssignedJobs < 0)
+            if (statistics.TotalAssignedJobs < 0 || statistics.TotalIdleRunners < 0)
             {
-                throw new InvalidDataException("Scale-set statistics contained a negative assigned-job count.");
+                throw new InvalidDataException("Scale-set statistics contained a negative runner or job count.");
             }
 
             Volatile.Write(ref _latestAssignedJobs, statistics.TotalAssignedJobs);
+        }
+
+        if (_capacity is not null)
+        {
+            await HandleCapacityAwareAsync(message, cancellationToken).ConfigureAwait(false);
+            await ReconcileCompletedOperationsAsync(cancellationToken).ConfigureAwait(false);
+            return;
         }
 
         if (message is null)
@@ -80,7 +141,14 @@ public sealed partial class ScaleSetMessageHandler : IScaleSetMessageHandler
             return;
         }
 
-        await AcquireAndProvisionAsync(message.JobAvailableMessages, cancellationToken).ConfigureAwait(false);
+        if (TryEnterAdmission(out IDisposable? admission))
+        {
+            using (admission)
+            {
+                await AcquireAndProvisionAsync(message.JobAvailableMessages, cancellationToken).ConfigureAwait(false);
+            }
+        }
+
         foreach (JobAssignedMessage assigned in message.JobAssignedMessages)
         {
             await ApplyActivityAsync(
@@ -93,6 +161,7 @@ public sealed partial class ScaleSetMessageHandler : IScaleSetMessageHandler
 
         foreach (JobStartedMessage started in message.JobStartedMessages)
         {
+            RecordJobStarted(started.RunnerRequestId);
             await ApplyActivityAsync(
                 started.RunnerRequestId,
                 RunnerActivityEvidence.JobAssigned,
@@ -103,6 +172,7 @@ public sealed partial class ScaleSetMessageHandler : IScaleSetMessageHandler
 
         foreach (JobCompletedMessage completed in message.JobCompletedMessages)
         {
+            RecordJobCompleted(completed.RunnerRequestId);
             await ApplyActivityAsync(
                 completed.RunnerRequestId,
                 RunnerActivityEvidence.JobCompleted,
@@ -130,6 +200,7 @@ public sealed partial class ScaleSetMessageHandler : IScaleSetMessageHandler
         HashSet<long> acquired = (acquiredIds ?? Array.Empty<long>())
             .Where(offeredIds.Contains)
             .ToHashSet();
+        RecordAcquiredRequests(acquired);
 
         foreach (long requestId in offeredIds)
         {

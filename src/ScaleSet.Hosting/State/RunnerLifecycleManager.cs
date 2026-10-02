@@ -387,7 +387,8 @@ public sealed partial class RunnerLifecycleManager : IDisposable
     {
         ArgumentNullException.ThrowIfNull(resource);
         ThrowIfDisposed();
-        EnsureScope(resource.Identity);
+        RunnerIdentity discoveredIdentity = resource.Identity;
+        EnsureScope(discoveredIdentity);
         if (resource.Status == RunnerResourceStatus.Missing)
         {
             throw new ArgumentException("A missing resource cannot be adopted from discovery.", nameof(resource));
@@ -397,23 +398,34 @@ public sealed partial class RunnerLifecycleManager : IDisposable
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            RunnerOperationState? current = await _journal.FindAsync(resource.Identity.OperationId, cancellationToken).ConfigureAwait(false);
+            RunnerOperationState? current = await _journal.FindAsync(discoveredIdentity.OperationId, cancellationToken).ConfigureAwait(false);
             if (current is null)
             {
+                if (discoveredIdentity.CapacityResources is null
+                    && resource.CapacityResources is { IsFullyKnown: true } observedResources)
+                {
+                    discoveredIdentity = new RunnerIdentity(
+                        discoveredIdentity.Scope,
+                        discoveredIdentity.OperationId,
+                        discoveredIdentity.RunnerName,
+                        discoveredIdentity.GitHubRunnerId,
+                        observedResources);
+                }
+
                 RunnerOperationState adopted = new(
-                    resource.Identity,
+                    discoveredIdentity,
                     RunnerLifecycleStage.Unknown,
                     revision: 0,
                     _timeProvider.GetUtcNow(),
                     resource.ProviderResourceId,
                     resource.Status);
                 await _journal.WriteAsync(adopted, expectedRevision: -1, cancellationToken).ConfigureAwait(false);
-                DiscoveredUnknown(_logger, resource.Identity.OperationId, resource.Status);
+                DiscoveredUnknown(_logger, discoveredIdentity.OperationId, resource.Status);
                 activity?.SetTag("runner.lifecycle.stage", "unknown");
                 return adopted;
             }
 
-            EnsureSameOperation(current.Identity, resource.Identity);
+            EnsureSameOperation(current.Identity, discoveredIdentity);
             if (current.ProviderResourceId is not null && current.ProviderResourceId != resource.ProviderResourceId)
             {
                 throw new InvalidDataException("Provider discovery returned a different resource ID for the same operation.");
@@ -425,7 +437,7 @@ public sealed partial class RunnerLifecycleManager : IDisposable
                 throw new InvalidDataException("Provider discovery contradicts a retained terminal operation tombstone.");
             }
 
-            RunnerIdentity adoptedIdentity = PreserveKnownGitHubRunnerId(current.Identity, resource.Identity);
+            RunnerIdentity adoptedIdentity = PreserveKnownGitHubRunnerId(current.Identity, discoveredIdentity);
 
             if (current.Stage == RunnerLifecycleStage.Unknown
                 && current.ProviderResourceId == resource.ProviderResourceId
@@ -443,7 +455,7 @@ public sealed partial class RunnerLifecycleManager : IDisposable
                 resource.ProviderResourceId,
                 resource.Status);
             await _journal.WriteAsync(next, current.Revision, cancellationToken).ConfigureAwait(false);
-            DiscoveredUnknown(_logger, resource.Identity.OperationId, resource.Status);
+            DiscoveredUnknown(_logger, discoveredIdentity.OperationId, resource.Status);
             activity?.SetTag("runner.lifecycle.stage", "unknown");
             return next;
         }
@@ -585,9 +597,12 @@ public sealed partial class RunnerLifecycleManager : IDisposable
     }
 
     private static RunnerIdentity PreserveKnownGitHubRunnerId(RunnerIdentity existing, RunnerIdentity discovered) =>
-        discovered.GitHubRunnerId is null && existing.GitHubRunnerId is not null
-            ? existing
-            : discovered;
+        new(
+            discovered.Scope,
+            discovered.OperationId,
+            discovered.RunnerName,
+            discovered.GitHubRunnerId ?? existing.GitHubRunnerId,
+            existing.CapacityResources ?? discovered.CapacityResources);
 
     [LoggerMessage(4100, LogLevel.Information, "Reserved runner operation {OperationId} for scale set {ScaleSetKey}.")]
     private static partial void OperationReserved(ILogger logger, Guid operationId, string scaleSetKey);

@@ -24,6 +24,9 @@ public sealed class HostCapacityCoordinator
     private long _nextGeneration;
     private int _roundRobinCursor;
 
+    /// <summary>Gets the process-wide demand and capacity-lease registry shared by all scale-set handlers.</summary>
+    public ScaleSetDemandRegistry DemandRegistry { get; } = new();
+
     /// <summary>Creates a coordinator from capacity-neutral definitions.</summary>
     public HostCapacityCoordinator(
         HostCapacityLimits limits,
@@ -62,6 +65,14 @@ public sealed class HostCapacityCoordinator
 
     /// <summary>Gets the host-wide creation gate shared by all configured scale sets.</summary>
     public CreationConcurrencyGate CreationConcurrencyGate { get; }
+
+    internal ScaleSetCapacityDefinition GetDefinition(string scaleSetKey)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(scaleSetKey);
+        return _definitionsByKey.TryGetValue(scaleSetKey, out ScaleSetCapacityDefinition? definition)
+            ? definition
+            : throw new KeyNotFoundException($"Scale set '{scaleSetKey}' is not configured in this capacity coordinator.");
+    }
 
     /// <summary>Calculates feasible capacities without reserving any slots.</summary>
     /// <param name="assignedJobsByScaleSet">Latest assigned-job count per local scale-set key.</param>

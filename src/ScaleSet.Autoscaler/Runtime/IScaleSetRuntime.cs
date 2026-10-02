@@ -15,6 +15,9 @@ public interface IScaleSetRuntime : IAsyncDisposable
     /// <summary>Opens the message session and runs its listener until cancellation or failure.</summary>
     Task RunAsync(CancellationToken cancellationToken);
 
+    /// <summary>Stops new job admission and waits for known active work within the configured drain budget.</summary>
+    Task DrainAsync(CancellationToken cancellationToken);
+
     /// <summary>Closes the message session within its configured cleanup budget; runner resources are preserved.</summary>
     Task StopAsync(CancellationToken cancellationToken);
 }

@@ -157,7 +157,9 @@ internal sealed class DockerProviderTestContext : IDisposable
         string finishedAt = "0001-01-01T00:00:00Z",
         string? id = null,
         long? labelRunnerId = null,
-        string? rawEnvironmentValue = null)
+        string? rawEnvironmentValue = null,
+        long nanoCpus = 0,
+        long memoryBytes = 0)
     {
         Dictionary<string, string> labels = CreateLabels(identity, labelRunnerId);
         return System.Text.Json.JsonSerializer.Serialize(new
@@ -167,6 +169,11 @@ internal sealed class DockerProviderTestContext : IDisposable
             {
                 Env = rawEnvironmentValue is null ? Array.Empty<string>() : new[] { rawEnvironmentValue },
                 Labels = labels,
+            },
+            HostConfig = new
+            {
+                NanoCpus = nanoCpus,
+                Memory = memoryBytes,
             },
             State = new
             {

@@ -9,6 +9,7 @@ using ScaleSet.Hosting.Capacity;
 using ScaleSet.Hosting.Configuration;
 using ScaleSet.Hosting.Providers;
 using ScaleSet.Hosting.Scaling;
+using ScaleSet.Hosting.State;
 
 namespace ScaleSet.Hosting.Tests.Autoscaler;
 
@@ -129,6 +130,58 @@ public sealed class ScaleSetRuntimeFactoryTests
         Assert.Equal(1, firstClient.CreateCount);
         Assert.Equal(0, restartClient.CreateCount);
         Assert.Equal(0, restartClient.SessionCreateCount);
+    }
+
+    [Fact]
+    public async Task InitializeAsync_AccountsDiscoveredRunnerUsingObservedResourcesAfterProfileChange()
+    {
+        using TemporaryStateDirectory directory = new();
+        (AutoscalerOptions options, ScaleSetOptions scaleSet) = CreateOptions(directory.Path);
+        RunnerOwnershipScope scope = new(options.Controller.Identity, scaleSet.Key!, 987);
+        RunnerIdentity identity = new(
+            scope,
+            Guid.NewGuid(),
+            "runner-from-old-profile",
+            915,
+            new CapacityResourceQuantities(1m, 1024));
+        FakeRunnerProvider provider = new()
+        {
+            Discovered =
+            [
+                new RunnerResource(
+                    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                    identity,
+                    RunnerResourceStatus.Running,
+                    capacityResources: new CapacityResourceQuantities(2m, 2048)),
+            ],
+        };
+        FakeScaleSetRuntimeClient client = new();
+        ScaleSetRuntimeFactory factory = CreateFactory(options, client, provider);
+        HostCapacityCoordinator coordinator = new(options.HostCapacity, options.ScaleSets);
+        IScaleSetRuntime runtime = await factory.CreateAsync(scaleSet, coordinator, TestContext.Current.CancellationToken);
+
+        try
+        {
+            await runtime.InitializeAsync(TestContext.Current.CancellationToken);
+        }
+        finally
+        {
+            await runtime.DisposeAsync();
+        }
+
+        CapacityUsageSnapshot usage = coordinator.CaptureSnapshot().ScaleSets[scaleSet.Key!].Usage;
+        Assert.Equal(1, usage.RunnerCount);
+        Assert.Equal(2m, usage.CpuCoresUsed);
+        Assert.Equal(2048, usage.MemoryMiBUsed);
+        Assert.Equal(1, usage.StateCounts[CapacityOccupancyState.Unknown]);
+
+        string setStateDirectory = GetSetStateDirectory(directory.Path, scaleSet.Key!);
+        await using FileRunnerStateJournal journal = await FileRunnerStateJournal.OpenAsync(
+            setStateDirectory,
+            scope,
+            TestContext.Current.CancellationToken);
+        RunnerOperationState persisted = Assert.Single(await journal.ReadAllAsync(TestContext.Current.CancellationToken));
+        Assert.Equal(new CapacityResourceQuantities(1m, 1024), persisted.Identity.CapacityResources);
     }
 
     private static ScaleSetRuntimeFactory CreateFactory(
@@ -257,10 +310,12 @@ public sealed class ScaleSetRuntimeFactoryTests
             supportsOwnershipScopedDiscovery: true,
             providesTerminalStateEvidence: true);
 
+        public ImmutableArray<RunnerResource> Discovered { get; init; } = ImmutableArray<RunnerResource>.Empty;
+
         public Task<ImmutableArray<RunnerResource>> DiscoverAsync(RunnerOwnershipScope scope, CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            return Task.FromResult(ImmutableArray<RunnerResource>.Empty);
+            return Task.FromResult(Discovered);
         }
 
         public Task<RunnerResource> CreateAsync(RunnerCreateRequest request, CancellationToken cancellationToken = default) =>
