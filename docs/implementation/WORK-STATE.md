@@ -102,8 +102,8 @@ New scale sets use the Go sample's disabled automatic runner-update setting.
 Normal process stop cancels polling and closes sessions within the per-set
 cleanup timeout; it never removes runner resources or deletes scale sets.
 Focused Hosting Release tests passed 144/144 with no skips, including fake-backed
-multi-set startup ordering and marker recovery checks. This branch is not yet
-committed or pushed.
+multi-set startup ordering and marker recovery checks. PR #7 is open, stacked
+above PR #6, at head `68f6972`; hosted workflow run #11 is in progress.
 
 PR #4 targets `codex/github-client-transport`; keep the stack until PR #3 merges.
 Next is capacity-aware admission/reservations, minimum-spare reconciliation,
