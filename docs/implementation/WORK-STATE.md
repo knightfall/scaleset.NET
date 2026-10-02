@@ -1,13 +1,21 @@
 # Migration execution checkpoint
 
-Status: **M4 committed and pushed** on `codex/docker-provider-recovery` at
-`c5c7173`. PR #4 is open and stacked on the client branch in PR #3. Ubuntu and
-macOS CI passed on its first run. Windows also built, but one hosting test
-failed because Windows reports `UnauthorizedAccessException` where the test
-only allowed `IOException`. Commit `c5330d8` accepts both platform-specific I/O
-failure types while retaining the no-temporary-file checks. The focused local
-Release test passed, and workflow run #5 passed on Ubuntu, Windows, and macOS.
-No PR was merged during this pass.
+Status: **Phase 1 complete**. Implementation PRs #1–#8 and security remediation
+PR #10 are merged; no migration PR is open. Local `main` and `origin/main` are
+clean at merge commit `d3137ff`. PR #10 redacts queue URL paths from
+`ScaleSetApiException.SafeUri`; its GitHub `.NET` workflow passed, and the
+focused client suite passed 143/143 locally. The completed security scan had
+zero reportable vulnerabilities and one low-confidence deferred candidate,
+which PR #10 addresses defensively. Consumer-configured `HttpClient`
+OpenTelemetry instrumentation may still capture full URLs depending on its
+configuration.
+
+The next work package is **Phase 2 AWS design/planning**, not provider
+implementation: ECS task and direct EC2 runner providers plus runtime Parameter
+Store/Secrets Manager configuration and credential refresh are confirmed by
+D05 and D18–D20. Follow D14 and the deferred-planning section of
+`docs/migration/PLAN.md` before implementing cloud providers. The user selected
+AWS CDK v2 in TypeScript. No cloud infrastructure has been deployed.
 
 ## Docker milestone implementation and verification
 
@@ -54,16 +62,16 @@ or infrastructure deployed.
 
 - Planning PR #1 merged; confirmed decisions remain in `docs/migration/DECISIONS.md`.
 - Foundation PR #2 merged at `cbc58413a6cdc742d8d65ebd158d2d4e143061a0`.
-- Client/session PR #3 is open: https://github.com/knightfall/scaleset.NET/pull/3.
+- Client/session PR #3 is merged: https://github.com/knightfall/scaleset.NET/pull/3.
   Head `ae063d4eb644585c77944decb2ae056a087c4847`; 220 tests passed locally,
   and Linux/Windows/macOS CI passed. Three libraries packed, none published.
 
-## Current work
+## Completed Phase 1 implementation milestones
 
 ### M5.1 durable runner provisioning
 
-Branch: `codex/controller-orchestration`, stacked above the green PR #4 head
-`dbf1ad8`. PR #5 is open and CI is green on Ubuntu, Windows, and macOS. The
+Delivered by merged PR #5 from `codex/controller-orchestration`; CI passed on
+Ubuntu, Windows, and macOS. The
 provider-neutral provisioner and JIT-client adapter persist reservation, JIT,
 GitHub runner association, create, and start intents before their corresponding
 side effects. JIT data stays in memory. Ownership-scoped discovery and exact
@@ -81,8 +89,8 @@ active operation's gate. M5.3 now wires the provisioner into the executable host
 
 ### M5.2 per-scale-set message handling
 
-Branch: `codex/scale-set-worker`, stacked above PR #5. PR #6 is open; CI run #9
-passed on Ubuntu, Windows, and macOS after the OTLP test was hardened to
+Delivered by merged PR #6 from `codex/scale-set-worker`; CI run #9 passed on
+Ubuntu, Windows, and macOS after the OTLP test was hardened to
 aggregate separate metric export batches. Added deterministic request-to-runner
 identity mapping and a provider-neutral message handler. It acquires offered
 requests before provisioning only GitHub-confirmed IDs, keeps the latest
@@ -93,7 +101,7 @@ unacknowledged. Focused Hosting Release tests passed 141/141 with no skips.
 
 ### M5.3 executable host and per-scale-set runtime
 
-Branch: `codex/autoscaler-host`, stacked above PR #6. Added the environment-only
+Delivered by merged PR #7 from `codex/autoscaler-host`. Added the environment-only
 `run` host, a shared capacity coordinator, and a Docker-backed runtime factory.
 Each scale set resolves or creates its GitHub group/set, atomically records a
 non-secret identity marker before opening its journal, reconciles provider and
@@ -103,10 +111,7 @@ The initial stop implementation preserved runners and closed sessions within
 the per-set cleanup timeout; M5.4 replaces this with the confirmed bounded
 drain sequence. Focused Hosting Release tests passed 144/144 with no skips,
 including fake-backed multi-set startup ordering and marker recovery checks.
-PR #7 is stacked above PR #6 at `bfb0415`; hosted workflow run #12 passed on
-Ubuntu, Windows, and macOS.
-
-PR #4 targets `codex/github-client-transport`; keep the stack until PR #3 merges.
+Hosted workflow run #12 passed on Ubuntu, Windows, and macOS.
 
 ### M5.4 capacity, lifecycle cleanup, and bounded drain
 
@@ -156,7 +161,7 @@ OCI export compiled the final app for both `linux/amd64` and `linux/arm64` and
 completed successfully under `/private/tmp`; the image was not loaded into a
 registry. The first hosted PR run exposed the default Buildx driver limitation;
 the workflow now creates a container-backed multi-platform builder. PR #8 is
-open, stacked above PR #7. Hosted workflow run `37041745255` passed on Linux,
+merged above PR #7. Hosted workflow run `37041745255` passed on Linux,
 Windows, macOS, and the multi-platform container job. A dedicated live
 GitHub/Docker canary still requires a designated test
 scale set; no package or container image was published and no infrastructure
