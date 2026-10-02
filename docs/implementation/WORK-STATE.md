@@ -60,13 +60,32 @@ or infrastructure deployed.
 
 ## Current work
 
-Branch: `codex/docker-provider-recovery`, based on client commit `ae063d4`.
-PR #4 targets `codex/github-client-transport`; preserve that stack until PR #3
-merges. The Windows portability correction is pushed, and PR #4 CI is green.
-Next is the autoscaler controller run loop, reconciliation, drain and recovery
-hosting, health endpoints, and deployment artifacts. Linux Docker integration
-ran against `/var/run/docker.sock`; cleanup is scoped to unique test ownership
-labels. Do not prune or remove unrelated containers or images.
+### M5 durable runner provisioning slice
+
+Branch: `codex/controller-orchestration`, stacked above the green PR #4 head
+`dbf1ad8`. Added a provider-neutral provisioner and a JIT-client adapter. It
+persists reservation, JIT, GitHub runner association, create, and start intents
+before their corresponding side effects. JIT data stays in memory. Ownership
+scoped discovery and exact-resource inspection prevent duplicate creates.
+
+The Hosting Release test project passed 135/135 tests with no skips, including
+nine new ordering, recovery, and concurrency cases. Recovery retries start once
+only when a journaled `Starting` operation inspects as `Created` with no
+start/finish time; it adopts the result as `Unknown`. Running and other
+recovered resources are adopted as `Unknown`. An unresolved `Creating` intent
+becomes `Unknown` and fails closed instead of blindly recreating a runner.
+Overlapping calls are coalesced by `(ownership scope, operation ID)`; separate
+operations/scopes remain concurrent, and a canceled waiter cannot release the
+active operation's gate. The provisioner is not yet wired into the executable
+or a hosted controller. No M5 commit or PR has been created yet.
+
+PR #4 targets `codex/github-client-transport`; keep the stack until PR #3 merges.
+Its Windows correction is pushed and its CI is green. Next is per-scale-set
+startup/reconciliation and listener orchestration, then process-wide capacity
+planning, bounded drain/session close, health endpoints, and deployment
+artifacts. Linux Docker integration ran against `/var/run/docker.sock`; cleanup
+is scoped to unique test ownership labels. Do not prune or remove unrelated
+containers or images.
 
 ## Constraints for resumed execution
 
