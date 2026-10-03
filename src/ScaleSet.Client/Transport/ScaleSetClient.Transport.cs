@@ -439,7 +439,12 @@ public sealed partial class ScaleSetClient
                     continue;
                 }
 
-                if (readOnly && IsTransient(response.StatusCode) && transientRetries < _options.MaxReadOnlyRetries)
+                TimeSpan? retryAfter = GetRetryAfterDelay(response);
+                bool retryAfterWithinBound = retryAfter is null
+                    || retryAfter.Value <= ScaleSetClientOptions.MaximumRetryDelay;
+                if (readOnly && IsTransient(response.StatusCode)
+                    && transientRetries < _options.MaxReadOnlyRetries
+                    && retryAfterWithinBound)
                 {
                     response.Dispose();
                     activity?.SetStatus(ActivityStatusCode.Error, "transient HTTP response");
@@ -450,7 +455,7 @@ public sealed partial class ScaleSetClient
                         _timeProvider.GetElapsedTime(startTimestamp).TotalSeconds);
                     transientRetries++;
                     ScaleSetClientDiagnostics.RecordRetry(dependency, method.Method, "transient");
-                    await DelayBeforeRetryAsync(transientRetries, cancellationToken).ConfigureAwait(false);
+                    await DelayBeforeRetryAsync(transientRetries, cancellationToken, retryAfter).ConfigureAwait(false);
                     continue;
                 }
 
@@ -627,19 +632,56 @@ public sealed partial class ScaleSetClient
             null);
     }
 
-    private async Task DelayBeforeRetryAsync(int retryNumber, CancellationToken cancellationToken)
+    private TimeSpan? GetRetryAfterDelay(HttpResponseMessage response)
+    {
+        if (response.StatusCode is not (HttpStatusCode.TooManyRequests or HttpStatusCode.ServiceUnavailable)
+            || !response.Headers.TryGetValues("Retry-After", out IEnumerable<string>? values))
+        {
+            return null;
+        }
+
+        foreach (string value in values)
+        {
+            if (!RetryConditionHeaderValue.TryParse(value, out RetryConditionHeaderValue? retryAfter)
+                || retryAfter is null)
+            {
+                continue;
+            }
+
+            TimeSpan delay = retryAfter.Delta
+                ?? (retryAfter.Date is DateTimeOffset date
+                    ? date - _timeProvider.GetUtcNow()
+                    : TimeSpan.Zero);
+            return delay < TimeSpan.Zero ? TimeSpan.Zero : delay;
+        }
+
+        return null;
+    }
+
+    private async Task DelayBeforeRetryAsync(
+        int retryNumber,
+        CancellationToken cancellationToken,
+        TimeSpan? retryAfter = null)
     {
         var baseMilliseconds = _options.RetryBaseDelay.TotalMilliseconds;
         if (baseMilliseconds <= 0)
         {
+            if (retryAfter is { } serverDelay && serverDelay > TimeSpan.Zero)
+            {
+                await Task.Delay(serverDelay, _timeProvider, cancellationToken).ConfigureAwait(false);
+            }
+
             return;
         }
 
         var cap = _options.RetryMaxDelay.TotalMilliseconds;
         var exponential = Math.Min(cap, baseMilliseconds * Math.Pow(2, Math.Min(retryNumber - 1, 30)));
         var half = exponential / 2;
-        var jittered = half + (Random.Shared.NextDouble() * half);
-        await Task.Delay(TimeSpan.FromMilliseconds(jittered), _timeProvider, cancellationToken).ConfigureAwait(false);
+        var jittered = TimeSpan.FromMilliseconds(half + (Random.Shared.NextDouble() * half));
+        var delay = retryAfter is { } serverRetryAfter && serverRetryAfter > jittered
+            ? serverRetryAfter
+            : jittered;
+        await Task.Delay(delay, _timeProvider, cancellationToken).ConfigureAwait(false);
     }
 
     private static async Task<byte[]> ReadResponseBodyAsync(

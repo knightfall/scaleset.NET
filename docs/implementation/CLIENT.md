@@ -56,9 +56,10 @@ Close the remote message session before disposing its parent client.
   Queue 401 coordinates one refresh and one retry. Acknowledgment still occurs
   only after successful handling, with the listener's independent timeout.
 - Requests have separate control and long-poll budgets. Transient read retries
-  are bounded. General mutation replay and poll hedging are absent; registration
-  discovery has its scoped authorization retry policy. This follows the
-  product's safer replay policy.
+  are bounded, and valid `Retry-After` values for 429/503 responses are honored
+  up to one minute. General mutation replay and poll hedging are absent;
+  registration discovery has its scoped authorization retry policy. This
+  follows the product's safer replay policy.
 - The library emits `ScaleSet.Client` logical attempt activities and metrics and
   accepts Microsoft logging abstractions. Logical activities use Internal kind;
   application HTTP instrumentation supplies the network Client spans.
