@@ -352,13 +352,16 @@ adding any durable asynchronous job queue.
   instance's session to take over. Exclusive local state plus one-owner
   deployment is not distributed leader election. [TODO, M3] Verify actual
   service conflict behavior in local fixtures and live canary.
-- A healthy runner exits after one job. Reconciliation checks exited/failed
-  containers independently of completion events and cleans leaked partial
-  resources. Removal is scoped and idempotent.
-- Idle scale-down uses known idle state and a configured grace period;
-  shrinking max capacity never terminates known busy/unknown runners just to
-  force the count down. Configuration can explicitly select Docker builds or
-  privileged mode; safe default is neither.
+- A healthy runner exits after one job. Startup discovery reconciles owned
+  provider resources with journal state before polling. During runtime,
+  completion events drive cleanup of known terminal runners; periodic
+  reconciliation of unexpected exits and leaked partial resources is planned.
+- `IdleTimeout` is currently accepted and validated but is not applied by the
+  runtime. Idle-runner retirement is planned. Future scale-down must use known
+  idle state and a configured grace period; shrinking max capacity must never
+  terminate known busy/unknown runners just to force the count down.
+  Configuration can explicitly select Docker builds or privileged mode; safe
+  default is neither.
 - Confirmed shutdown policy (D12): drain and preserve. Stop new acquisitions
   and provisioning, continue processing/acking lifecycle messages during the
   configurable drain period, and remove only confirmed terminal resources.
