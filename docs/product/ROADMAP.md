@@ -211,13 +211,15 @@ poll window, plus a configurable total budget. Avoid hedging session polls or
 mutations. Set Authorization per request so admin/queue credentials cannot
 race through shared default headers.
 
-Retry matrix: read-only requests may retry bounded transient failures with
-backoff/jitter; registration exchange has its scoped 401/403 retry behavior;
-queue 401 performs one coordinated refresh/retry. Mutations require an
-explicit operation-specific replay strategy or post-failure reconciliation,
-especially scale-set creation and JIT generation. Preserve response/status
-contracts while documenting this safer transport-policy departure from Go's
-generic retries. Microsoft notes that [standard retries apply to all methods
+Retry policy is request-class aware: read-only control-plane requests may retry
+bounded transient failures with jitter; valid `Retry-After` values on 429/503
+are honored up to one minute; larger values skip automatic retry rather than
+retrying early. Registration discovery has its scoped 401/403 retry behavior; queue 401
+performs one coordinated refresh/retry, while long polls are not generically
+retried or hedged. Mutations require an explicit operation-specific replay
+strategy or post-failure reconciliation, especially scale-set creation and JIT
+generation. This preserves response/status contracts while avoiding blind
+mutation replay. Microsoft notes that [standard retries apply to all methods
 unless configured](https://learn.microsoft.com/en-us/dotnet/core/resilience/http-resilience).
 
 App/PAT descriptors are mutually exclusive. Bind credential values/references

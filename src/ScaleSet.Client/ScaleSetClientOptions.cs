@@ -23,7 +23,7 @@ public sealed record ScaleSetClientMetadata
 public sealed record ScaleSetClientOptions
 {
     private static readonly TimeSpan MaximumTimerDuration = TimeSpan.FromMilliseconds(uint.MaxValue - 1d);
-    private static readonly TimeSpan MaximumRetryDelay = TimeSpan.FromMinutes(1);
+    internal static readonly TimeSpan MaximumRetryDelay = TimeSpan.FromMinutes(1);
 
     /// <summary>Maximum duration for control-plane requests. Defaults to 60 seconds.</summary>
     public TimeSpan ControlRequestTimeout { get; init; } = TimeSpan.FromSeconds(60);
@@ -40,7 +40,10 @@ public sealed record ScaleSetClientOptions
     /// <summary>Base delay for bounded read-only retry backoff.</summary>
     public TimeSpan RetryBaseDelay { get; init; } = TimeSpan.FromMilliseconds(200);
 
-    /// <summary>Maximum delay for bounded read-only retry backoff.</summary>
+    /// <summary>
+    /// Maximum delay for locally calculated read-only retry backoff. Valid
+    /// server Retry-After values may override this delay up to one minute.
+    /// </summary>
     public TimeSpan RetryMaxDelay { get; init; } = TimeSpan.FromSeconds(3);
 
     /// <summary>Optional valid HTTP User-Agent product list.</summary>

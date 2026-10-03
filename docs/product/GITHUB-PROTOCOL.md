@@ -121,8 +121,10 @@ Stable scale-set identity; owned-resource discovery; replay-safe state;
 bounded parallel provisioning; two named scaling policies; explicit idle
 retirement; safe drain; configurable resources; packaged deployment and
 telemetry. These are application changes, not invented changes to GitHub's
-HTTP/message semantics. Retry safety and bounded cleanup are documented
-transport-policy improvements and require explicit fixtures/fault tests.
+HTTP/message semantics. The transport retries selected read-only failures;
+valid 429/503 `Retry-After` values are honored up to one minute. It does not
+blindly replay mutations or automatically retry/hedge long polls. Queue-token
+401 refresh and registration-discovery auth retries remain operation-specific.
 
 Confirmed D12 adds drain-and-preserve shutdown: stop acquisition/provisioning,
 allow a bounded drain, then exit without stopping busy/unknown runners or
