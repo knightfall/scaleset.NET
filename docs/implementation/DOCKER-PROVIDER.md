@@ -1,10 +1,10 @@
-# Docker provider and recovery foundation
+# Docker Runner Provider
 
-This milestone adds provider-neutral ownership and lifecycle contracts, a
-non-secret file journal, host-capacity planning/reservations, and a Docker
-Engine adapter. The CLI does not yet compose these pieces into a running
-autoscaler. Controller reconciliation and polling, drain/shutdown orchestration,
-health endpoints, Compose deployment and release images remain subsequent work.
+`ScaleSet.Providers.Docker` is the current first-party runner backend. It plugs
+into provider-neutral ownership, lifecycle, durable state, and capacity
+contracts in `ScaleSet.Hosting`. The controller composes these pieces into a
+running autoscaler with reconciliation, polling, drain-and-preserve shutdown,
+health endpoints, container packaging, and Compose deployment.
 
 ## Ownership and recovery
 
@@ -68,8 +68,9 @@ The integration run used the local Docker 29.8.1 Linux arm64 daemon and only a
 pinned public BusyBox image with synthetic JIT data. It verified ownership
 scoping, survival after provider disposal, safe terminal cleanup and journal
 reopen. Scoped cleanup left no test-owned containers. Four local alpha packages
-were created and none published. Hosted GitHub Actions for this branch has not
-run yet.
+were created and none published. The hosted workflow passed on Linux, macOS,
+and Windows, including the multi-platform container build. No package or image
+has been published.
 
 The direct evidence is in [Docker unit tests](../../tests/ScaleSet.Docker.Tests),
 [live integration tests](../../tests/ScaleSet.Docker.IntegrationTests),

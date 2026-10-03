@@ -1,4 +1,4 @@
-# Codebase Structure
+# Go Reference: Source Structure
 
 Source: `actions/scaleset` at `e6daac702355cdb5b880b4fbdcf6d85dcd9e48e5`.
 Paths below refer to that repository, not proposed C# directories.
@@ -48,7 +48,7 @@ module, including the example.
 
 ## 5) Evidence
 
-- [Saved tree and metrics](../migration/upstream-scan.txt)
+- [Saved tree and metrics](source-scan.txt)
 - [Application entry](https://github.com/actions/scaleset/blob/e6daac702355cdb5b880b4fbdcf6d85dcd9e48e5/examples/dockerscaleset/main.go)
 - [Listener](https://github.com/actions/scaleset/blob/e6daac702355cdb5b880b4fbdcf6d85dcd9e48e5/listener/listener.go)
 - [Session creation](https://github.com/actions/scaleset/blob/e6daac702355cdb5b880b4fbdcf6d85dcd9e48e5/client.go#L698)

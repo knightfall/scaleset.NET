@@ -1,6 +1,6 @@
 # Docker deployment
 
-The phase-one controller runs as one container per owned state directory. The
+The current Docker controller runs as one container per owned state directory. The
 example in [`examples/docker-compose/compose.yaml`](../../examples/docker-compose/compose.yaml)
 mounts durable state and the Docker Engine socket; runner containers are
 created separately by the Docker provider.

@@ -1,8 +1,9 @@
 # Observability and Configuration Design
 
-Status: phase-one design finalized; requirements confirmed in D16-D20,
-engineering defaults accepted in D15. This is not implemented runtime behavior. This
-supplements [PLAN.md](PLAN.md) and [DECISIONS.md](DECISIONS.md).
+Status: controller telemetry/configuration requirements are recorded in
+D15-D20. This guide describes current configuration and the planned AWS
+runtime integration; it supplements [ROADMAP.md](ROADMAP.md) and
+[DECISIONS.md](DECISIONS.md).
 
 ## 1. Required pipelines and ownership
 
@@ -105,7 +106,7 @@ full URLs, arbitrary error text, and secret paths are excluded. Use exemplars
 for metric/trace correlation where supported. Test overflow and hot-path
 allocations against [.NET metrics best practices](https://opentelemetry.io/docs/languages/dotnet/metrics/best-practices/).
 
-## 4. Phase-one environment schema
+## 4. Current controller environment schema
 
 Environment variables override code defaults. Configure the host explicitly
 to exclude implicit appsettings JSON/command-line configuration providers.
@@ -147,18 +148,23 @@ Common and signal-specific HTTP endpoint paths differ; follow
 [OTLP exporter configuration](https://opentelemetry.io/docs/languages/sdk-configuration/otlp-exporter/).
 Product deployment has no feature switch that silently disables tracing/metrics.
 
-Phase-one credentials can be injected into the controller environment.
+GitHub App or PAT credentials can be injected into the current controller
+environment.
 Examples use placeholders only; never dump the environment/config or pass
 controller credentials to runners. File references can be added if requested,
 but mounted credential files are not a required configuration mechanism.
 
-## 5. Phase-two runtime AWS providers
+## 5. Planned AWS runtime configuration
 
-Confirmed D18-D19: use Parameter Store for settings and Secrets Manager for
-credentials, loaded by runtime providers with caching/credential refresh.
-Keep AWS dependencies in ScaleSet.Configuration.Aws, outside Client/Listener.
-Environment supplies bootstrap region, settings prefix, credential references,
-and deployment overrides. Resolve AWS identity through the workload role.
+For AWS deployments, use Parameter Store for settings and Secrets Manager for
+credentials, loaded by runtime providers with caching and credential refresh.
+Keep AWS dependencies in `ScaleSet.Configuration.Aws`, outside Client/Listener.
+The controller is intended to run in the customer's account as a Lambda
+function or ECS service, with AWS API access through its workload role.
+Controller hosting is distinct from runner compute: the selected runner
+provider manages configured ECS tasks or direct EC2 instances. Environment
+configuration supplies the AWS Region, settings prefix, target resource
+references, credential references, and deployment overrides.
 
 Proposed operational precedence: code defaults < validated Parameter Store
 snapshot < explicit non-secret environment overrides. Bind operational settings
