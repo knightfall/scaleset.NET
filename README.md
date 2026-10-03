@@ -1,49 +1,57 @@
 # scaleset.NET
 
-.NET 10 implementation of GitHub Actions Runner Scale Set contracts and a
-Docker autoscaler, developed in the milestones below.
+**scaleset.NET is a .NET-native autoscaler for GitHub Actions self-hosted runners.**
+It is built for teams that want to run runners on infrastructure they control
+without operating Kubernetes. The controller reads GitHub Runner Scale Set
+demand, provisions runners through infrastructure providers, tracks job
+activity, and recovers runner state after restarts.
 
-The migration preserves GitHub API and message protocol behavior while using
-idiomatic asynchronous C# APIs. Phase one targets Docker. Phase two adds
-separate ECS-task and direct EC2-instance providers.
+The GitHub client, listener, and runner lifecycle are separate from the compute
+provider. This keeps the GitHub integration reusable while allowing the
+controller to manage different runner environments.
 
-## Planning documents
+## Current implementation
 
-- [Migration plan](docs/migration/PLAN.md)
-- [Confirmed decisions](docs/migration/DECISIONS.md)
-- [Protocol parity checklist](docs/migration/PROTOCOL-PARITY.md)
-- [Observability and configuration design](docs/migration/OBSERVABILITY-CONFIGURATION.md)
-- [Analysis and validation evidence](docs/migration/VALIDATION.md)
-- [Upstream architecture](docs/codebase/ARCHITECTURE.md)
-- [Stack](docs/codebase/STACK.md), [structure](docs/codebase/STRUCTURE.md),
-  [conventions](docs/codebase/CONVENTIONS.md),
-  [integrations](docs/codebase/INTEGRATIONS.md),
-  [testing](docs/codebase/TESTING.md), and
-  [concerns](docs/codebase/CONCERNS.md)
+The current product includes .NET 10 client and listener libraries, a Docker
+runner provider, and a controller service with durable state, shared capacity
+planning, health endpoints, and bounded drain-and-preserve shutdown. The
+provided container and Compose deployment run the controller without
+Kubernetes.
 
-The implementation now includes the .NET 10 client/listener libraries, a
-Docker autoscaler host, durable runner journal, shared capacity planning,
-bounded drain-and-preserve shutdown, health endpoints, and the Linux x64/arm64
-container/Compose deployment path. The client supports GitHub App/PAT
-authentication, administration APIs and message sessions. Capacity scales from
-`TotalAssignedJobs`; Docker restart reconciliation uses observed runner
-resources and retained scale-set identity. See the
-[client evidence](docs/implementation/CLIENT.md),
-[Docker provider evidence](docs/implementation/DOCKER-PROVIDER.md), and
-[Docker deployment guide](docs/implementation/DOCKER-DEPLOYMENT.md). Current
-implementation and validation status is tracked in
-[WORK-STATE.md](docs/implementation/WORK-STATE.md). Live GitHub canaries and
-container publishing have not been performed.
+The initial GitHub target is GitHub.com at repository or organization scope,
+using a GitHub App or PAT. GHES and enterprise scope are not supported yet.
 
-Phase two is the separate ECS-task and direct EC2-runner work. AWS infrastructure
-topology, roles, bootstrap, state, and rollout details remain deferred under
-D14; later infrastructure is planned in CDK v2 TypeScript. The analysis baseline is
-[`actions/scaleset` at e6daac7](https://github.com/actions/scaleset/tree/e6daac702355cdb5b880b4fbdcf6d85dcd9e48e5).
+## AWS direction
+
+The product direction is to run the controller in the customer's AWS account,
+hosted by Lambda or ECS and authorized with an IAM role. Operators configure
+which AWS resources the controller can manage. Runner providers will initially
+target ECS tasks and direct EC2 instances; detailed AWS topology, IAM policies,
+bootstrap, and deployment design remain to be completed.
+
+Controller hosting and runner compute are separate choices: for example, an
+ECS-hosted controller can provision runner tasks in a configured ECS cluster.
+GitHub credentials (App or PAT) authorize GitHub API calls; the controller's
+IAM role authorizes AWS operations.
+
+## Documentation
+
+- [Product roadmap](docs/product/ROADMAP.md)
+- [Product decisions](docs/product/DECISIONS.md)
+- [GitHub protocol contract](docs/product/GITHUB-PROTOCOL.md)
+- [Observability and configuration](docs/product/OBSERVABILITY-CONFIGURATION.md)
+- [Verification evidence](docs/product/VERIFICATION.md)
+- [Docker provider](docs/implementation/DOCKER-PROVIDER.md)
+- [Docker deployment](docs/implementation/DOCKER-DEPLOYMENT.md)
+- [GitHub client and listener](docs/implementation/CLIENT.md)
+- [Implementation status](docs/implementation/WORK-STATE.md)
+- [Go reference source notes](docs/reference/actions-scaleset/ARCHITECTURE.md)
 
 ## Development
 
-Use the SDK pinned by `global.json` (.NET 10). Roslynator is a private build-time
-analyzer dependency. Enabled compiler/analyzer warnings are build errors.
+Use the SDK pinned by `global.json` (.NET 10). Roslynator is a private
+build-time analyzer dependency. Enabled compiler and analyzer warnings are
+build errors.
 
 ```sh
 dotnet restore ScaleSet.slnx
@@ -51,10 +59,10 @@ dotnet build ScaleSet.slnx --configuration Release --no-restore
 dotnet test --solution ScaleSet.slnx --configuration Release
 ```
 
-Tests use xUnit v3 with native Microsoft Testing Platform; solution discovery
-is part of the validation. Dependencies are centrally versioned.
+Tests use xUnit v3 with native Microsoft Testing Platform. Dependencies are
+centrally versioned.
 
-The executable exposes bounded foundation commands:
+The executable provides these commands:
 
 ```sh
 dotnet run --project src/ScaleSet.Autoscaler -- validate-config
@@ -62,9 +70,8 @@ dotnet run --project src/ScaleSet.Autoscaler -- telemetry-smoke
 dotnet run --project src/ScaleSet.Autoscaler -- run
 ```
 
-`validate-config` checks product settings and required telemetry without GitHub
-or Docker side effects. `telemetry-smoke` emits logs, traces and metrics to the
-configured OTLP receiver; verify receipt at that receiver. It does not require
-GitHub credentials. `run` starts the autoscaler and its health endpoints.
-See the [environment and telemetry schema](docs/migration/OBSERVABILITY-CONFIGURATION.md)
-and [Docker deployment guide](docs/implementation/DOCKER-DEPLOYMENT.md).
+`validate-config` checks application settings and required telemetry without
+GitHub or Docker side effects. `telemetry-smoke` emits logs, traces, and
+metrics to the configured OTLP receiver; verify receipt at that receiver. It
+does not require GitHub credentials. `run` starts the autoscaler and health
+endpoints. See the [observability and configuration guide](docs/product/OBSERVABILITY-CONFIGURATION.md).

@@ -1,8 +1,8 @@
-# GitHub client and message-session milestone
+# GitHub Client and Message-Session Libraries
 
-The client milestone builds on the merged foundation (`cbc5841`) and the pinned
-Go baseline `e6daac702355cdb5b880b4fbdcf6d85dcd9e48e5`. Implementation and tests
-use GPT-6 Luna subagents at max reasoning effort, followed by integration review.
+The .NET client and listener implement the GitHub Runner Scale Set API and
+message-session contracts used by the controller. The reviewed Go reference is
+pinned at `e6daac702355cdb5b880b4fbdcf6d85dcd9e48e5`.
 
 ## Public use and ownership
 
@@ -46,7 +46,7 @@ Close the remote message session before disposing its parent client.
 - Credentials are attached to each request. Administration, GitHub REST and
   queue credentials remain separate. Job acquisition uses the administration
   origin with the queue bearer token, as in Go.
-- Administration operations cover the complete phase-one protocol inventory:
+- Administration operations cover the supported protocol inventory:
   scale sets, runner groups, registered runners, JIT configuration and sessions.
   Lookups preserve their null/cardinality contracts. List methods expose empty
   C# collections for Go nil slices. Create defaults absent labels to the name;
@@ -57,8 +57,8 @@ Close the remote message session before disposing its parent client.
   only after successful handling, with the listener's independent timeout.
 - Requests have separate control and long-poll budgets. Transient read retries
   are bounded. General mutation replay and poll hedging are absent; registration
-  discovery has its scoped authorization retry policy. This follows the safer
-  replay policy approved in the migration plan.
+  discovery has its scoped authorization retry policy. This follows the
+  product's safer replay policy.
 - The library emits `ScaleSet.Client` logical attempt activities and metrics and
   accepts Microsoft logging abstractions. Logical activities use Internal kind;
   application HTTP instrumentation supplies the network Client spans.
@@ -66,7 +66,7 @@ Close the remote message session before disposing its parent client.
   Diagnostics redact credentials and omit queue URL credentials; HTTP failures
   retain independent status/domain classifications and correlation metadata.
 
-## Verification
+## Client verification
 
 Independent local validation on macOS arm64:
 
@@ -83,8 +83,8 @@ Roslynator, .NET and xUnit analyzer diagnostics remain build errors; no new
 diagnostic suppressions were introduced. Tests use fake HTTP handlers and
 injected clocks, with no live GitHub credentials or remote API effects. The
 existing hosting tests also verify actual OTLP export to a loopback receiver.
-These results do not establish a real runner workflow, Docker lifecycle or
-platform trust-store parity. Packages were built locally and were not published.
+These results do not establish a real runner workflow, Docker lifecycle, or
+platform trust-store behavior. Packages were built locally and were not published.
 
 The table maps requirements to exact tests. Paths are beneath `tests/`.
 
@@ -117,6 +117,6 @@ cancellation-sharing and credential-redaction defects and strengthened boundary
 and bookkeeping assertions. No mutation-testing or coverage-percentage result
 is claimed.
 
-Docker provisioning, controller reconciliation, durable ownership/recovery,
-health hosting and deployment artifacts remain subsequent phase-one work.
-Detailed AWS planning and AWS providers remain deferred.
+The client and listener libraries are now composed into the Docker controller.
+AWS runner providers, AWS controller hosting, and live GitHub canaries remain
+planned work; see [Implementation Status](WORK-STATE.md).

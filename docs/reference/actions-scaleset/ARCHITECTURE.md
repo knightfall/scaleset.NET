@@ -1,7 +1,8 @@
-# Architecture
+# Go Reference Architecture
 
-This is the observed Go architecture at upstream commit
-`e6daac702355cdb5b880b4fbdcf6d85dcd9e48e5`, not a description of implemented C#.
+This guide records the observed Go reference architecture at commit
+`e6daac702355cdb5b880b4fbdcf6d85dcd9e48e5`. See the product roadmap and
+implementation notes for scaleset.NET design and current status.
 
 ## 1) Architectural Style
 
@@ -61,7 +62,7 @@ mocking, and callbacks never execute concurrently.
 
 ## 5) Known Architectural Risks
 
-These are source-derived migration risks, not validated production incidents:
+These are source-derived design considerations, not validated production incidents:
 
 - Source comments can overstate listener session ownership.
 - Example runner maps disappear on restart and panic on unknown/replayed names.

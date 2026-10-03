@@ -1,10 +1,11 @@
-# Protocol Parity Checklist
+# GitHub API and Message Protocol Contract
 
 Baseline: [actions/scaleset, e6daac702355cdb5b880b4fbdcf6d85dcd9e48e5](https://github.com/actions/scaleset/tree/e6daac702355cdb5b880b4fbdcf6d85dcd9e48e5).
-Status: the phase-one C# client and listener inventory is implemented and verified
-with deterministic wire/fake-handler tests. See the
-[client milestone evidence](../implementation/CLIENT.md). Live GitHub workflow
-and Docker lifecycle validation remain subsequent work.
+The .NET client and listener implement the listed GitHub API and message
+contracts for the currently supported GitHub.com targets. Deterministic
+wire/fake-handler tests cover these behaviors; they do not establish live
+GitHub workflow compatibility. See the
+[client verification evidence](../implementation/CLIENT.md).
 
 ## URL and credential domains
 
@@ -15,7 +16,7 @@ rather than shared mutable default Authorization headers.
 
 | Contract | Source | Required C# behavior |
 |---|---|---|
-| Registration scope | `config.go`, `createRegistrationTokenPath` | Phase-one repo/org URL parser and correct `/repos/{org}/{repo}` or `/orgs/{org}` paths |
+| Registration scope | `config.go`, `createRegistrationTokenPath` | Current repo/org URL parser and correct `/repos/{org}/{repo}` or `/orgs/{org}` paths |
 | Hosted API host | `config.go` | `github.com`/`www.github.com` map to `api.github.com`; validate supported origins |
 | Other hosts/enterprise | `config.go` | Record as deferred support, reject clearly rather than advertise unvalidated GHES/enterprise compatibility |
 | App token | `jwt_provider.go`, `fetchAccessToken` | RS256; issuer ClientID; iat now-1 minute; exp iat+9 minutes; installation-token POST returns 201 |
@@ -26,8 +27,8 @@ rather than shared mutable default Authorization headers.
 | API version | `actionsServiceAdminToken.requestURL` | Actions administration requests default query `api-version=6.0-preview`; merge and encode existing query correctly |
 | Metadata | `common_client.go`, `SystemInfo` | System/subsystem/version/commit/scale-set metadata; valid user-agent and secret-free debug info |
 
-Keep a replaceable async JWT-provider seam. A concrete remote signer and GHES
-support are not required for phase one. JWT expiry parsing is scheduling
+Keep a replaceable async JWT-provider seam. Concrete remote signers and GHES
+support are outside the current GitHub target scope. JWT expiry parsing is scheduling
 metadata, not a substitute for server identity/token verification.
 
 ## Administration API inventory
@@ -35,20 +36,20 @@ metadata, not a substitute for server identity/token verification.
 Paths below are relative to the discovered Actions service URL. JSON request
 content type is application/json and Authorization is the admin bearer token.
 
-| Go operation -> proposed C# operation | Verb/path | Success/result contract |
+| Reference operation | scaleset.NET operation | Verb/path and success/result contract |
 |---|---|---|
-| GetRunnerScaleSet -> FindScaleSetAsync | GET `_apis/runtime/runnerscalesets?runnerGroupId=...&name=...` | 200; count=0 returns null; count=1 returns object; multiple matches fail |
-| ListRunnerScaleSets -> ListScaleSetsAsync | GET same collection with runnerGroupId only | 200; decode `value` array |
-| GetRunnerScaleSetByID -> GetScaleSetAsync | GET collection/{id} | 200; deserialize object/null as received |
-| GetRunnerGroupByName -> GetRunnerGroupByNameAsync | GET `_apis/runtime/runnergroups/?groupName=...` | 200; zero/multiple groups fail |
-| CreateRunnerScaleSet -> CreateScaleSetAsync | POST scale-set collection | 200; default absent labels to scale-set name; label type defaults to System |
-| UpdateRunnerScaleSet -> UpdateScaleSetAsync | PATCH collection/{id} | 200; default supplied label types, without create-only name-label fallback |
-| DeleteRunnerScaleSet -> DeleteScaleSetAsync | DELETE collection/{id} | 204 |
-| GenerateJitRunnerConfig -> GenerateJitConfigAsync | POST collection/{id}/generatejitconfig | 200; name/workFolder body; runner plus `encodedJITConfig` |
-| GetRunner -> GetRunnerAsync | GET `_apis/distributedtask/pools/0/agents/{id}` | 200 |
-| GetRunnerByName -> FindRunnerByNameAsync | GET agents?agentName=... | 200; zero=null; multiple fail |
-| RemoveRunner -> RemoveRunnerAsync | DELETE agents/{id} | 204; preserve JobStillRunning/NotFound classifications |
-| MessageSessionClient -> CreateMessageSessionAsync | POST scale-set/{id}/sessions | 200; ownerName body; initialized session object |
+| GetRunnerScaleSet | `FindScaleSetAsync` | GET `_apis/runtime/runnerscalesets?runnerGroupId=...&name=...`; 200; zero returns null, one returns object, multiple fail |
+| ListRunnerScaleSets | `ListScaleSetsAsync` | GET same collection with runnerGroupId only; decode `value` array |
+| GetRunnerScaleSetByID | `GetScaleSetAsync` | GET collection/{id}; deserialize object/null as received |
+| GetRunnerGroupByName | `GetRunnerGroupByNameAsync` | GET `_apis/runtime/runnergroups/?groupName=...`; zero/multiple groups fail |
+| CreateRunnerScaleSet | `CreateScaleSetAsync` | POST scale-set collection; default absent labels to scale-set name; label type defaults to System |
+| UpdateRunnerScaleSet | `UpdateScaleSetAsync` | PATCH collection/{id}; default supplied label types, without create-only name-label fallback |
+| DeleteRunnerScaleSet | `DeleteScaleSetAsync` | DELETE collection/{id}; 204 |
+| GenerateJitRunnerConfig | `GenerateJitConfigAsync` | POST collection/{id}/generatejitconfig; name/workFolder body; runner plus `encodedJITConfig` |
+| GetRunner | `GetRunnerAsync` | GET `_apis/distributedtask/pools/0/agents/{id}`; 200 |
+| GetRunnerByName | `FindRunnerByNameAsync` | GET agents?agentName=...; zero=null; multiple fail |
+| RemoveRunner | `RemoveRunnerAsync` | DELETE agents/{id}; preserve JobStillRunning/NotFound classifications |
+| MessageSessionClient | `CreateMessageSessionAsync` | POST scale-set/{id}/sessions; ownerName body; initialized session object |
 
 Application-level get-or-create and destructive cleanup policies sit above
 these client methods. Client operations should not silently turn arbitrary

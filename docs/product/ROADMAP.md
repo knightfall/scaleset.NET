@@ -1,44 +1,57 @@
-# Go to C# Migration Plan
+# scaleset.NET Product Roadmap
 
-Status: **phase-one migration plan finalized; user decisions resolved**.
-Detailed AWS infrastructure planning remains deferred until later.
-Date: 2026-10-02. Branch: `codex/go-to-csharp-migration-plan`.
-Source baseline: [actions/scaleset at e6daac702355cdb5b880b4fbdcf6d85dcd9e48e5](https://github.com/actions/scaleset/tree/e6daac702355cdb5b880b4fbdcf6d85dcd9e48e5).
-Target starting commit: `ab0c4cf` (README, Apache-2.0 license, gitignore;
-no source, solution, CI, or test projects).
+Status: **Docker-backed autoscaler available; AWS controller and runner
+providers are planned**. Detailed AWS resource and deployment design remains
+open. Source protocol reference: [actions/scaleset at
+e6daac702355cdb5b880b4fbdcf6d85dcd9e48e5](https://github.com/actions/scaleset/tree/e6daac702355cdb5b880b4fbdcf6d85dcd9e48e5).
 
-## 1. Objective and scope
+## 1. Product objective and scope
 
-Build a .NET 10 autoscaler with reusable NuGet client/listener libraries,
-a configurable executable service, and deployment artifacts. Preserve GitHub
-API/protocol contracts with idiomatic C#. Docker is phase one. Separate ECS
-task and direct EC2 instance providers are phase two. The first supported
-GitHub matrix is GitHub.com repository/organization scopes with App or PAT
-authentication. GHES, enterprise scope, concrete remote JWT signers, a web
-dashboard, automatic failover, and cross-account AWS control are not presumed
-phase-one requirements.
+scaleset.NET is a .NET-native, Kubernetes-free autoscaler for GitHub Actions
+self-hosted runners. Teams run the controller in their environment and grant
+it access to the infrastructure it is configured to manage. The controller
+turns GitHub runner demand into provisioned capacity, tracks runner activity,
+and reconciles resources after restarts.
 
-Confirmed choices are tracked in [DECISIONS.md](DECISIONS.md). D15 accepts the
-package/test/default settings; D21 requires Roslynator for C# code quality.
-D16-D20 require ILogger/Serilog OTLP
-logging, mandatory OpenTelemetry traces and metrics, environment configuration
-in phase one, runtime Parameter Store/Secrets Manager providers in phase two,
-and a configured OTLP endpoint without choosing/provisioning a backend.
-Confirmed D14: future AWS infrastructure will use CDK v2 in TypeScript;
-detailed infrastructure planning will happen later.
+The controller host and runner compute are separate concerns. The AWS
+deployment direction is to host the controller in a customer account using
+Lambda or ECS and a scoped IAM role. Operators configure which resources the
+controller may manage. Runner providers initially target ECS tasks and direct
+EC2 instances. The exact Lambda execution model, AWS resource topology, IAM
+policies, bootstrap, state, and rollout remain to be designed.
+The current implementation provides Docker runner provisioning and a
+container/Compose deployment.
 
-Success means protocol tests pass, Docker lifecycle/recovery/drain scenarios
-pass, a real workflow runs through the autoscaler in a dedicated test scope,
-and documented deployments survive a controller restart without duplicating
-or force-stopping active runners. No startup-latency or concurrency guarantee
-is claimed before measurement.
+The GitHub client, listener, and runner lifecycle remain infrastructure
+neutral. Docker and future AWS providers are adapters around those shared
+contracts. GitHub App or PAT credentials authorize GitHub API calls; AWS IAM
+authorizes operations on configured AWS resources.
 
-## 2. Source findings that shape the migration
+The initial supported GitHub target is GitHub.com at repository or
+organization scope, using App or PAT authentication. GHES, enterprise scope,
+concrete remote JWT signers, a web dashboard, automatic failover, and
+cross-account AWS control are outside the current product scope.
 
-Upstream has approximately 3,029 lines across the eight core/listener and
-three Docker-example production files inspected (excluding tests). It is
-small enough to migrate by behavioral slices rather than automatic translation.
-The source analysis is in [seven codebase guides](../codebase/ARCHITECTURE.md).
+Product decisions are tracked in [DECISIONS.md](DECISIONS.md). The product
+uses reusable NuGet client/listener libraries, a configurable controller,
+deployment artifacts, ILogger/Serilog OTLP logging, mandatory OpenTelemetry
+traces and metrics, environment configuration, and a configured OTLP endpoint.
+Runtime Parameter Store and Secrets Manager integration is planned for AWS
+deployment. The selected infrastructure-as-code direction is CDK v2 in
+TypeScript; detailed AWS design remains open.
+
+Success means protocol and provider tests pass, Docker lifecycle/recovery/drain
+scenarios pass, a real workflow runs through the controller in a dedicated
+test scope, and deployments recover after controller restarts without
+duplicating or force-stopping active runners. No startup-latency or concurrency
+guarantee is claimed before measurement.
+
+## 2. GitHub protocol reference
+
+The `actions/scaleset` Go project is a reference for GitHub API and message
+contracts, not the product boundary for scaleset.NET. Its source has about
+3,029 lines across the core client, listener, and Docker example inspected
+(excluding tests). Source notes are in the [reference guides](../reference/actions-scaleset/ARCHITECTURE.md).
 
 - The root client owns auth exchange, API calls, message parsing, and system
   metadata; its largest source file is 1,184 lines.
@@ -51,37 +64,34 @@ The source analysis is in [seven codebase guides](../codebase/ARCHITECTURE.md).
 - The listener public interface changed in September 2026. Use the pinned
   clone, not older ARC listener assumptions or mutable README examples.
 - The source's local race-enabled baseline has one failing macOS TLS assertion;
-  details and unverified environments are in [VALIDATION.md](VALIDATION.md).
+  details and unverified environments are in [VERIFICATION.md](VERIFICATION.md).
 
-### Product scope compared with the Go baseline
+### Product boundaries relative to the Go reference
 
-| Area | Pinned Go source | Planned C# product |
+| Area | Pinned Go reference | scaleset.NET product |
 |---|---|---|
-| GitHub protocol | Client, sessions, listener and caller-owned provisioning | Preserve supported wire/auth/poll/acquire/ack contracts with idiomatic C# APIs |
-| Docker provisioning | Example directly calls Docker Engine APIs | Same provider primitive, with recovery, ownership and lifecycle management |
-| Deployment | Example installed/run as a Go CLI; development-container Dockerfile | Controller container images for Linux x64/arm64 plus Compose deployment |
+| GitHub protocol | Client, sessions, listener and caller-owned provisioning | .NET client/listener libraries preserve supported wire/auth/poll/acquire/ack contracts |
+| Docker provisioning | Example directly calls Docker Engine APIs | Controller manages Docker runners with recovery, ownership and lifecycle management |
+| Deployment | Example installed/run as a Go CLI; development-container Dockerfile | Docker container and Compose deployment available; AWS controller hosting planned |
 | Scale sets per process | Example has one registration URL/name and one session | Multiple configured scale sets with shared host-capacity limits; Go library can also be composed for multiple sets by a consumer |
-| Configuration/logging | Library constructor options; example CLI flags and slog | App environment configuration, ILogger/Serilog OTLP logs, required SDK traces/metrics; AWS runtime config in phase two |
+| Configuration/logging | Library constructor options; example CLI flags and slog | Controller environment configuration, ILogger/Serilog OTLP logs, required SDK traces/metrics; AWS runtime configuration is planned |
 | Shutdown/state | Example in-memory maps; force-removes runners and deletes scale set | Confirmed drain-and-preserve with retained identity and restart reconciliation |
 | Scaling policies | Docker example uses additive minimum/spare capacity | SpareCapacity and TotalFloor selectable by configuration |
 | Health/UI | Example has no health host or dashboard | Health endpoints; no dashboard |
-| Initial GitHub support | Go also supports GHES, enterprise scope and external JWT signing | Phase one: GitHub.com repo/org scopes with App/PAT; other targets/signers deferred |
+| GitHub targets | Go also supports GHES, enterprise scope and external JWT signing | Current support: GitHub.com repo/org scopes with App/PAT; other targets/signers are deferred |
 
 Compose deploys the controller and its dependencies; runner containers are
 still created through the provider's Docker API. Multi-architecture packaging
 is a deployment deliverable, not a change to the GitHub runner protocol.
-These application additions follow D01 (full autoscaler product) and the
-confirmed operational decisions. Initial target coverage is narrower than
-the complete Go library and must be advertised explicitly. Compatibility is
-a planned/tested acceptance requirement, not a runtime result established by
-this documentation branch. Evidence: upstream example README/main/scaler,
-common client, config/JWT source, and the saved source tree.
+The provider lifecycle, recovery, and customer AWS controller are product
+capabilities in their own right. GitHub protocol compatibility remains a
+tested product requirement. Current target coverage is narrower than the Go
+client and must be advertised explicitly. Evidence: the reference example,
+client, URL configuration, JWT source, and saved source tree.
 
 ## 3. Solution layout and dependency rules
 
-Project names below are accepted. They did not exist when this plan was approved;
-the [foundation](../implementation/FOUNDATION.md) and
-[client milestone](../implementation/CLIENT.md) now record implementation progress.
+The current solution layout and planned AWS extensions are:
 
 ```text
 scaleset.NET/
@@ -104,23 +114,24 @@ scaleset.NET/
     ScaleSet.EndToEnd.Tests/
     fixtures/protocol/
   deploy/docker/                 # Dockerfile, Compose, example env, runbook
-  docs/migration/                # This plan, decisions, parity, validation
-  docs/codebase/                 # Pinned upstream evidence
-  # Phase two:
-  src/ScaleSet.Providers.Ecs/
-  src/ScaleSet.Providers.Ec2/
-  src/ScaleSet.Configuration.Aws/ # Parameter Store/Secrets Manager integration
-  infra/                         # Reserved for AWS CDK v2 TypeScript; planning later
+  docs/product/                 # Product roadmap, contracts, decisions, verification
+  docs/reference/actions-scaleset/ # Go reference source notes
+  # Planned AWS integrations:
+    src/ScaleSet.Providers.Ecs/
+    src/ScaleSet.Providers.Ec2/
+    src/ScaleSet.Configuration.Aws/ # Parameter Store/Secrets Manager integration
+  infra/                         # AWS CDK v2 TypeScript; design remains open
 ```
 
 Client has no Docker/AWS/hosting dependency. Listener references Client only
 plus minimal logging abstractions. Hosting uses Client and Listener and
-defines the provider contract; adapters reference that contract. Executable
-composes providers, Serilog, and mandatory trace/metric exporters. Libraries
-use Microsoft.Extensions.Logging abstractions and ActivitySource/Meter;
-SDKs, sinks, and AWS configuration providers stay in application composition.
-Avoid cycles and avoid
-putting AWS SDKs into reusable protocol packages.
+defines the provider contract; adapters reference that contract. The controller
+composition selects a provider and runs under a host runtime. Planned ECS and
+Lambda hosting adapters stay separate from runner-provider packages.
+Executable composition owns AWS IAM access, Serilog, and trace/metric exporters.
+Libraries use Microsoft.Extensions.Logging abstractions and ActivitySource/Meter;
+SDKs, sinks, and AWS configuration providers stay out of reusable protocol
+packages. Avoid cycles and avoid putting AWS SDKs into core libraries.
 
 Use nullable references, explicit JSON wire names, async Task APIs with
 CancellationToken, immutable session snapshots, validated options, and
@@ -155,9 +166,9 @@ the same quality gate alongside their behavioral checks.
 [Roslynator tools](https://github.com/dotnet/roslynator),
 [configuration](https://josefpihrt.github.io/docs/roslynator/configuration/).
 
-## 4. Component migration map
+## 4. Product component map
 
-| Go source | C# responsibility | Completion evidence |
+| GitHub reference source | scaleset.NET responsibility | Completion evidence |
 |---|---|---|
 | `types.go` | Wire models, parsed job messages, JSON context/converters | Golden JSON fixtures, omission/casing/large-ID cases |
 | `config.go` | GitHub target/scope parser and endpoint resolver | Repo/org hosted URL matrix; reject deferred targets clearly |
@@ -172,7 +183,8 @@ the same quality gate alongside their behavioral checks.
 | Example `main.go`, `config.go` | Hosted application and validated config | Startup/run/drain/config/exit-code integration scenarios |
 | Upstream CI/example | C# CI, images, deployment/runbooks | Build/test/package/image/install smoke evidence |
 
-Exact wire and listener requirements are in [PROTOCOL-PARITY.md](PROTOCOL-PARITY.md).
+Exact GitHub API and listener requirements are in
+[GITHUB-PROTOCOL.md](GITHUB-PROTOCOL.md).
 
 ## 5. Transport, auth, and API design
 
@@ -248,10 +260,10 @@ ScaleSets[]:
   runnerProfile:
     imageOrTemplate, architecture, cpu, memory, workFolder
     mounts, network, environmentRefs, dockerBuildMode, privileged
-Credentials[]: named App/clientID/installationID/PEM or PAT; AWS secret references in phase two
+Credentials[]: named App/clientID/installationID/PEM or PAT; planned AWS secret references
 ```
 
-Confirmed D18: phase one binds validated environment variables over code
+Confirmed D18: the controller binds validated environment variables over code
 defaults, using a product prefix and double-underscore hierarchy. Remove
 implicit JSON/command-line configuration providers from the application's
 configuration chain. CLI arguments select commands/explicit action targets.
@@ -260,7 +272,7 @@ unsupported settings rather than assuming automatic SDK/sink support.
 Validate all sets and required telemetry configuration before listeners start;
 redact secrets from config dumps and diagnostics.
 
-Confirmed D19: phase two uses runtime Parameter Store settings and Secrets
+Confirmed D19: AWS deployments use runtime Parameter Store settings and Secrets
 Manager credential providers, with caching and credential refresh in a separate
 AWS module. Operational settings are a validated startup snapshot and changes
 require restart initially. Define source precedence and safe credential-generation
@@ -319,13 +331,13 @@ statistics alone cannot prove which resource is idle. A label or running
 container state alone does not prove a job is safe to kill.
 
 The reusable listener waits until the handler has completed replay-safe work
-before ack. Do not introduce a fire-and-forget worker queue and acknowledge
+before acknowledgment. Do not introduce a fire-and-forget worker queue and acknowledge
 before work is either completed or durably accepted under a defined recovery
-contract. Phase-one design uses bounded parallel work awaited by the handler.
+contract. The current design uses bounded parallel work awaited by the handler.
 For sustained polling responsiveness, benchmark long creation bursts before
 adding any durable asynchronous job queue.
 
-## 8. Docker phase-one product behavior
+## 8. Current Docker controller behavior
 
 - Label every resource with product/controller/scale-set/operation identity;
   discover only that ownership scope. Use configurable pinned runner images,
@@ -403,7 +415,7 @@ supported; release packaging; image scans/signing/provenance appropriate to
 the publishing destination; opt-in live canaries isolated from ordinary PRs.
 Never execute untrusted PR code with publishing/live-canary credentials.
 
-## 10. Phase-two ECS provider
+## 10. Planned ECS task provider
 
 Future provider requirements and design proposals follow. Detailed cloud
 infrastructure planning is deferred under D14; these do not finalize stacks,
@@ -438,14 +450,14 @@ permissions. Long-lived GitHub credentials stay in the controller. Distinguish
 controller role, task execution role, and any limited runner task role.
 
 Scale-in drains runners before StopTask; lifecycle failure/expiry has explicit
-policy. If ECS uses an ASG capacity provider, distinguish runner-task demand
-from underlying container-instance scaling; avoid competing desired-capacity
-controllers and validate instance draining against long-running CI jobs.
+policy. If ECS uses EC2-backed capacity, distinguish runner-task demand from
+underlying container-instance scaling; avoid competing capacity controllers
+and validate instance draining against long-running CI jobs.
 
-## 11. Phase-two direct EC2 provider
+## 11. Planned direct EC2 provider
 
 Future provider requirements/design proposals; deployment and infrastructure
-choices must be revisited during the deferred phase-two planning.
+choices must be revisited during the later AWS design.
 
 Use versioned launch templates and a configured AMI/architecture/resource
 profile. Create one ephemeral runner instance per resource initially. Use
@@ -473,29 +485,33 @@ interruption handling are decisions for the later AWS design, with their own
 acceptance tests. Direct EC2 provider lifecycle is distinct from managing
 EC2 container instances underneath ECS.
 
-## 12. Deferred AWS infrastructure planning
+## 12. AWS controller and infrastructure design
 
 Confirmed D14: AWS CDK v2 in TypeScript is the selected infrastructure tool.
-C# remains the client/autoscaler/provider implementation language. The `infra/`
-path is reserved; no CDK project or cloud deployment is created in this branch.
+The controller is intended to run in a customer AWS account as a Lambda
+function or ECS service, with a scoped IAM role and configuration identifying
+which runner resources it can manage. The client, listener, and hosting
+contracts remain provider-neutral. The `infra/` path is reserved; no CDK
+project or cloud deployment is included in the current implementation.
 
-[TODO, later phase-two planning] Design the cloud topology/stacks, account and
-network assumptions, roles, controller state, runtime configuration sources,
-runner bootstrap delivery, capacity choices, teardown, and environment-specific
-acceptance criteria. Revisit sections 10/11 at that point rather than treating
-their preliminary provider ideas as finalized infrastructure decisions.
+[TODO, AWS design] Define the Lambda invocation/session lifecycle, ECS service
+deployment, AWS topology/stacks, account/network assumptions, IAM policies,
+controller state, runtime configuration sources, runner bootstrap delivery,
+capacity choices, teardown, and environment-specific acceptance criteria.
+Revisit sections 10/11 before implementation; they are provider requirements,
+not finalized infrastructure designs.
 
-This deferred work does not block the phase-one Docker migration plan.
+This AWS work follows the current Docker controller release.
 Cloud implementation/deployment milestones depend on completing that later
 design; they do not start automatically when the Docker release finishes.
 
-## 13. Milestones and acceptance gates
+## 13. Product milestones and acceptance gates
 
 | Milestone | Deliverables | Dependencies | Gate |
 |---|---|---|---|
-| M0 Decisions/baseline | Final plan, pinned source, parity matrix, attribution inventory | User decisions | No unresolved product decision; source evidence verified |
+| M0 Product definition | Roadmap, pinned source, GitHub contract matrix, attribution inventory | Product decisions | Product scope and protocol requirements documented |
 | M1 Solution/contracts | .NET 10 layout, API/tests, env schema, Roslynator, ILogger/Serilog and OTel providers | M0 | Build/dependency/API review; analyzer loading/severity enforcement verified; all three signals reach a test OTLP receiver |
-| M2 Wire/transport/auth | DTOs, exceptions, auth cache, HTTP, admin/session APIs and telemetry | M1 | Parity, concurrency/TLS/cancellation and correlated/redacted HTTP telemetry tests pass |
+| M2 Wire/transport/auth | DTOs, exceptions, auth cache, HTTP, admin/session APIs and telemetry | M1 | Protocol-contract, concurrency/TLS/cancellation, and correlated/redacted HTTP telemetry tests pass |
 | M3 Listener | Initial/empty/real callbacks, dynamic capacity, acquire interface, ack sequencing | M2 | No ack before success; cancellation-safe bounded ack; replay/refresh tests pass |
 | M4 Docker lifecycle | Provider, policies, journal, discovery, idempotent cleanup, aggregate budgets | M3 | Restart/partial-create/duplicate-event/container-exit/drain scenarios pass |
 | M5 Docker release | CLI/service, env/docs, telemetry, Compose, analyzer/package/image CI | M4 | Roslynator gate passes; repo+org canaries, config/install/recovery, correlation/metrics/export outage/shutdown tests |
@@ -503,7 +519,7 @@ design; they do not start automatically when the Docker release finishes.
 | M7 EC2 provider | Future instance/AMI/config/CDK TypeScript infra/tests | M5 and later AWS/bootstrap design | Later planning confirms scope/gates; canary, bootstrap/recovery, source/rotation and telemetry tests |
 | M8 Release/maintenance | Supported environment matrix, upgrade checklist, published artifacts | Relevant release gates | Documented evidence for each advertised target/provider; recoverable upgrade |
 
-After the deferred phase-two planning, M6 and M7 may develop in parallel once
+After the later AWS design, M6 and M7 may develop in parallel once
 common bootstrap/state contracts are agreed. Each milestone produces a small reviewable change with evidence and
 updated docs. No time estimate is committed before workload measurements and
 provider/infrastructure dependencies are known.
@@ -539,43 +555,27 @@ the controller during a job, drain, and verify owned-resource cleanup. AWS
 canaries additionally need isolated account/region/network configuration and
 failure cleanup. Local PR tests do not silently acquire live credentials.
 
-No C# tests are executed in this planning branch because no implementation
-exists. Select and document the repository-compatible .NET test runner in M1.
+The roadmap itself does not execute tests. Current verification results and remaining live-canary work are recorded in [VERIFICATION.md](VERIFICATION.md).
 Mandatory telemetry tests verify registered sources/meters, log/trace and resource
 correlation, no duplicate exports, bounded metric dimensions, secret redaction,
 export during operations, outage behavior, and bounded flushing during D12 drain.
 Configuration tests cover environment hierarchy/arrays, validation/precedence,
-and phase-two caching/credential rotation with synthetic credentials.
+and AWS credential caching/rotation with synthetic credentials.
 
-## 15. Implementation delegation policy
+## 15. Engineering delivery
 
-User instruction: use GPT-6 Luna subagents at max reasoning to execute the plan.
-For implementation delegation use `model=gpt-6-luna`,
-`reasoning_effort=max`, and a context fork compatible with a model override
-(`none` or a bounded number of turns). Provide each agent the relevant plan,
-contracts, instructions, baseline, file ownership, and acceptance criteria.
-Available session capacity is four agents including the parent, so run at
-most three child work packages concurrently unless capacity changes.
+Deliver each product milestone as a reviewable change with defined ownership,
+dependencies, and acceptance evidence. Integrate changes to shared contracts,
+project wiring, and protocol fixtures deliberately. Verification reports must
+identify the commands run and their results; planned work is not implementation
+evidence.
 
-Suggested work packages after M1:
-
-1. Wire/URL/error contracts and protocol fixtures.
-2. Transport/authentication/cache with a stable shared interface.
-3. Session/listener after the client contracts are agreed.
-4. Docker provider versus hosting/configuration after lifecycle contracts.
-5. ECS and EC2 adapters after common cloud bootstrap contracts.
-
-Do not let agents concurrently edit the same contracts, project wiring, or
-shared fixtures. Parent owns integration, source-parity review, meaningful
-verification, decision conflicts, and milestone completion. An agent's report
-alone does not establish tests passed. Planning does not start implementation.
-
-## 16. Upgrade and release policy
+## 16. GitHub protocol and release maintenance
 
 Maintain the upstream baseline SHA and a method/wire/behavior change ledger.
 For an upstream update, inspect its diff, refresh fixtures, document deliberate
-differences, and run parity plus relevant lifecycle tests. Never replace the
-baseline silently with main. Keep supported targets/providers explicit and
+differences, and run protocol compatibility plus relevant lifecycle tests.
+Never replace the baseline silently with main. Keep supported targets/providers explicit and
 separate experimental/deferred capabilities.
 
 Preserve the existing Apache-2.0 repository license. Add upstream GitHub MIT

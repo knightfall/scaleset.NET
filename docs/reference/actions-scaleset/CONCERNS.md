@@ -1,12 +1,12 @@
-# Codebase Concerns
+# Go Reference: Design Considerations
 
-Source-derived migration concerns at upstream commit
+Go-reference design considerations at upstream commit
 `e6daac702355cdb5b880b4fbdcf6d85dcd9e48e5`. These are planning risks,
 not a comprehensive security audit or verified production defect inventory.
 
 ## 1) Top Risks (Prioritized)
 
-| Priority | Concern and evidence | Migration response |
+| Priority | Concern and evidence | scaleset.NET response |
 |---|---|---|
 | High | Example loses runner maps at restart; `runnerState` | Discover owned resources and reconcile before acquiring/provisioning |
 | High | Example force-removes busy runners and deletes scale set on exit; `shutdown`, `run` | Confirmed D12: bounded drain, preserve unfinished runners and scale-set identity, reconcile on restart |
@@ -56,16 +56,16 @@ restructuring; compare future upstream commits against the pinned baseline.
 
 ## 6) Intent Questions and Resolutions
 
-All phase-one intent questions are resolved in
-[DECISIONS.md](../migration/DECISIONS.md). The finalized plan records the
-production-product additions, narrower initial GitHub support, drain-and-preserve
+Current product decisions are recorded in
+[DECISIONS.md](../../product/DECISIONS.md). The product roadmap records
+controller features, narrower initial GitHub support, drain-and-preserve
 shutdown, required telemetry, configuration, deployment defaults, and Roslynator.
 Detailed AWS infrastructure planning remains intentionally deferred.
 
 ## 7) Evidence
 
-- [Saved scan/history](../migration/upstream-scan.txt)
+- [Saved scan/history](source-scan.txt)
 - [Example state and shutdown](https://github.com/actions/scaleset/blob/e6daac702355cdb5b880b4fbdcf6d85dcd9e48e5/examples/dockerscaleset/scaler.go)
 - [Example startup](https://github.com/actions/scaleset/blob/e6daac702355cdb5b880b4fbdcf6d85dcd9e48e5/examples/dockerscaleset/main.go)
 - [Listener contracts](https://github.com/actions/scaleset/blob/e6daac702355cdb5b880b4fbdcf6d85dcd9e48e5/listener/listener.go)
-- [Validation](../migration/VALIDATION.md)
+- [Validation](../../product/VERIFICATION.md)

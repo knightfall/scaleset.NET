@@ -1,8 +1,8 @@
-# Coding Conventions
+# Go Reference: Coding Conventions
 
 Observed upstream conventions at commit
 `e6daac702355cdb5b880b4fbdcf6d85dcd9e48e5`. C# recommendations are separate
-in [the migration plan](../migration/PLAN.md).
+in [the product roadmap](../../product/ROADMAP.md).
 
 ## 1) Naming Rules
 

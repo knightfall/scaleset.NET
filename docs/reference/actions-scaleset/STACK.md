@@ -1,8 +1,8 @@
-# Technology Stack
+# Go Reference: Technology Stack
 
-This describes the Go source being migrated, pinned to upstream commit
+This describes the Go reference source, pinned to upstream commit
 `e6daac702355cdb5b880b4fbdcf6d85dcd9e48e5`. Target design is in
-[the migration plan](../migration/PLAN.md). Inspection date: 2026-10-02.
+[the product roadmap](../../product/ROADMAP.md). Inspection date: 2026-10-02.
 
 ## 1) Runtime Summary
 
@@ -11,7 +11,7 @@ This describes the Go source being migrated, pinned to upstream commit
 | Language/runtime | Go; module requires 1.26.3 | `go.mod:3` |
 | Package/build system | Go modules; `github.com/actions/scaleset` | `go.mod` |
 | Development container | Go 1.25 on Debian Bookworm | `.devcontainer/Dockerfile` |
-| Target runtime | .NET 10 only, user decision | `../migration/DECISIONS.md`, D03 |
+| Target runtime | .NET 10 only, user decision | `../../product/DECISIONS.md`, D03 |
 
 The README says Go 1.25+, which differs from `go.mod`. The local baseline used
 Go 1.26.4 on macOS arm64; .NET SDKs 10.0.203 and 10.0.400 were installed.
@@ -49,7 +49,7 @@ go tool github.com/golangci/golangci-lint/v2/cmd/golangci-lint run ./...
 ```
 
 The executed baseline and its failure are recorded in
-[validation](../migration/VALIDATION.md). No .NET test command exists yet.
+[verification](../../product/VERIFICATION.md). Current .NET build and test commands are in the repository README.
 
 ## 5) Environment and Config
 
@@ -65,4 +65,4 @@ No database configuration is present.
 - [HTTP transport](https://github.com/actions/scaleset/blob/e6daac702355cdb5b880b4fbdcf6d85dcd9e48e5/common_client.go)
 - [CI](https://github.com/actions/scaleset/blob/e6daac702355cdb5b880b4fbdcf6d85dcd9e48e5/.github/workflows/go.yaml)
 - [Devcontainer](https://github.com/actions/scaleset/blob/e6daac702355cdb5b880b4fbdcf6d85dcd9e48e5/.devcontainer/Dockerfile)
-- [Saved scan](../migration/upstream-scan.txt)
+- [Saved scan](source-scan.txt)

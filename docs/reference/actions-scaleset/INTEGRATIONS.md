@@ -1,4 +1,4 @@
-# External Integrations
+# Go Reference: External Integrations
 
 Observed source baseline: `actions/scaleset` at
 `e6daac702355cdb5b880b4fbdcf6d85dcd9e48e5`.
@@ -29,7 +29,7 @@ the runner container environment. App JWTs use RS256 with iat one minute in
 the past and exp nine minutes after iat. Admin refresh starts within 60 seconds
 of expiry. The testdata keys are test fixtures; do not copy them as operational
 credentials. GitHub's current authentication guidance documents the enterprise
-scope restriction for App authentication; see the migration support matrix.
+scope restriction for App authentication; see the [GitHub protocol contract](../../product/GITHUB-PROTOCOL.md).
 
 ## 4) Reliability and Failure Behavior
 

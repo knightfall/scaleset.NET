@@ -1,4 +1,4 @@
-# Testing Patterns
+# Go Reference: Testing Patterns
 
 Source baseline: `actions/scaleset` at
 `e6daac702355cdb5b880b4fbdcf6d85dcd9e48e5`.
@@ -47,13 +47,13 @@ The preceding non-nil-error assertion passed. Actual returned error text was
 not printed, so the exact cause of the wording difference is unverified.
 There was no race-detector report in the captured output.
 
-The C# validation plan must distinguish local protocol tests, Docker recovery
+The scaleset.NET test strategy distinguishes local protocol tests, Docker recovery
 tests, and credential-dependent live GitHub/GHES tests. Passing local tests
 alone cannot establish supported live environments.
 
 ## 6) Evidence
 
-- [Executed baseline](../migration/VALIDATION.md)
+- [Executed baseline](../../product/VERIFICATION.md)
 - [Session tests](https://github.com/actions/scaleset/blob/e6daac702355cdb5b880b4fbdcf6d85dcd9e48e5/session_client_test.go)
 - [Listener tests](https://github.com/actions/scaleset/blob/e6daac702355cdb5b880b4fbdcf6d85dcd9e48e5/listener/listener_test.go)
 - [TLS assertion](https://github.com/actions/scaleset/blob/e6daac702355cdb5b880b4fbdcf6d85dcd9e48e5/client_test.go#L1468)
