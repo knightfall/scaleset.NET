@@ -69,11 +69,11 @@ public sealed class ScaleSetRuntimeClientAdapter : IScaleSetRuntimeClient
         _client.CreateScaleSetAsync(scaleSet, cancellationToken);
 
     /// <inheritdoc />
-    public Task<RunnerScaleSetJitRunnerConfig?> GenerateJitConfigAsync(
+    public async Task<RunnerScaleSetJitRunnerConfig?> GenerateJitConfigAsync(
         long scaleSetId,
         RunnerScaleSetJitRunnerSetting runnerSetting,
         CancellationToken cancellationToken) =>
-        _client.GenerateJitConfigAsync(scaleSetId, runnerSetting, cancellationToken);
+        await _client.GenerateJitConfigAsync(scaleSetId, runnerSetting, cancellationToken).ConfigureAwait(false);
 
     /// <inheritdoc />
     public async Task<IScaleSetRuntimeSession> CreateMessageSessionAsync(

@@ -538,6 +538,53 @@ public sealed class MessageSessionClientTests
     }
 
     [Fact]
+    public async Task CreateMessageSessionAsync_RejectsJsonNull()
+    {
+        using ClientFixture fixture = new((request, _) => Task.FromResult(
+            IsCreateSession(request)
+                ? JsonResponse(HttpStatusCode.OK, "null")
+                : NotFoundResponse()));
+
+        ScaleSetApiException exception = await Assert.ThrowsAsync<ScaleSetApiException>(
+            () => fixture.Client.CreateMessageSessionAsync(LargeScaleSetId, "runner-host", TestContext.Current.CancellationToken));
+
+        Assert.Equal((int)HttpStatusCode.OK, exception.StatusCode);
+        Assert.Single(fixture.Handler.Requests, IsCreateSession);
+    }
+
+    [Fact]
+    public async Task RefreshSession_RejectsJsonNullWithoutReplacingCurrentSession()
+    {
+        using ClientFixture fixture = new((request, _) =>
+        {
+            if (IsCreateSession(request))
+            {
+                return Task.FromResult(JsonResponse(HttpStatusCode.OK, SessionJson(QueueToken)));
+            }
+
+            if (IsRefresh(request))
+            {
+                return Task.FromResult(JsonResponse(HttpStatusCode.OK, "null"));
+            }
+
+            if (IsQueueRequest(request, HttpMethod.Get))
+            {
+                return Task.FromResult(new HttpResponseMessage(HttpStatusCode.Unauthorized));
+            }
+
+            return Task.FromResult(NotFoundResponse());
+        });
+        MessageSessionClient session = await fixture.Client.CreateMessageSessionAsync(LargeScaleSetId, "runner-host", TestContext.Current.CancellationToken);
+
+        ScaleSetApiException exception = await Assert.ThrowsAsync<ScaleSetApiException>(
+            () => session.GetMessageAsync(0, 10, TestContext.Current.CancellationToken));
+
+        Assert.Equal((int)HttpStatusCode.OK, exception.StatusCode);
+        Assert.Equal(QueueToken, session.Session.MessageQueueAccessToken);
+        Assert.Equal(SessionId, session.Session.SessionId);
+    }
+
+    [Fact]
     public async Task CloseAsyncUsesAdminCredentialIsIdempotentAndRejectsLaterOperations()
     {
         int closes = 0;

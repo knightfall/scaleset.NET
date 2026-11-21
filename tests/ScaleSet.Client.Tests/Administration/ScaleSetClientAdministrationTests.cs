@@ -127,7 +127,7 @@ public sealed class ScaleSetClientAdministrationTests
         _ = await runnerFixture.Client.GetRunnerAsync(largeId, TestContext.Current.CancellationToken);
         _ = AssertAdminRequest(runnerFixture, HttpMethod.Get, $"/_apis/distributedtask/pools/0/agents/{largeId}");
 
-        using ClientFixture jitFixture = new(HttpStatusCode.OK, "null");
+        using ClientFixture jitFixture = new(HttpStatusCode.OK, "{}");
         _ = await jitFixture.Client.GenerateJitConfigAsync(
             largeId,
             new RunnerScaleSetJitRunnerSetting { Name = "runner", WorkFolder = "_work" },
@@ -313,19 +313,65 @@ public sealed class ScaleSetClientAdministrationTests
     }
 
     [Fact]
-    public async Task GenerateJitConfigAsyncSendsNameAndWorkFolderAndPreservesNullResponse()
+    public async Task GenerateJitConfigAsyncSendsNameAndWorkFolderAndRejectsNullResponse()
     {
         RunnerScaleSetJitRunnerSetting setting = new() { Name = "runner-7", WorkFolder = "_work" };
         using ClientFixture fixture = new(HttpStatusCode.OK, "null");
 
-        RunnerScaleSetJitRunnerConfig? result = await fixture.Client.GenerateJitConfigAsync(7, setting, TestContext.Current.CancellationToken);
+        ScaleSetApiException exception = await Assert.ThrowsAsync<ScaleSetApiException>(
+            () => fixture.Client.GenerateJitConfigAsync(7, setting, TestContext.Current.CancellationToken));
 
-        Assert.Null(result);
+        Assert.Equal((int)HttpStatusCode.OK, exception.StatusCode);
         RecordedHttpRequest request = AssertAdminRequest(fixture, HttpMethod.Post, "/_apis/runtime/runnerscalesets/7/generatejitconfig");
         Assert.Equal("application/json", request.ContentType);
         using JsonDocument document = JsonDocument.Parse(request.Body);
         Assert.Equal("runner-7", document.RootElement.GetProperty("name").GetString());
         Assert.Equal("_work", document.RootElement.GetProperty("workFolder").GetString());
+    }
+
+    [Fact]
+    public async Task RequiredAdministrationEndpointsRejectJsonNullBodies()
+    {
+        using ClientFixture listFixture = new(HttpStatusCode.OK, "null");
+        ScaleSetApiException listException = await Assert.ThrowsAsync<ScaleSetApiException>(
+            () => listFixture.Client.ListScaleSetsAsync(1, TestContext.Current.CancellationToken));
+        Assert.Equal((int)HttpStatusCode.OK, listException.StatusCode);
+
+        using ClientFixture findSetFixture = new(HttpStatusCode.OK, "null");
+        ScaleSetApiException findSetException = await Assert.ThrowsAsync<ScaleSetApiException>(
+            () => findSetFixture.Client.FindScaleSetAsync(1, "linux", TestContext.Current.CancellationToken));
+        Assert.Equal((int)HttpStatusCode.OK, findSetException.StatusCode);
+
+        using ClientFixture createFixture = new(HttpStatusCode.OK, "null");
+        ScaleSetApiException createException = await Assert.ThrowsAsync<ScaleSetApiException>(
+            () => createFixture.Client.CreateScaleSetAsync(new RunnerScaleSet { Name = "linux" }, TestContext.Current.CancellationToken));
+        Assert.Equal((int)HttpStatusCode.OK, createException.StatusCode);
+
+        using ClientFixture updateFixture = new(HttpStatusCode.OK, "null");
+        ScaleSetApiException updateException = await Assert.ThrowsAsync<ScaleSetApiException>(
+            () => updateFixture.Client.UpdateScaleSetAsync(7, new RunnerScaleSet { Name = "linux" }, TestContext.Current.CancellationToken));
+        Assert.Equal((int)HttpStatusCode.OK, updateException.StatusCode);
+
+        using ClientFixture findRunnerFixture = new(HttpStatusCode.OK, "null");
+        ScaleSetApiException findRunnerException = await Assert.ThrowsAsync<ScaleSetApiException>(
+            () => findRunnerFixture.Client.FindRunnerByNameAsync("runner-1", TestContext.Current.CancellationToken));
+        Assert.Equal((int)HttpStatusCode.OK, findRunnerException.StatusCode);
+
+        using ClientFixture groupFixture = new(HttpStatusCode.OK, "null");
+        ScaleSetApiException groupException = await Assert.ThrowsAsync<ScaleSetApiException>(
+            () => groupFixture.Client.GetRunnerGroupByNameAsync("Default", TestContext.Current.CancellationToken));
+        Assert.Equal((int)HttpStatusCode.OK, groupException.StatusCode);
+    }
+
+    [Fact]
+    public async Task AdministrationDecodeRejectsTrailingJsonGarbage()
+    {
+        using ClientFixture fixture = new(HttpStatusCode.OK, "{\"id\":15}{\"id\":16}");
+
+        ScaleSetApiException exception = await Assert.ThrowsAsync<ScaleSetApiException>(
+            () => fixture.Client.GetScaleSetAsync(15, TestContext.Current.CancellationToken));
+
+        Assert.Equal((int)HttpStatusCode.OK, exception.StatusCode);
     }
 
     [Fact]
