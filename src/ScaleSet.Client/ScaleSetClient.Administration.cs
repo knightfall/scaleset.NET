@@ -172,8 +172,8 @@ public sealed partial class ScaleSetClient
     /// <param name="scaleSetId">The positive scale-set identifier.</param>
     /// <param name="runnerSetting">The runner name and work folder to send.</param>
     /// <param name="cancellationToken">A token used to cancel the request.</param>
-    /// <returns>The JIT response, or <see langword="null"/> when the service returns a JSON null body.</returns>
-    public async Task<RunnerScaleSetJitRunnerConfig?> GenerateJitConfigAsync(
+    /// <returns>The generated JIT runner configuration.</returns>
+    public async Task<RunnerScaleSetJitRunnerConfig> GenerateJitConfigAsync(
         long scaleSetId,
         RunnerScaleSetJitRunnerSetting runnerSetting,
         CancellationToken cancellationToken = default)
@@ -182,14 +182,14 @@ public sealed partial class ScaleSetClient
         ArgumentNullException.ThrowIfNull(runnerSetting);
 
         byte[] body = Encoding.UTF8.GetBytes(ScaleSetJson.Serialize(runnerSetting));
-        return await SendActionsAsync<RunnerScaleSetJitRunnerConfig?>(
+        return await SendActionsAsync(
             HttpMethod.Post,
             $"/{AdministrationScaleSetsEndpoint}/{FormatIdentifier(scaleSetId)}/generatejitconfig",
             body,
             null,
             (int)HttpStatusCode.OK,
             cancellationToken,
-            DeserializeAdministrationResponse<RunnerScaleSetJitRunnerConfig>).ConfigureAwait(false);
+            static response => DeserializeRequiredAdministrationResponse<RunnerScaleSetJitRunnerConfig>(response, "runner JIT config")).ConfigureAwait(false);
     }
 
     /// <summary>Gets a registered runner by identifier.</summary>
@@ -286,8 +286,13 @@ public sealed partial class ScaleSetClient
 
     private static RunnerScaleSet? DecodeScaleSetByName(byte[] responseBody)
     {
-        RunnerScaleSetList? response = DeserializeAdministrationResponse<RunnerScaleSetList>(responseBody);
-        if (response is null || response.Count == 0)
+        RunnerScaleSetList response = DeserializeRequiredAdministrationResponse<RunnerScaleSetList>(responseBody, "runner scale set list");
+        if (response.Count < 0)
+        {
+            throw new InvalidDataException("The runner scale set list response count cannot be negative.");
+        }
+
+        if (response.Count == 0)
         {
             return null;
         }
@@ -302,14 +307,19 @@ public sealed partial class ScaleSetClient
 
     private static IReadOnlyList<RunnerScaleSet> DecodeScaleSetList(byte[] responseBody)
     {
-        RunnerScaleSetList? response = DeserializeAdministrationResponse<RunnerScaleSetList>(responseBody);
-        return response?.Value ?? Array.Empty<RunnerScaleSet>();
+        RunnerScaleSetList response = DeserializeRequiredAdministrationResponse<RunnerScaleSetList>(responseBody, "runner scale set list");
+        return response.Value ?? Array.Empty<RunnerScaleSet>();
     }
 
     private static RunnerGroup DecodeRunnerGroupByName(byte[] responseBody)
     {
-        RunnerGroupList? response = DeserializeAdministrationResponse<RunnerGroupList>(responseBody);
-        if (response is null || response.Count == 0)
+        RunnerGroupList response = DeserializeRequiredAdministrationResponse<RunnerGroupList>(responseBody, "runner group list");
+        if (response.Count < 0)
+        {
+            throw new InvalidDataException("The runner group list response count cannot be negative.");
+        }
+
+        if (response.Count == 0)
         {
             throw new InvalidDataException("No runner group matched the requested name.");
         }
@@ -324,8 +334,13 @@ public sealed partial class ScaleSetClient
 
     private static RunnerReference? DecodeRunnerByName(byte[] responseBody)
     {
-        RunnerReferenceList? response = DeserializeAdministrationResponse<RunnerReferenceList>(responseBody);
-        if (response is null || response.Count == 0)
+        RunnerReferenceList response = DeserializeRequiredAdministrationResponse<RunnerReferenceList>(responseBody, "runner reference list");
+        if (response.Count < 0)
+        {
+            throw new InvalidDataException("The runner reference list response count cannot be negative.");
+        }
+
+        if (response.Count == 0)
         {
             return null;
         }
@@ -339,10 +354,15 @@ public sealed partial class ScaleSetClient
     }
 
     private static RunnerScaleSet DeserializeCreatedScaleSet(byte[] responseBody) =>
-        DeserializeAdministrationResponse<RunnerScaleSet>(responseBody) ?? new RunnerScaleSet();
+        DeserializeRequiredAdministrationResponse<RunnerScaleSet>(responseBody, "runner scale set");
 
     private static string FormatIdentifier(long identifier) =>
         identifier.ToString(System.Globalization.CultureInfo.InvariantCulture);
+
+    private static T DeserializeRequiredAdministrationResponse<T>(byte[] responseBody, string responseName)
+        where T : class =>
+        DeserializeAdministrationResponse<T>(responseBody)
+            ?? throw new InvalidDataException($"The {responseName} response was null.");
 
     private static T? DeserializeAdministrationResponse<T>(byte[] responseBody)
         where T : class
