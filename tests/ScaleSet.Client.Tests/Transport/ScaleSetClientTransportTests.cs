@@ -389,7 +389,7 @@ public sealed class ScaleSetClientTransportTests
             RetryMaxDelay = TimeSpan.Zero,
         });
 
-        var exception = await Assert.ThrowsAsync<ScaleSetApiException>(() => client.SendQueueAsync(
+        var exception = await Assert.ThrowsAnyAsync<ScaleSetApiException>(() => client.SendQueueAsync(
             HttpMethod.Get,
             new Uri("https://queue.example/poll"),
             "queue-token",
@@ -399,6 +399,15 @@ public sealed class ScaleSetClientTransportTests
             TestContext.Current.CancellationToken));
 
         Assert.Equal(statusCode, exception.StatusCode);
+        if (statusCode == (int)HttpStatusCode.TooManyRequests)
+        {
+            Assert.IsType<ScaleSetRateLimitException>(exception);
+        }
+        else
+        {
+            Assert.IsType<ScaleSetApiException>(exception);
+        }
+
         Assert.Single(handler.Requests);
     }
 

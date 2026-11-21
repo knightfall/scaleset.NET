@@ -105,6 +105,61 @@ public sealed class ClientTelemetryTests
         });
     }
 
+    [Fact]
+    public async Task ClientEmitsRateLimitRetryMetricWithBoundedKind()
+    {
+        using Activity? root = new Activity("rate-limit-telemetry-test").SetIdFormat(ActivityIdFormat.W3C).Start();
+        ActivityTraceId traceId = root!.TraceId;
+        List<KeyValuePair<string, object?>[]> retries = [];
+        using MeterListener meterListener = new()
+        {
+            InstrumentPublished = (instrument, listener) =>
+            {
+                if (instrument.Meter.Name == ScaleSetClientTelemetry.MeterName)
+                {
+                    listener.EnableMeasurementEvents(instrument);
+                }
+            },
+        };
+        meterListener.SetMeasurementEventCallback<long>((instrument, _, tags, _) =>
+        {
+            if (Activity.Current?.TraceId == traceId && instrument.Name == "scaleset.client.retries")
+            {
+                retries.Add(tags.ToArray());
+            }
+        });
+        meterListener.Start();
+
+        int calls = 0;
+        using HttpClient http = new(Transport.TestResponses.CreateConnectedHandler(
+            new DateTimeOffset(2099, 1, 1, 0, 0, 0, TimeSpan.Zero),
+            (_, _) =>
+            {
+                calls++;
+                return Task.FromResult(calls == 1
+                    ? Transport.TestResponses.Json(HttpStatusCode.TooManyRequests, "{}")
+                    : Transport.TestResponses.Json(HttpStatusCode.OK, "{\"id\":42}"));
+            }));
+        using ScaleSetClient client = new(
+            GitHubTarget.Parse("https://github.com/example"),
+            ScaleSetCredentials.FromPersonalAccessToken("telemetry-pat-sentinel"),
+            new ScaleSetClientOptions
+            {
+                Retry = new ScaleSetRetryOptions
+                {
+                    MaxRetries = 1,
+                    WaitMin = TimeSpan.Zero,
+                    WaitMax = TimeSpan.Zero,
+                },
+            },
+            http);
+
+        RunnerScaleSet? scaleSet = await client.GetScaleSetAsync(42, TestContext.Current.CancellationToken);
+        Assert.Equal(42, scaleSet?.Id);
+        KeyValuePair<string, object?>[] retryTags = Assert.Single(retries);
+        Assert.Equal("rate-limit", retryTags.Single(tag => tag.Key == "retry_kind").Value);
+    }
+
     private sealed class TickClock : TimeProvider
     {
         private long _ticks;

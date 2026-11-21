@@ -1,5 +1,8 @@
 using System.Diagnostics;
 using System.Diagnostics.Metrics;
+using System.Globalization;
+using System.Net;
+using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -21,6 +24,9 @@ internal static partial class ScaleSetClientDiagnostics
     internal const int MaximumErrorBodyBytes = 65536;
     private const int MaximumPreviewCharacters = 1024;
     private const int MaximumCorrelationCharacters = 128;
+    private static readonly long MaxRetryAfterSeconds = TimeSpan.MaxValue.Ticks / TimeSpan.TicksPerSecond;
+    private static readonly long MinUnixSeconds = DateTimeOffset.MinValue.ToUnixTimeSeconds();
+    private static readonly long MaxUnixSeconds = DateTimeOffset.MaxValue.ToUnixTimeSeconds();
 
     internal static readonly ActivitySource ActivitySource = new(ScaleSetClientTelemetry.ActivitySourceName);
     internal static readonly Meter Meter = new(ScaleSetClientTelemetry.MeterName);
@@ -73,11 +79,17 @@ internal static partial class ScaleSetClientDiagnostics
 
     internal static void RecordRetry(string dependency, string method, string retryKind)
     {
-        var tags = new TagList
+        string normalizedKind = retryKind switch
+        {
+            "discovery-auth" => "discovery-auth",
+            "rate-limit" => "rate-limit",
+            _ => "transient",
+        };
+        TagList tags = new()
         {
             { "dependency", NormalizeDependency(dependency) },
             { "method", NormalizeMethod(method) },
-            { "retry_kind", retryKind == "discovery-auth" ? "discovery-auth" : "transient" },
+            { "retry_kind", normalizedKind },
         };
         Retries.Add(1, tags);
     }
@@ -105,6 +117,8 @@ internal static partial class ScaleSetClientDiagnostics
         HttpResponseMessage response,
         int maxBytes,
         CancellationToken callerToken,
+        CancellationToken maxElapsedToken,
+        CancellationToken deadlineToken,
         CancellationToken attemptLinkedToken)
     {
         if (response.Content is null)
@@ -159,6 +173,14 @@ internal static partial class ScaleSetClientDiagnostics
         {
             throw new OperationCanceledException("The ScaleSet response read was canceled by the caller.", callerToken);
         }
+        catch (OperationCanceledException) when (deadlineToken.IsCancellationRequested)
+        {
+            throw new OperationCanceledException("The ScaleSet response read exceeded the configured deadline.", deadlineToken);
+        }
+        catch (OperationCanceledException) when (maxElapsedToken.IsCancellationRequested)
+        {
+            return new ResponseBodyReadResult(memory.ToArray(), Truncated: false, IsIncomplete: true, ResponseBodyReadFailure.MaxElapsed);
+        }
         catch (OperationCanceledException)
         {
             return new ResponseBodyReadResult(memory.ToArray(), Truncated: false, IsIncomplete: true, ResponseBodyReadFailure.AttemptTimedOut);
@@ -173,6 +195,166 @@ internal static partial class ScaleSetClientDiagnostics
         bytes.Length >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF
             ? bytes[3..]
             : bytes;
+
+    internal static RateLimitClassification? TryClassifyRateLimit(
+        HttpResponseMessage response,
+        ReadOnlySpan<byte> rawBody,
+        bool isBodyIncomplete,
+        DateTimeOffset now)
+    {
+        if (response.StatusCode is not (HttpStatusCode.TooManyRequests or HttpStatusCode.Forbidden))
+        {
+            return null;
+        }
+
+        bool primary = TryGetFirstNonEmptyHeader(response, "X-RateLimit-Remaining", out string? remaining) &&
+            string.Equals(remaining, "0", StringComparison.Ordinal);
+        bool hasRetryAfterHeader = TryGetFirstNonEmptyHeader(response, "Retry-After", out _);
+        string? message = isBodyIncomplete ? null : ExtractRateLimitMessage(response, rawBody);
+        bool secondary = !string.IsNullOrEmpty(message) && SecondaryRateLimitRegex().IsMatch(message);
+
+        if (response.StatusCode == HttpStatusCode.Forbidden && !primary && !secondary && !hasRetryAfterHeader)
+        {
+            return null;
+        }
+
+        ScaleSetRateLimitKind kind = primary && !secondary
+            ? ScaleSetRateLimitKind.Primary
+            : ScaleSetRateLimitKind.Secondary;
+
+        TimeSpan? retryAfterHeaderDelay = ParseRetryAfter(response, now);
+        DateTimeOffset? reset = ParseRateLimitReset(response);
+        TimeSpan effectiveRetryAfter = retryAfterHeaderDelay ??
+            (kind == ScaleSetRateLimitKind.Primary && reset is { } resetAt && resetAt >= now
+                ? resetAt - now
+                : TimeSpan.Zero);
+
+        return new RateLimitClassification(
+            kind,
+            (int)response.StatusCode,
+            effectiveRetryAfter,
+            retryAfterHeaderDelay,
+            reset);
+    }
+
+    internal static TimeSpan? ParseRetryAfter(HttpResponseMessage response, DateTimeOffset now)
+    {
+        if (!TryGetFirstNonEmptyHeader(response, "Retry-After", out string? trimmed))
+        {
+            return null;
+        }
+
+        if (IsAsciiSignedInteger(trimmed))
+        {
+            if (!long.TryParse(trimmed, NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out long seconds) ||
+                seconds < 0 ||
+                seconds > MaxRetryAfterSeconds)
+            {
+                return null;
+            }
+
+            return TimeSpan.FromSeconds(seconds);
+        }
+
+        if (!RetryConditionHeaderValue.TryParse(trimmed, out RetryConditionHeaderValue? retryAfter) ||
+            retryAfter?.Date is not DateTimeOffset date)
+        {
+            return null;
+        }
+
+        TimeSpan wait = date - now;
+        return wait < TimeSpan.Zero ? null : wait;
+    }
+
+    internal static DateTimeOffset? ParseRateLimitReset(HttpResponseMessage response)
+    {
+        if (!TryGetFirstNonEmptyHeader(response, "X-RateLimit-Reset", out string? trimmed))
+        {
+            return null;
+        }
+
+        if (!long.TryParse(trimmed, NumberStyles.Integer, CultureInfo.InvariantCulture, out long seconds) ||
+            seconds <= 0 ||
+            seconds < MinUnixSeconds ||
+            seconds > MaxUnixSeconds)
+        {
+            return null;
+        }
+
+        return DateTimeOffset.FromUnixTimeSeconds(seconds);
+    }
+
+    private static bool TryGetFirstNonEmptyHeader(
+        HttpResponseMessage response,
+        string name,
+        out string value)
+    {
+        if (response.Headers.TryGetValues(name, out IEnumerable<string>? values))
+        {
+            foreach (string candidate in values)
+            {
+                string trimmed = candidate.Trim();
+                if (trimmed.Length > 0)
+                {
+                    value = trimmed;
+                    return true;
+                }
+            }
+        }
+
+        value = string.Empty;
+        return false;
+    }
+
+    private static bool IsAsciiSignedInteger(string value)
+    {
+        int start = value.Length > 0 && value[0] is '+' or '-' ? 1 : 0;
+        if (start == value.Length)
+        {
+            return false;
+        }
+
+        for (int index = start; index < value.Length; index++)
+        {
+            if (!char.IsAsciiDigit(value[index]))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static string? ExtractRateLimitMessage(HttpResponseMessage response, ReadOnlySpan<byte> rawBody)
+    {
+        if (rawBody.IsEmpty)
+        {
+            return null;
+        }
+
+        ReadOnlySpan<byte> trimmed = TrimUtf8Bom(rawBody);
+        try
+        {
+            using JsonDocument document = JsonDocument.Parse(trimmed.ToArray());
+            if (document.RootElement.ValueKind == JsonValueKind.Object &&
+                document.RootElement.TryGetProperty("message", out JsonElement messageElement) &&
+                messageElement.ValueKind == JsonValueKind.String)
+            {
+                return messageElement.GetString();
+            }
+        }
+        catch (JsonException)
+        {
+            // Non-JSON text/plain bodies are checked below.
+        }
+
+        if (response.Content?.Headers.ContentType?.MediaType?.Contains("text/plain", StringComparison.OrdinalIgnoreCase) == true)
+        {
+            return Encoding.UTF8.GetString(trimmed);
+        }
+
+        return null;
+    }
 
     internal static string? CreateBodyPreview(
         ReadOnlySpan<byte> body,
@@ -412,11 +594,15 @@ internal static partial class ScaleSetClientDiagnostics
     [GeneratedRegex("""(?i)([\"']?\b(?:access[_-]?token|messagequeueaccesstoken|admin[_-]?token|token|secret|password|authorization|private[_-]?key|encodedjitconfig)\b[\"']?\s*[:=]\s*)(\"[^\"]*\"|'[^']*'|[^,;\s}]+)""")]
     private static partial Regex NamedSecretRegex();
 
+    [GeneratedRegex(@"(?i)\bsecondary rate\b")]
+    private static partial Regex SecondaryRateLimitRegex();
+
     internal enum ResponseBodyReadFailure
     {
         None = 0,
-        AttemptTimedOut = 1,
-        ReadError = 2,
+        MaxElapsed = 1,
+        AttemptTimedOut = 2,
+        ReadError = 3,
     }
 
     internal readonly record struct ResponseBodyReadResult(
@@ -424,4 +610,11 @@ internal static partial class ScaleSetClientDiagnostics
         bool Truncated,
         bool IsIncomplete,
         ResponseBodyReadFailure Failure);
+
+    internal sealed record RateLimitClassification(
+        ScaleSetRateLimitKind Kind,
+        int StatusCode,
+        TimeSpan RetryAfter,
+        TimeSpan? RetryAfterHeaderDelay,
+        DateTimeOffset? Reset);
 }

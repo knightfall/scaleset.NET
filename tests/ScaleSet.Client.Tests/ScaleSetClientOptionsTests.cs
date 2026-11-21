@@ -66,4 +66,37 @@ public sealed class ScaleSetClientOptionsTests
 
         Assert.Throws<ArgumentException>(options.Validate);
     }
+
+    [Fact]
+    public void RetryOptionsPresetsAndValidationEnforceBounds()
+    {
+        ScaleSetRetryOptions upstream = ScaleSetRetryOptions.CreateUpstreamDefault();
+        Assert.Equal(ScaleSetRetryOptions.DefaultMaxRetries, upstream.MaxRetries);
+        Assert.Equal(ScaleSetRetryOptions.DefaultWaitMin, upstream.WaitMin);
+        Assert.Equal(ScaleSetRetryOptions.DefaultWaitMax, upstream.WaitMax);
+        Assert.True(upstream.RetryAllReplayableRequests);
+        Assert.Null(upstream.MaxRetryAfterDelay);
+        new ScaleSetClientOptions { Retry = upstream }.Validate();
+
+        Assert.Equal(0, ScaleSetRetryOptions.Disabled.MaxRetries);
+        new ScaleSetClientOptions { Retry = ScaleSetRetryOptions.Disabled }.Validate();
+
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            new ScaleSetClientOptions { Retry = new ScaleSetRetryOptions { MaxRetries = -1 } }.Validate());
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            new ScaleSetClientOptions { Retry = new ScaleSetRetryOptions { WaitMin = TimeSpan.FromSeconds(-1) } }.Validate());
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            new ScaleSetClientOptions { Retry = new ScaleSetRetryOptions { WaitMin = TimeSpan.FromSeconds(45) } }.Validate());
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            new ScaleSetClientOptions { Retry = new ScaleSetRetryOptions { MaxElapsed = TimeSpan.FromSeconds(-1) } }.Validate());
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            new ScaleSetClientOptions { Retry = new ScaleSetRetryOptions { MaxRetryAfterDelay = TimeSpan.FromSeconds(-1) } }.Validate());
+
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            ScaleSetRateLimitDecision.RetryAfter(TimeSpan.FromSeconds(-1)));
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            ScaleSetRateLimitPolicies.Create(new ScaleSetRateLimitRule(-1, TimeSpan.Zero), new ScaleSetRateLimitRule()));
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            ScaleSetRateLimitPolicies.Create(new ScaleSetRateLimitRule(), new ScaleSetRateLimitRule(0, TimeSpan.FromSeconds(-1))));
+    }
 }
