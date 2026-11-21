@@ -749,9 +749,15 @@ public sealed class ScaleSetClientTransportTests
     {
         using var client = new ScaleSetClient(Target, ScaleSetCredentials.FromPersonalAccessToken(Pat));
         var handlerField = typeof(ScaleSetClient).GetField("_ownedHandler", BindingFlags.Instance | BindingFlags.NonPublic);
-        var handler = Assert.IsType<HttpClientHandler>(handlerField!.GetValue(client));
+        var handler = Assert.IsType<SocketsHttpHandler>(handlerField!.GetValue(client));
 
         Assert.False(handler.AllowAutoRedirect);
+        Assert.Equal(TimeSpan.FromSeconds(30), handler.ConnectTimeout);
+        Assert.Equal(TimeSpan.FromSeconds(90), handler.PooledConnectionIdleTimeout);
+        Assert.Equal(TimeSpan.FromMinutes(15), handler.PooledConnectionLifetime);
+        Assert.Equal(TimeSpan.FromSeconds(30), handler.KeepAlivePingDelay);
+        Assert.Equal(TimeSpan.FromSeconds(10), handler.KeepAlivePingTimeout);
+        Assert.Equal(HttpKeepAlivePingPolicy.WithActiveRequests, handler.KeepAlivePingPolicy);
     }
 
     [Fact]
