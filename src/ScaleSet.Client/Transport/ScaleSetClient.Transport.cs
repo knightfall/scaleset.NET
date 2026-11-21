@@ -12,6 +12,7 @@ namespace ScaleSet.Client;
 public sealed partial class ScaleSetClient
 {
     private const string ApiVersion = "6.0-preview";
+    private static readonly TimeSpan MaximumTimerDelay = TimeSpan.FromMilliseconds(uint.MaxValue - 1d);
     private static readonly Action<ILogger, string, string, int?, string?, string?, Exception?> LogRequestFailure =
         LoggerMessage.Define<string, string, int?, string?, string?>(
             LogLevel.Warning,
@@ -258,8 +259,8 @@ public sealed partial class ScaleSetClient
             : null;
         CancellationToken maxElapsedToken = maxElapsedSource?.Token ?? CancellationToken.None;
 
-        using CancellationTokenSource? deadlineSource = CreateDeadlineTokenSource(retryOptions.Deadline);
-        CancellationToken deadlineToken = deadlineSource?.Token ?? CancellationToken.None;
+        using BoundedDeadlineScope? deadlineScope = BoundedDeadlineScope.Create(retryOptions.Deadline, _timeProvider);
+        CancellationToken deadlineToken = deadlineScope?.Token ?? CancellationToken.None;
 
         int maxDiscoveryAuthRetries = hasExplicitRetryPolicy
             ? Math.Min(_options.MaxRegistrationDiscoveryAuthRetries, retryOptions.MaxRetries)
@@ -827,22 +828,112 @@ public sealed partial class ScaleSetClient
         return retryOptions;
     }
 
-    private CancellationTokenSource? CreateDeadlineTokenSource(DateTimeOffset? deadline)
+    private sealed class BoundedDeadlineScope : IDisposable
     {
-        if (deadline is not { } deadlineUtc)
+        private readonly object _sync = new();
+        private readonly DateTimeOffset _deadlineUtc;
+        private readonly TimeProvider _timeProvider;
+        private readonly CancellationTokenSource _cts = new();
+        private ITimer? _timer;
+        private bool _disposed;
+
+        private BoundedDeadlineScope(DateTimeOffset deadlineUtc, TimeProvider timeProvider)
         {
-            return null;
+            _deadlineUtc = deadlineUtc;
+            _timeProvider = timeProvider;
         }
 
-        TimeSpan remaining = deadlineUtc - _timeProvider.GetUtcNow();
-        if (remaining <= TimeSpan.Zero)
+        public CancellationToken Token => _cts.Token;
+
+        public static BoundedDeadlineScope? Create(DateTimeOffset? deadline, TimeProvider timeProvider)
         {
-            CancellationTokenSource expired = new();
-            expired.Cancel();
-            return expired;
+            if (deadline is not { } deadlineUtc)
+            {
+                return null;
+            }
+
+            BoundedDeadlineScope scope = new(deadlineUtc, timeProvider);
+            TimeSpan remaining = deadlineUtc - timeProvider.GetUtcNow();
+            if (remaining <= TimeSpan.Zero)
+            {
+                scope._cts.Cancel();
+                return scope;
+            }
+
+            TimeSpan initialDelay = remaining > MaximumTimerDelay ? MaximumTimerDelay : remaining;
+            scope._timer = timeProvider.CreateTimer(
+                static state => ((BoundedDeadlineScope)state!).OnTimerFired(),
+                scope,
+                Timeout.InfiniteTimeSpan,
+                Timeout.InfiniteTimeSpan);
+            lock (scope._sync)
+            {
+                if (!scope._disposed)
+                {
+                    scope._timer.Change(initialDelay, Timeout.InfiniteTimeSpan);
+                }
+            }
+
+            return scope;
         }
 
-        return new CancellationTokenSource(remaining, _timeProvider);
+        private void OnTimerFired()
+        {
+            ITimer? timerToDispose = null;
+            bool shouldCancel = false;
+
+            lock (_sync)
+            {
+                if (_disposed)
+                {
+                    return;
+                }
+
+                TimeSpan remaining = _deadlineUtc - _timeProvider.GetUtcNow();
+                if (remaining <= TimeSpan.Zero)
+                {
+                    timerToDispose = _timer;
+                    _timer = null;
+                    shouldCancel = true;
+                }
+                else
+                {
+                    TimeSpan nextDelay = remaining > MaximumTimerDelay ? MaximumTimerDelay : remaining;
+                    _timer?.Change(nextDelay, Timeout.InfiniteTimeSpan);
+                }
+            }
+
+            timerToDispose?.Dispose();
+            if (shouldCancel)
+            {
+                try
+                {
+                    _cts.Cancel();
+                }
+                catch (ObjectDisposedException)
+                {
+                }
+            }
+        }
+
+        public void Dispose()
+        {
+            ITimer? timerToDispose;
+            lock (_sync)
+            {
+                if (_disposed)
+                {
+                    return;
+                }
+
+                _disposed = true;
+                timerToDispose = _timer;
+                _timer = null;
+            }
+
+            timerToDispose?.Dispose();
+            _cts.Dispose();
+        }
     }
 
     private bool WouldWaitOutlastBudget(
@@ -897,7 +988,13 @@ public sealed partial class ScaleSetClient
             deadlineToken);
         try
         {
-            await Task.Delay(delay, _timeProvider, linkedWait.Token).ConfigureAwait(false);
+            TimeSpan remaining = delay;
+            while (remaining > TimeSpan.Zero)
+            {
+                TimeSpan chunk = remaining > MaximumTimerDelay ? MaximumTimerDelay : remaining;
+                await Task.Delay(chunk, _timeProvider, linkedWait.Token).ConfigureAwait(false);
+                remaining -= chunk;
+            }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {

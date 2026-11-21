@@ -572,6 +572,94 @@ public sealed class RetryPolicyTests
         Assert.Equal(2, transientThenAuthCalls);
     }
 
+    [Fact]
+    public async Task DistantDeadlineAndRetryAfterBeyondTimerRangeSucceedAndStillEnforceBudget()
+    {
+        VirtualTimeProvider clock = new(BaseNow);
+
+        using HttpClient immediateHttp = new(CreateConnectedHandler((_, _) =>
+            Task.FromResult(TestResponses.Json(HttpStatusCode.OK, "{\"id\":11,\"name\":\"distant-ok\"}"))));
+        using ScaleSetClient immediateClient = CreateClient(
+            immediateHttp,
+            new ScaleSetRetryOptions
+            {
+                Deadline = BaseNow.AddDays(60),
+            },
+            clock);
+        RunnerScaleSet? immediate = await immediateClient.GetScaleSetAsync(11, TestContext.Current.CancellationToken);
+        Assert.Equal(11, immediate?.Id);
+
+        int pendingCalls = 0;
+        TaskCompletionSource secondAttemptEntered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        using HttpClient pendingHttp = new(CreateConnectedHandler(async (_, token) =>
+        {
+            pendingCalls++;
+            if (pendingCalls == 1)
+            {
+                return TestResponses.Json(HttpStatusCode.TooManyRequests, "{}");
+            }
+
+            secondAttemptEntered.TrySetResult();
+            await Task.Delay(Timeout.InfiniteTimeSpan, token);
+            return TestResponses.Json(HttpStatusCode.OK, "{\"id\":99}");
+        }));
+        using ScaleSetClient pendingClient = new(
+            Target,
+            ScaleSetCredentials.FromPersonalAccessToken("synthetic-pat"),
+            new ScaleSetClientOptions
+            {
+                ControlRequestTimeout = TimeSpan.FromDays(40),
+                Retry = new ScaleSetRetryOptions
+                {
+                    MaxRetries = 1,
+                    Deadline = BaseNow.AddDays(60),
+                    OnRateLimit = (_, _) => ValueTask.FromResult(ScaleSetRateLimitDecision.RetryAfter(TimeSpan.FromDays(30))),
+                },
+            },
+            pendingHttp,
+            timeProvider: clock);
+
+        Task<RunnerScaleSet?> pendingTask = pendingClient.GetScaleSetAsync(11, TestContext.Current.CancellationToken);
+        _ = await clock.WaitForActiveTimerAsync(delay => delay == TimeSpan.FromDays(30), TestContext.Current.CancellationToken);
+        clock.Advance(TimeSpan.FromDays(30));
+        await secondAttemptEntered.Task.WaitAsync(TestContext.Current.CancellationToken);
+
+        clock.Advance(TimeSpan.FromDays(20));
+        await Task.Yield();
+        Assert.False(pendingTask.IsCompleted);
+
+        clock.Advance(TimeSpan.FromDays(10));
+        OperationCanceledException deadlineEx = await Assert.ThrowsAsync<OperationCanceledException>(() => pendingTask);
+        Assert.IsNotType<ScaleSetMaxElapsedExceededException>(deadlineEx);
+        Assert.NotEqual(TestContext.Current.CancellationToken, deadlineEx.CancellationToken);
+
+        int retryWaitCalls = 0;
+        using HttpClient longWaitHttp = new(CreateConnectedHandler((_, _) =>
+        {
+            retryWaitCalls++;
+            return Task.FromResult(retryWaitCalls == 1
+                ? TestResponses.Json(HttpStatusCode.TooManyRequests, "{}")
+                : TestResponses.Json(HttpStatusCode.OK, "{\"id\":12,\"name\":\"recovered\"}"));
+        }));
+        using ScaleSetClient longWaitClient = CreateClient(
+            longWaitHttp,
+            new ScaleSetRetryOptions
+            {
+                MaxRetries = 1,
+                OnRateLimit = (_, _) => ValueTask.FromResult(ScaleSetRateLimitDecision.RetryAfter(TimeSpan.FromDays(60))),
+            },
+            clock);
+
+        Task<RunnerScaleSet?> longWaitTask = longWaitClient.GetScaleSetAsync(12, TestContext.Current.CancellationToken);
+        TimeSpan firstDelay = await clock.WaitForActiveTimerAsync(delay => delay > TimeSpan.FromDays(49), TestContext.Current.CancellationToken);
+        clock.Advance(firstDelay);
+        TimeSpan secondDelay = await clock.WaitForActiveTimerAsync(delay => delay > TimeSpan.FromDays(10), TestContext.Current.CancellationToken);
+        clock.Advance(secondDelay);
+        RunnerScaleSet? recovered = await longWaitTask;
+        Assert.Equal(12, recovered?.Id);
+        Assert.Equal(2, retryWaitCalls);
+    }
+
     private static ScaleSetClient CreateClient(
         HttpClient httpClient,
         ScaleSetRetryOptions retry,
