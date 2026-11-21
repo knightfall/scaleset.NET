@@ -1,3 +1,4 @@
+using System.Net;
 using Microsoft.Extensions.Logging;
 
 namespace ScaleSet.Client;
@@ -8,7 +9,7 @@ public sealed partial class ScaleSetClient : IDisposable
     private static readonly TimeSpan AdminRefreshWindow = TimeSpan.FromSeconds(60);
     private readonly HttpClient _httpClient;
     private readonly bool _ownsHttpClient;
-    private readonly HttpClientHandler? _ownedHandler;
+    private readonly SocketsHttpHandler? _ownedHandler;
     private readonly ScaleSetCredentials _credentials;
     private readonly ScaleSetClientOptions _options;
     private readonly ILogger<ScaleSetClient>? _logger;
@@ -46,13 +47,21 @@ public sealed partial class ScaleSetClient : IDisposable
 
         if (httpClient is null)
         {
-            _ownedHandler = new HttpClientHandler
+            _ownedHandler = new SocketsHttpHandler
             {
                 AllowAutoRedirect = false,
+                ConnectTimeout = TimeSpan.FromSeconds(30),
+                PooledConnectionIdleTimeout = TimeSpan.FromSeconds(90),
+                PooledConnectionLifetime = TimeSpan.FromMinutes(15),
+                KeepAlivePingDelay = TimeSpan.FromSeconds(30),
+                KeepAlivePingTimeout = TimeSpan.FromSeconds(10),
+                KeepAlivePingPolicy = HttpKeepAlivePingPolicy.WithActiveRequests,
             };
             _httpClient = new HttpClient(_ownedHandler, disposeHandler: false)
             {
                 Timeout = Timeout.InfiniteTimeSpan,
+                DefaultRequestVersion = HttpVersion.Version20,
+                DefaultVersionPolicy = HttpVersionPolicy.RequestVersionOrLower,
             };
             _ownsHttpClient = true;
         }
