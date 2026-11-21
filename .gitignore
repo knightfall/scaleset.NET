@@ -23,6 +23,12 @@ mono_crash.*
 [Rr]elease/
 [Rr]eleases/
 
+# Authored release documentation and workflow helpers are repository sources.
+!/docs/releases/
+!/docs/releases/**
+!/.github/release/
+!/.github/release/**
+
 [Dd]ebug/x64/
 [Dd]ebugPublic/x64/
 [Rr]elease/x64/

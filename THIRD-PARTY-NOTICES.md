@@ -1,7 +1,7 @@
 # Third-party notices
 
 The ScaleSet wire-contract implementation is derived from actions/scaleset
-at e6daac702355cdb5b880b4fbdcf6d85dcd9e48e5. Preserve this notice when distributing
+at 716908e507993947ada4273aecf2361c02e5836c. Preserve this notice when distributing
 translated source/fixtures.
 
 MIT License
