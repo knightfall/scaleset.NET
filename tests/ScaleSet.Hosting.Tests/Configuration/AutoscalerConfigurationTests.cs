@@ -118,11 +118,12 @@ public sealed class AutoscalerConfigurationTests
     }
 
     [Fact]
-    public void Validate_RejectsUnknownAndNonGithubComTargets()
+    public void Validate_RejectsUnknownAndDeferredTargets()
     {
         string[] urls =
         [
             "https://ghe.example.com/acme",
+            "https://ghe.com/acme",
             "http://github.com/acme",
             "https://github.com/acme/repo/actions",
             "https://user:password@github.com/acme",
@@ -139,6 +140,48 @@ public sealed class AutoscalerConfigurationTests
             Assert.Contains(errors, error => error.StartsWith("ScaleSets[0].GithubUrl", StringComparison.Ordinal));
             Assert.DoesNotContain(url, string.Join(";", errors));
         }
+    }
+
+    [Theory]
+    [InlineData("https://github.com/enterprises/acme")]
+    [InlineData("https://acme.ghe.com/acme")]
+    [InlineData("https://acme.ghe.com/acme/repo")]
+    [InlineData("https://acme.ghe.com/enterprises/acme")]
+    public void Validate_AcceptsEnterpriseAndHostedGheTargetsWithPat(string targetUrl)
+    {
+        AutoscalerOptions options = ValidOptions();
+        options.ScaleSets[0].GithubUrl = targetUrl;
+
+        IReadOnlyList<string> errors = AutoscalerConfiguration.Validate(options);
+
+        Assert.Empty(errors);
+    }
+
+    [Fact]
+    public void Validate_DistinguishesHostedGheAndEnterpriseTargetsFromGithubComOrg()
+    {
+        AutoscalerOptions options = ValidOptions();
+        options.ScaleSets[0].GithubUrl = "https://github.com/acme";
+        options.ScaleSets[0].Name = "build-runners";
+        options.ScaleSets.Add(ValidScaleSet("ghe", "https://acme.ghe.com/acme", "build-runners", "build-credential"));
+        options.ScaleSets.Add(ValidScaleSet("ent", "https://github.com/enterprises/acme", "build-runners", "build-credential"));
+
+        IReadOnlyList<string> errors = AutoscalerConfiguration.Validate(options);
+
+        Assert.Empty(errors);
+    }
+
+    [Fact]
+    public void Validate_RejectsDuplicateOwnershipAcrossWwwAndRootGithubCom()
+    {
+        AutoscalerOptions options = ValidOptions();
+        options.ScaleSets[0].GithubUrl = "https://www.github.com/acme";
+        options.ScaleSets[0].Name = "build-runners";
+        options.ScaleSets.Add(ValidScaleSet("other", "https://github.com/acme", "build-runners", "build-credential"));
+
+        IReadOnlyList<string> errors = AutoscalerConfiguration.Validate(options);
+
+        Assert.Contains(errors, error => error.StartsWith("ScaleSets[1].Name", StringComparison.Ordinal));
     }
 
     [Fact]
