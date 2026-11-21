@@ -170,6 +170,19 @@ class ReleaseVerificationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Symbolic links"):
             self.verify()
 
+    def test_evidence_archive_is_deterministic_across_mtime_changes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            first = Path(directory) / "first.zip"
+            second = Path(directory) / "second.zip"
+            create_archive(self.root, first)
+            manifest = self.root / "release.json"
+            stat = manifest.stat()
+            import os
+
+            os.utime(manifest, (stat.st_atime + 60, stat.st_mtime + 60))
+            create_archive(self.root, second)
+            self.assertEqual(VERIFY.sha256(first), VERIFY.sha256(second))
+
 
 class PackagePayloadTests(unittest.TestCase):
     def test_repository_signature_does_not_change_payload_comparison(self):

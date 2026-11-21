@@ -1,4 +1,4 @@
-"""Archive the complete verified evidence, including dotfiles, without filtering it."""
+"""Archive the complete verified evidence deterministically, including dotfiles."""
 from pathlib import Path
 import sys
 import zipfile
@@ -11,7 +11,9 @@ def create_archive(root, destination):
             if path.is_symlink():
                 raise ValueError("Symbolic links are not release evidence")
             if path.is_file():
-                archive.write(path, path.relative_to(root).as_posix())
+                info = zipfile.ZipInfo(path.relative_to(root).as_posix(), date_time=(1980, 1, 1, 0, 0, 0))
+                info.compress_type = zipfile.ZIP_DEFLATED
+                archive.writestr(info, path.read_bytes())
 
 
 if __name__ == "__main__":

@@ -2,6 +2,28 @@ param([Parameter(Mandatory)][string]$ReleaseDirectory)
 $ErrorActionPreference = 'Stop'
 $policy = Get-Content "$PSScriptRoot/policy.json" -Raw | ConvertFrom-Json
 $tag = "v$($policy.version)"
+$manifestFile = Join-Path $ReleaseDirectory 'release.json'
+$expectedManifestHash = (Get-FileHash $manifestFile -Algorithm SHA256).Hash.ToLowerInvariant()
+
+# Guard before any registry push or asset upload: if a draft release already holds
+# release.json, it must match this exact candidate manifest (use candidate_run_id on retries).
+gh release view $tag --repo $policy.repository *> $null
+if ($LASTEXITCODE -eq 0) {
+    $releaseAssets = (gh release view $tag --repo $policy.repository --json assets | ConvertFrom-Json).assets.name
+    if ($LASTEXITCODE -ne 0) { throw 'Cannot inspect existing release assets' }
+    if ($releaseAssets -contains 'release.json') {
+        $existingManifestDir = Join-Path $env:RUNNER_TEMP ('existing-manifest-' + [guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Path $existingManifestDir | Out-Null
+        gh release download $tag --repo $policy.repository --pattern 'release.json' --dir $existingManifestDir
+        if ($LASTEXITCODE -ne 0) { throw 'Cannot download existing release.json' }
+        $existingManifestPath = Join-Path $existingManifestDir 'release.json'
+        $actualExistingHash = (Get-FileHash $existingManifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($actualExistingHash -ne $expectedManifestHash) {
+            throw "Release $tag already exists with different candidate evidence (release.json mismatch). Rerun failed jobs or pass the original candidate_run_id to reuse its evidence."
+        }
+    }
+}
+
 $existingPath = Join-Path $env:RUNNER_TEMP 'existing-packages.json'
 python3 "$PSScriptRoot/check_existing.py" $ReleaseDirectory $existingPath
 if ($LASTEXITCODE -ne 0) { throw 'Existing registry versions conflict with the verified candidate or could not be checked' }
@@ -24,6 +46,7 @@ foreach ($id in $policy.packages) {
     if ($LASTEXITCODE -ne 0) { throw "GitHub Packages publication failed: $id" }
 }
 $assets = Join-Path $env:RUNNER_TEMP 'release-assets'
+if (Test-Path $assets) { Remove-Item -Recurse -Force $assets }
 New-Item -ItemType Directory -Path $assets | Out-Null
 Copy-Item "$ReleaseDirectory/packages/*" $assets
 Copy-Item "$ReleaseDirectory/release.json" $assets
@@ -44,19 +67,17 @@ if ($LASTEXITCODE -ne 0) {
     }
     if ($LASTEXITCODE -ne 0) { throw 'Cannot create draft release' }
 }
-$existing = (gh release view $tag --repo $policy.repository --json assets | ConvertFrom-Json).assets.name
+$existingAssets = (gh release view $tag --repo $policy.repository --json assets | ConvertFrom-Json).assets.name
 if ($LASTEXITCODE -ne 0) { throw 'Cannot inspect existing release assets' }
 foreach ($file in Get-ChildItem $assets -File) {
-    if ($existing -contains $file.Name) {
+    if ($existingAssets -contains $file.Name) {
         $previous = Join-Path $env:RUNNER_TEMP ('previous-' + [guid]::NewGuid().ToString('N'))
         New-Item -ItemType Directory -Path $previous | Out-Null
         gh release download $tag --repo $policy.repository --pattern $file.Name --dir $previous
         if ($LASTEXITCODE -ne 0) { throw 'Cannot verify existing release asset' }
         $old = Join-Path $previous $file.Name
         if ((Get-FileHash $old).Hash -ne (Get-FileHash $file.FullName).Hash) {
-            if ($file.Extension -ne '.zip') { throw "Existing release asset differs: $($file.Name)" }
-            python3 "$PSScriptRoot/compare-packages.py" $old $file.FullName
-            if ($LASTEXITCODE -ne 0) { throw 'Existing release evidence differs' }
+            throw "Existing release asset differs: $($file.Name)"
         }
         continue
     }
