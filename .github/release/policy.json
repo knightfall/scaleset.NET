@@ -1,0 +1,20 @@
+{
+  "version": "0.1.0-alpha.1",
+  "repository": "knightfall/scaleset.NET",
+  "packages": [
+    "Knightfall.ScaleSet.Client",
+    "Knightfall.ScaleSet.Listener",
+    "Knightfall.ScaleSet.Hosting",
+    "Knightfall.ScaleSet.Providers.Docker"
+  ],
+  "requiredChecks": {
+    "Workflow security": "github-actions",
+    "Build release candidate": "github-actions",
+    "Analyze (actions)": "github-actions",
+    "Analyze (csharp)": "github-actions",
+    "container": "github-actions",
+    "foundation (ubuntu-latest)": "github-actions",
+    "foundation (windows-latest)": "github-actions",
+    "foundation (macos-latest)": "github-actions"
+  }
+}

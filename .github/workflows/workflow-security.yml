@@ -22,5 +22,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Check release trust boundaries
+        run: python3 -m unittest discover -s .github/release/tests -v
       - name: Verify action pins, actionlint, and zizmor
         run: python3 .github/security/verify-workflows.py --cache "$RUNNER_TEMP/workflow-tools"
