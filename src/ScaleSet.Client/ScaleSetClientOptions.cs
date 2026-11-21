@@ -52,6 +52,13 @@ public sealed record ScaleSetClientOptions
     /// <summary>Optional host and scale set metadata used in the User-Agent comment.</summary>
     public ScaleSetClientMetadata? Metadata { get; init; }
 
+    /// <summary>
+    /// Optional unified retry, backoff, budget, and rate-limit policy. When omitted, read-only requests use
+    /// <see cref="MaxReadOnlyRetries"/>, <see cref="RetryBaseDelay"/>, and <see cref="RetryMaxDelay"/> with a
+    /// one-minute cap on <c>Retry-After</c> delays.
+    /// </summary>
+    public ScaleSetRetryOptions? Retry { get; init; }
+
     internal void Validate()
     {
         if (ControlRequestTimeout <= TimeSpan.Zero || ControlRequestTimeout > MaximumTimerDuration)
@@ -88,6 +95,8 @@ public sealed record ScaleSetClientOptions
         {
             throw new ArgumentException("User-Agent must contain valid HTTP product/comment values.", nameof(UserAgent));
         }
+
+        Retry?.Validate();
     }
 
     private static bool IsValidUserAgent(string userAgent)

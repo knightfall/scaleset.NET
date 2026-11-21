@@ -1,7 +1,9 @@
+using System.Collections.Immutable;
 using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.Net;
 using System.Net.Http.Headers;
+using System.Security.Authentication;
 using System.Text.Json;
 using Microsoft.Extensions.Logging;
 
@@ -237,22 +239,57 @@ public sealed partial class ScaleSetClient
         ArgumentNullException.ThrowIfNull(uri);
         ArgumentNullException.ThrowIfNull(decode);
 
-        var readOnly = dependency != "queue" && (method == HttpMethod.Get || method == HttpMethod.Head);
-        var knownSecrets = CollectKnownSecrets(authorization, uri);
+        ScaleSetRetryOptions retryOptions = ResolveRetryOptions(out bool hasExplicitRetryPolicy);
+        bool readOnly = method == HttpMethod.Get || method == HttpMethod.Head;
+        bool allowDefaultRetry = dependency != "queue" && (readOnly || retryOptions.RetryAllReplayableRequests);
+        string[] knownSecrets = CollectKnownSecrets(authorization, uri);
         string safeUri = ScaleSetClientDiagnostics.CreateSafeUri(
             uri,
             knownSecrets,
             redactPath: dependency == "queue").AbsoluteUri;
-        var transientRetries = 0;
-        var authenticationRetries = 0;
+
+        TimeSpan? maxElapsed = retryOptions.MaxElapsed is { } configuredMaxElapsed && configuredMaxElapsed > TimeSpan.Zero
+            ? configuredMaxElapsed
+            : null;
+        long requestStartTimestamp = maxElapsed is not null ? _timeProvider.GetTimestamp() : 0;
+        using CancellationTokenSource? maxElapsedSource = maxElapsed is { } elapsedBudget
+            ? new CancellationTokenSource(elapsedBudget, _timeProvider)
+            : null;
+        CancellationToken maxElapsedToken = maxElapsedSource?.Token ?? CancellationToken.None;
+
+        using CancellationTokenSource? deadlineSource = CreateDeadlineTokenSource(retryOptions.Deadline);
+        CancellationToken deadlineToken = deadlineSource?.Token ?? CancellationToken.None;
+
+        int maxDiscoveryAuthRetries = hasExplicitRetryPolicy
+            ? Math.Min(_options.MaxRegistrationDiscoveryAuthRetries, retryOptions.MaxRetries)
+            : _options.MaxRegistrationDiscoveryAuthRetries;
+
+        int retryAttempt = 0;
+        int rateLimitRetries = 0;
+        int discoveryAuthRetries = 0;
+
         while (true)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            using var timeoutSource = new CancellationTokenSource(timeout, _timeProvider);
-            using var linkedSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutSource.Token);
-            using var request = CreateRequest(method, uri, body, authorization, contentType, headers, dependency);
-            using var activity = ScaleSetClientDiagnostics.StartActivity(method, uri, dependency);
-            var startTimestamp = _timeProvider.GetTimestamp();
+            if (deadlineToken.IsCancellationRequested)
+            {
+                throw new OperationCanceledException("The ScaleSet request exceeded its configured deadline.", deadlineToken);
+            }
+
+            if (maxElapsedToken.IsCancellationRequested)
+            {
+                throw CreateMaxElapsedException(method, safeUri, maxElapsed!.Value);
+            }
+
+            using CancellationTokenSource timeoutSource = new(timeout, _timeProvider);
+            using CancellationTokenSource linkedSource = CancellationTokenSource.CreateLinkedTokenSource(
+                cancellationToken,
+                timeoutSource.Token,
+                maxElapsedToken,
+                deadlineToken);
+            using HttpRequestMessage request = CreateRequest(method, uri, body, authorization, contentType, headers, dependency);
+            using Activity? activity = ScaleSetClientDiagnostics.StartActivity(method, uri, dependency);
+            long startTimestamp = _timeProvider.GetTimestamp();
             HttpResponseMessage? response = null;
 
             try
@@ -273,71 +310,132 @@ public sealed partial class ScaleSetClient
                     _timeProvider.GetElapsedTime(startTimestamp).TotalSeconds);
                 throw new OperationCanceledException("The ScaleSet request was canceled by the caller.", cancellationToken);
             }
-            catch (OperationCanceledException) when (readOnly && transientRetries < _options.MaxReadOnlyRetries)
+            catch (OperationCanceledException) when (deadlineToken.IsCancellationRequested)
             {
-                activity?.SetStatus(ActivityStatusCode.Error, "request timed out");
+                activity?.SetTag("error.type", "deadline_exceeded");
+                activity?.SetStatus(ActivityStatusCode.Error, "deadline exceeded");
                 ScaleSetClientDiagnostics.RecordAttempt(
                     dependency,
                     method.Method,
                     statusCode: null,
                     _timeProvider.GetElapsedTime(startTimestamp).TotalSeconds);
-                transientRetries++;
-                ScaleSetClientDiagnostics.RecordRetry(dependency, method.Method, "transient");
-                await DelayBeforeRetryAsync(transientRetries, cancellationToken).ConfigureAwait(false);
-                continue;
+                throw new OperationCanceledException("The ScaleSet request exceeded its configured deadline.", deadlineToken);
+            }
+            catch (OperationCanceledException) when (maxElapsedToken.IsCancellationRequested)
+            {
+                activity?.SetTag("error.type", "max_elapsed_exceeded");
+                activity?.SetStatus(ActivityStatusCode.Error, "max elapsed exceeded");
+                ScaleSetClientDiagnostics.RecordAttempt(
+                    dependency,
+                    method.Method,
+                    statusCode: null,
+                    _timeProvider.GetElapsedTime(startTimestamp).TotalSeconds);
+                throw CreateMaxElapsedException(method, safeUri, maxElapsed!.Value);
             }
             catch (OperationCanceledException)
             {
+                activity?.SetStatus(ActivityStatusCode.Error, "request timed out");
                 ScaleSetClientDiagnostics.RecordAttempt(
                     dependency,
                     method.Method,
                     statusCode: null,
                     _timeProvider.GetElapsedTime(startTimestamp).TotalSeconds);
-                activity?.SetStatus(ActivityStatusCode.Error, "request timed out");
-                var exception = new ScaleSetApiException(
+                ScaleSetApiException timeoutException = new(
                     "ScaleSet HTTP request timed out.",
                     statusCode: null,
                     method: method.Method,
                     safeUri: safeUri);
-                LogFailure(exception, uri);
-                throw exception;
-            }
-            catch (HttpRequestException) when (readOnly && transientRetries < _options.MaxReadOnlyRetries)
-            {
-                activity?.SetStatus(ActivityStatusCode.Error, "transport retry");
-                ScaleSetClientDiagnostics.RecordAttempt(
-                    dependency,
-                    method.Method,
+
+                TimeSpan? delay = await EvaluateStandardFailureRetryAsync(
+                    retryOptions,
+                    method,
+                    safeUri,
+                    retryAttempt,
+                    readOnly: allowDefaultRetry,
+                    isCertificateError: false,
                     statusCode: null,
-                    _timeProvider.GetElapsedTime(startTimestamp).TotalSeconds);
-                transientRetries++;
-                ScaleSetClientDiagnostics.RecordRetry(dependency, method.Method, "transient");
-                await DelayBeforeRetryAsync(transientRetries, cancellationToken).ConfigureAwait(false);
-                continue;
+                    snapshot: null,
+                    timeoutException,
+                    retryAfterHeaderDelay: null,
+                    cancellationToken).ConfigureAwait(false);
+                if (delay is { } retryDelay &&
+                    !WouldWaitOutlastBudget(retryDelay, maxElapsed, requestStartTimestamp, retryOptions.Deadline))
+                {
+                    retryAttempt++;
+                    ScaleSetClientDiagnostics.RecordRetry(dependency, method.Method, "transient");
+                    await WaitForRetryDelayAsync(
+                        retryDelay,
+                        method,
+                        safeUri,
+                        maxElapsed,
+                        maxElapsedToken,
+                        deadlineToken,
+                        cancellationToken).ConfigureAwait(false);
+                    continue;
+                }
+
+                LogFailure(timeoutException, uri);
+                throw timeoutException;
             }
-            catch (HttpRequestException)
+            catch (HttpRequestException httpException)
             {
-                ScaleSetClientDiagnostics.RecordAttempt(
-                    dependency,
-                    method.Method,
-                    statusCode: null,
-                    _timeProvider.GetElapsedTime(startTimestamp).TotalSeconds);
                 activity?.SetStatus(ActivityStatusCode.Error, "transport failure");
-                var exception = new ScaleSetApiException(
+                ScaleSetClientDiagnostics.RecordAttempt(
+                    dependency,
+                    method.Method,
+                    statusCode: null,
+                    _timeProvider.GetElapsedTime(startTimestamp).TotalSeconds);
+                bool isCertificateError = IsCertificateError(httpException);
+                ScaleSetApiException transportException = new(
                     "ScaleSet HTTP transport failed.",
                     statusCode: null,
                     method: method.Method,
                     safeUri: safeUri);
-                LogFailure(exception, uri);
-                throw exception;
+
+                TimeSpan? delay = await EvaluateStandardFailureRetryAsync(
+                    retryOptions,
+                    method,
+                    safeUri,
+                    retryAttempt,
+                    readOnly: allowDefaultRetry,
+                    isCertificateError,
+                    statusCode: null,
+                    snapshot: null,
+                    retryOptions.ShouldRetry is not null ? httpException : transportException,
+                    retryAfterHeaderDelay: null,
+                    cancellationToken).ConfigureAwait(false);
+                if (delay is { } retryDelay &&
+                    !WouldWaitOutlastBudget(retryDelay, maxElapsed, requestStartTimestamp, retryOptions.Deadline))
+                {
+                    retryAttempt++;
+                    ScaleSetClientDiagnostics.RecordRetry(dependency, method.Method, "transient");
+                    await WaitForRetryDelayAsync(
+                        retryDelay,
+                        method,
+                        safeUri,
+                        maxElapsed,
+                        maxElapsedToken,
+                        deadlineToken,
+                        cancellationToken).ConfigureAwait(false);
+                    continue;
+                }
+
+                LogFailure(transportException, uri);
+                throw transportException;
             }
+
+            TimeSpan? nextDelay = null;
+            string? nextRetryKind = null;
+            bool countAsRateLimitRetry = false;
+            bool countAsDiscoveryRetry = false;
 
             using (response)
             {
-                var statusCode = (int)response.StatusCode;
+                int statusCode = (int)response.StatusCode;
                 activity?.SetTag("http.response.status_code", statusCode);
-                var expected = IsExpectedStatus(response.StatusCode, expectedStatus) ||
+                bool expected = IsExpectedStatus(response.StatusCode, expectedStatus) ||
                     (allowAccepted && response.StatusCode == HttpStatusCode.Accepted);
+
                 if (expected)
                 {
                     if (allowAccepted && response.StatusCode == HttpStatusCode.Accepted)
@@ -355,7 +453,27 @@ public sealed partial class ScaleSetClient
                             response,
                             int.MaxValue,
                             cancellationToken,
+                            maxElapsedToken,
+                            deadlineToken,
                             linkedSource.Token).ConfigureAwait(false);
+
+                    if (bodyRead.Failure == ScaleSetClientDiagnostics.ResponseBodyReadFailure.MaxElapsed)
+                    {
+                        activity?.SetTag("error.type", "max_elapsed_exceeded");
+                        activity?.SetStatus(ActivityStatusCode.Error, "max elapsed exceeded reading response");
+                        ScaleSetClientDiagnostics.RecordAttempt(
+                            dependency,
+                            method.Method,
+                            statusCode,
+                            _timeProvider.GetElapsedTime(startTimestamp).TotalSeconds);
+                        ScaleSetResponseSnapshot snapshot = ScaleSetResponseSnapshot.FromHttpResponse(
+                            response,
+                            bodyRead.RawBytes,
+                            bodyRead.IsIncomplete,
+                            bodyRead.Truncated);
+                        throw CreateMaxElapsedException(response, method, safeUri, maxElapsed!.Value, knownSecrets, snapshot);
+                    }
+
                     if (bodyRead.Failure != ScaleSetClientDiagnostics.ResponseBodyReadFailure.None)
                     {
                         ScaleSetResponseSnapshot snapshot = ScaleSetResponseSnapshot.FromHttpResponse(
@@ -371,7 +489,7 @@ public sealed partial class ScaleSetClient
                             method.Method,
                             statusCode,
                             _timeProvider.GetElapsedTime(startTimestamp).TotalSeconds);
-                        ScaleSetApiException wrapped = CreateResponseException(
+                        ScaleSetApiException readFailure = CreateResponseException(
                             response,
                             method,
                             safeUri,
@@ -383,8 +501,98 @@ public sealed partial class ScaleSetClient
                             message: isTimeout
                                 ? "ScaleSet response body read timed out."
                                 : "ScaleSet response body could not be read.");
-                        LogFailure(wrapped, uri);
-                        throw wrapped;
+
+                        if (retryOptions.ShouldRetry is not null)
+                        {
+                            TimeSpan? retryDelay = await EvaluateStandardFailureRetryAsync(
+                                retryOptions,
+                                method,
+                                safeUri,
+                                retryAttempt,
+                                readOnly: allowDefaultRetry,
+                                isCertificateError: false,
+                                statusCode: response.StatusCode,
+                                snapshot,
+                                readFailure,
+                                retryAfterHeaderDelay: null,
+                                cancellationToken).ConfigureAwait(false);
+                            if (retryDelay is { } approvedDelay &&
+                                !WouldWaitOutlastBudget(approvedDelay, maxElapsed, requestStartTimestamp, retryOptions.Deadline))
+                            {
+                                nextDelay = approvedDelay;
+                                nextRetryKind = "transient";
+                            }
+                        }
+
+                        if (nextDelay is null)
+                        {
+                            LogFailure(readFailure, uri);
+                            throw readFailure;
+                        }
+                    }
+                    else
+                    {
+                        ScaleSetClientDiagnostics.RecordAttempt(
+                            dependency,
+                            method.Method,
+                            statusCode,
+                            _timeProvider.GetElapsedTime(startTimestamp).TotalSeconds);
+                        try
+                        {
+                            byte[] decodedInput = ScaleSetClientDiagnostics.TrimUtf8Bom(bodyRead.RawBytes).ToArray();
+                            return decode(decodedInput);
+                        }
+                        catch (Exception exception) when (IsDecodeFailure(exception))
+                        {
+                            activity?.SetTag("error.type", "response_decode");
+                            activity?.SetStatus(ActivityStatusCode.Error, "response body decode failed");
+                            ScaleSetResponseSnapshot snapshot = ScaleSetResponseSnapshot.FromHttpResponse(
+                                response,
+                                bodyRead.RawBytes,
+                                isBodyIncomplete: false,
+                                isBodyTruncated: false);
+                            ScaleSetApiException decodeFailure = CreateResponseException(
+                                response,
+                                method,
+                                safeUri,
+                                bodyRead.RawBytes,
+                                truncated: false,
+                                queueTokenOnUnauthorized: false,
+                                knownSecrets: knownSecrets,
+                                snapshot: snapshot,
+                                message: "ScaleSet response body could not be decoded.");
+                            LogFailure(decodeFailure, uri);
+                            throw decodeFailure;
+                        }
+                    }
+                }
+                else
+                {
+                    ScaleSetClientDiagnostics.ResponseBodyReadResult bodyRead =
+                        await ScaleSetClientDiagnostics.ReadResponseBytesAsync(
+                            response,
+                            ScaleSetClientDiagnostics.MaximumErrorBodyBytes,
+                            cancellationToken,
+                            maxElapsedToken,
+                            deadlineToken,
+                            linkedSource.Token).ConfigureAwait(false);
+
+                    ScaleSetResponseSnapshot snapshot = ScaleSetResponseSnapshot.FromHttpResponse(
+                        response,
+                        bodyRead.RawBytes,
+                        bodyRead.IsIncomplete,
+                        bodyRead.Truncated);
+
+                    if (bodyRead.Failure == ScaleSetClientDiagnostics.ResponseBodyReadFailure.MaxElapsed)
+                    {
+                        activity?.SetTag("error.type", "max_elapsed_exceeded");
+                        activity?.SetStatus(ActivityStatusCode.Error, "max elapsed exceeded reading error response");
+                        ScaleSetClientDiagnostics.RecordAttempt(
+                            dependency,
+                            method.Method,
+                            statusCode,
+                            _timeProvider.GetElapsedTime(startTimestamp).TotalSeconds);
+                        throw CreateMaxElapsedException(response, method, safeUri, maxElapsed!.Value, knownSecrets, snapshot);
                     }
 
                     ScaleSetClientDiagnostics.RecordAttempt(
@@ -392,102 +600,566 @@ public sealed partial class ScaleSetClient
                         method.Method,
                         statusCode,
                         _timeProvider.GetElapsedTime(startTimestamp).TotalSeconds);
-                    try
-                    {
-                        byte[] decodedInput = ScaleSetClientDiagnostics.TrimUtf8Bom(bodyRead.RawBytes).ToArray();
-                        return decode(decodedInput);
-                    }
-                    catch (Exception exception) when (IsDecodeFailure(exception))
-                    {
-                        activity?.SetTag("error.type", "response_decode");
-                        activity?.SetStatus(ActivityStatusCode.Error, "response body decode failed");
-                        ScaleSetResponseSnapshot snapshot = ScaleSetResponseSnapshot.FromHttpResponse(
+
+                    DateTimeOffset now = _timeProvider.GetUtcNow();
+                    ScaleSetClientDiagnostics.RateLimitClassification? rateLimit =
+                        ScaleSetClientDiagnostics.TryClassifyRateLimit(
                             response,
                             bodyRead.RawBytes,
-                            isBodyIncomplete: false,
-                            isBodyTruncated: false);
-                        ScaleSetApiException wrapped = CreateResponseException(
+                            bodyRead.IsIncomplete,
+                            now);
+
+                    if (rateLimit is not null)
+                    {
+                        ScaleSetRateLimitException rateLimitException = CreateRateLimitException(
                             response,
                             method,
                             safeUri,
-                            bodyRead.RawBytes,
-                            truncated: false,
-                            queueTokenOnUnauthorized: false,
-                            knownSecrets: knownSecrets,
-                            snapshot: snapshot,
-                            message: "ScaleSet response body could not be decoded.");
-                        LogFailure(wrapped, uri);
-                        throw wrapped;
+                            bodyRead,
+                            rateLimit,
+                            rateLimitRetries,
+                            knownSecrets,
+                            snapshot);
+
+                        if (retryDiscoveryAuthentication &&
+                            response.StatusCode == HttpStatusCode.Forbidden &&
+                            retryOptions.OnRateLimit is null &&
+                            discoveryAuthRetries < maxDiscoveryAuthRetries)
+                        {
+                            TimeSpan candidateDelay = ComputeBackoffDelay(
+                                retryOptions,
+                                discoveryAuthRetries,
+                                snapshot,
+                                rateLimit.RetryAfterHeaderDelay,
+                                response.StatusCode);
+                            if (!WouldWaitOutlastBudget(candidateDelay, maxElapsed, requestStartTimestamp, retryOptions.Deadline))
+                            {
+                                nextDelay = candidateDelay;
+                                nextRetryKind = "discovery-auth";
+                                countAsDiscoveryRetry = true;
+                            }
+                        }
+                        else
+                        {
+                            TimeSpan? candidateDelay = await EvaluateRateLimitRetryAsync(
+                                retryOptions,
+                                method,
+                                safeUri,
+                                retryAttempt,
+                                readOnly: allowDefaultRetry,
+                                response.StatusCode,
+                                rateLimit,
+                                rateLimitException,
+                                snapshot,
+                                cancellationToken).ConfigureAwait(false);
+                            if (candidateDelay is { } approvedDelay &&
+                                !WouldWaitOutlastBudget(approvedDelay, maxElapsed, requestStartTimestamp, retryOptions.Deadline))
+                            {
+                                nextDelay = approvedDelay;
+                                nextRetryKind = "rate-limit";
+                                countAsRateLimitRetry = true;
+                            }
+                        }
+
+                        if (nextDelay is null)
+                        {
+                            activity?.SetStatus(ActivityStatusCode.Error, $"HTTP {statusCode}");
+                            activity?.SetTag("error.type", $"http_{statusCode}");
+                            LogFailure(rateLimitException, uri);
+                            throw rateLimitException;
+                        }
+                    }
+                    else if (retryDiscoveryAuthentication &&
+                        response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden &&
+                        discoveryAuthRetries < maxDiscoveryAuthRetries)
+                    {
+                        TimeSpan candidateDelay = ComputeBackoffDelay(
+                            retryOptions,
+                            discoveryAuthRetries,
+                            snapshot,
+                            retryAfterHeaderDelay: null,
+                            response.StatusCode);
+                        if (!WouldWaitOutlastBudget(candidateDelay, maxElapsed, requestStartTimestamp, retryOptions.Deadline))
+                        {
+                            nextDelay = candidateDelay;
+                            nextRetryKind = "discovery-auth";
+                            countAsDiscoveryRetry = true;
+                        }
+                        else
+                        {
+                            ScaleSetApiException failure = CreateResponseExceptionForReadResult(
+                                response,
+                                method,
+                                safeUri,
+                                bodyRead,
+                                queueTokenOnUnauthorized,
+                                knownSecrets,
+                                snapshot);
+                            activity?.SetStatus(ActivityStatusCode.Error, $"HTTP {statusCode}");
+                            activity?.SetTag("error.type", $"http_{statusCode}");
+                            LogFailure(failure, uri);
+                            throw failure;
+                        }
+                    }
+                    else
+                    {
+                        ScaleSetApiException failure = CreateResponseExceptionForReadResult(
+                            response,
+                            method,
+                            safeUri,
+                            bodyRead,
+                            queueTokenOnUnauthorized,
+                            knownSecrets,
+                            snapshot);
+                        TimeSpan? retryAfterHeaderDelay = response.StatusCode == HttpStatusCode.ServiceUnavailable
+                            ? ScaleSetClientDiagnostics.ParseRetryAfter(response, now)
+                            : null;
+                        TimeSpan? candidateDelay = await EvaluateStandardFailureRetryAsync(
+                            retryOptions,
+                            method,
+                            safeUri,
+                            retryAttempt,
+                            readOnly: allowDefaultRetry,
+                            isCertificateError: false,
+                            response.StatusCode,
+                            snapshot,
+                            failure,
+                            retryAfterHeaderDelay,
+                            cancellationToken).ConfigureAwait(false);
+
+                        if (candidateDelay is { } approvedDelay &&
+                            !WouldWaitOutlastBudget(approvedDelay, maxElapsed, requestStartTimestamp, retryOptions.Deadline))
+                        {
+                            nextDelay = approvedDelay;
+                            nextRetryKind = "transient";
+                        }
+                        else
+                        {
+                            activity?.SetStatus(ActivityStatusCode.Error, $"HTTP {statusCode}");
+                            activity?.SetTag("error.type", $"http_{statusCode}");
+                            LogFailure(failure, uri);
+                            throw failure;
+                        }
                     }
                 }
+            }
 
-                if (retryDiscoveryAuthentication &&
-                    response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden &&
-                    authenticationRetries < _options.MaxRegistrationDiscoveryAuthRetries)
+            if (countAsDiscoveryRetry)
+            {
+                discoveryAuthRetries++;
+            }
+            else
+            {
+                retryAttempt++;
+                if (countAsRateLimitRetry)
                 {
-                    response.Dispose();
-                    ScaleSetClientDiagnostics.RecordAttempt(
-                        dependency,
-                        method.Method,
-                        statusCode,
-                        _timeProvider.GetElapsedTime(startTimestamp).TotalSeconds);
-                    authenticationRetries++;
-                    ScaleSetClientDiagnostics.RecordRetry(dependency, method.Method, "discovery-auth");
-                    await DelayBeforeRetryAsync(authenticationRetries, cancellationToken).ConfigureAwait(false);
-                    continue;
+                    rateLimitRetries++;
                 }
+            }
 
-                TimeSpan? retryAfter = GetRetryAfterDelay(response);
-                bool retryAfterWithinBound = retryAfter is null
-                    || retryAfter.Value <= ScaleSetClientOptions.MaximumRetryDelay;
-                if (readOnly && IsTransient(response.StatusCode)
-                    && transientRetries < _options.MaxReadOnlyRetries
-                    && retryAfterWithinBound)
-                {
-                    response.Dispose();
-                    activity?.SetStatus(ActivityStatusCode.Error, "transient HTTP response");
-                    ScaleSetClientDiagnostics.RecordAttempt(
-                        dependency,
-                        method.Method,
-                        statusCode,
-                        _timeProvider.GetElapsedTime(startTimestamp).TotalSeconds);
-                    transientRetries++;
-                    ScaleSetClientDiagnostics.RecordRetry(dependency, method.Method, "transient");
-                    await DelayBeforeRetryAsync(transientRetries, cancellationToken, retryAfter).ConfigureAwait(false);
-                    continue;
-                }
+            activity?.SetStatus(ActivityStatusCode.Error, $"HTTP retry ({nextRetryKind})");
+            ScaleSetClientDiagnostics.RecordRetry(dependency, method.Method, nextRetryKind!);
+            await WaitForRetryDelayAsync(
+                nextDelay!.Value,
+                method,
+                safeUri,
+                maxElapsed,
+                maxElapsedToken,
+                deadlineToken,
+                cancellationToken).ConfigureAwait(false);
+        }
+    }
 
-                activity?.SetStatus(ActivityStatusCode.Error, $"HTTP {statusCode}");
-                ScaleSetClientDiagnostics.ResponseBodyReadResult errorBodyRead =
-                    await ScaleSetClientDiagnostics.ReadResponseBytesAsync(
-                        response,
-                        ScaleSetClientDiagnostics.MaximumErrorBodyBytes,
-                        cancellationToken,
-                        linkedSource.Token).ConfigureAwait(false);
-                ScaleSetResponseSnapshot errorSnapshot = ScaleSetResponseSnapshot.FromHttpResponse(
-                    response,
-                    errorBodyRead.RawBytes,
-                    errorBodyRead.IsIncomplete,
-                    errorBodyRead.Truncated);
+    private ScaleSetRetryOptions ResolveRetryOptions(out bool hasExplicitPolicy)
+    {
+        ScaleSetRetryOptions retryOptions = _options.Retry ?? new ScaleSetRetryOptions
+        {
+            MaxRetries = _options.MaxReadOnlyRetries,
+            WaitMin = _options.RetryBaseDelay,
+            WaitMax = _options.RetryMaxDelay,
+            RetryAllReplayableRequests = false,
+            MaxRetryAfterDelay = ScaleSetClientOptions.MaximumRetryDelay,
+        };
 
-                activity?.SetTag("error.type", $"http_{statusCode}");
-                ScaleSetClientDiagnostics.RecordAttempt(
-                    dependency,
-                    method.Method,
-                    statusCode,
-                    _timeProvider.GetElapsedTime(startTimestamp).TotalSeconds);
-                ScaleSetApiException failure = CreateResponseExceptionForReadResult(
-                    response,
-                    method,
-                    safeUri,
-                    errorBodyRead,
-                    queueTokenOnUnauthorized: queueTokenOnUnauthorized,
-                    knownSecrets: knownSecrets,
-                    snapshot: errorSnapshot);
-                LogFailure(failure, uri);
-                throw failure;
+        ImmutableArray<Func<ScaleSetRetryOptions, ScaleSetRetryOptions>> adjusters =
+            ScaleSetRequestRetry.GetCurrentAdjusters();
+        hasExplicitPolicy = _options.Retry is not null || adjusters.Length > 0;
+
+        foreach (Func<ScaleSetRetryOptions, ScaleSetRetryOptions> adjust in adjusters)
+        {
+            retryOptions = adjust(retryOptions)
+                ?? throw new InvalidOperationException("Request retry adjuster cannot return null.");
+        }
+
+        retryOptions.Validate();
+        return retryOptions;
+    }
+
+    private CancellationTokenSource? CreateDeadlineTokenSource(DateTimeOffset? deadline)
+    {
+        if (deadline is not { } deadlineUtc)
+        {
+            return null;
+        }
+
+        TimeSpan remaining = deadlineUtc - _timeProvider.GetUtcNow();
+        if (remaining <= TimeSpan.Zero)
+        {
+            CancellationTokenSource expired = new();
+            expired.Cancel();
+            return expired;
+        }
+
+        return new CancellationTokenSource(remaining, _timeProvider);
+    }
+
+    private bool WouldWaitOutlastBudget(
+        TimeSpan wait,
+        TimeSpan? maxElapsed,
+        long requestStartTimestamp,
+        DateTimeOffset? deadline)
+    {
+        if (maxElapsed is { } elapsedBudget &&
+            wait >= elapsedBudget - _timeProvider.GetElapsedTime(requestStartTimestamp))
+        {
+            return true;
+        }
+
+        if (deadline is { } deadlineUtc &&
+            wait >= deadlineUtc - _timeProvider.GetUtcNow())
+        {
+            return true;
+        }
+
+        return false;
+    }
+
+    private async Task WaitForRetryDelayAsync(
+        TimeSpan delay,
+        HttpMethod method,
+        string safeUri,
+        TimeSpan? maxElapsed,
+        CancellationToken maxElapsedToken,
+        CancellationToken deadlineToken,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (deadlineToken.IsCancellationRequested)
+        {
+            throw new OperationCanceledException("The ScaleSet request exceeded its configured deadline.", deadlineToken);
+        }
+
+        if (maxElapsedToken.IsCancellationRequested)
+        {
+            throw CreateMaxElapsedException(method, safeUri, maxElapsed!.Value);
+        }
+
+        if (delay <= TimeSpan.Zero)
+        {
+            return;
+        }
+
+        using CancellationTokenSource linkedWait = CancellationTokenSource.CreateLinkedTokenSource(
+            cancellationToken,
+            maxElapsedToken,
+            deadlineToken);
+        try
+        {
+            await Task.Delay(delay, _timeProvider, linkedWait.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw new OperationCanceledException("The ScaleSet request retry wait was canceled by the caller.", cancellationToken);
+        }
+        catch (OperationCanceledException) when (deadlineToken.IsCancellationRequested)
+        {
+            throw new OperationCanceledException("The ScaleSet request exceeded its configured deadline.", deadlineToken);
+        }
+        catch (OperationCanceledException) when (maxElapsedToken.IsCancellationRequested)
+        {
+            throw CreateMaxElapsedException(method, safeUri, maxElapsed!.Value);
+        }
+    }
+
+    private static async ValueTask<TimeSpan?> EvaluateStandardFailureRetryAsync(
+        ScaleSetRetryOptions retryOptions,
+        HttpMethod method,
+        string safeUri,
+        int retryAttempt,
+        bool readOnly,
+        bool isCertificateError,
+        HttpStatusCode? statusCode,
+        ScaleSetResponseSnapshot? snapshot,
+        Exception failureException,
+        TimeSpan? retryAfterHeaderDelay,
+        CancellationToken cancellationToken)
+    {
+        if (retryAttempt >= retryOptions.MaxRetries)
+        {
+            return null;
+        }
+
+        bool shouldRetry;
+        if (retryOptions.ShouldRetry is { } customShouldRetry)
+        {
+            shouldRetry = await customShouldRetry(
+                new ScaleSetRetryContext(method, safeUri, retryAttempt, snapshot, failureException),
+                cancellationToken).ConfigureAwait(false);
+        }
+        else
+        {
+            shouldRetry = !isCertificateError &&
+                readOnly &&
+                (statusCode is null || IsTransient(statusCode.Value));
+        }
+
+        if (!shouldRetry)
+        {
+            return null;
+        }
+
+        if (statusCode == HttpStatusCode.ServiceUnavailable &&
+            retryOptions.MaxRetryAfterDelay is { } maxDelay &&
+            retryAfterHeaderDelay is { } serverDelay &&
+            serverDelay > maxDelay)
+        {
+            return null;
+        }
+
+        return ComputeBackoffDelay(retryOptions, retryAttempt, snapshot, retryAfterHeaderDelay, statusCode);
+    }
+
+    private static async ValueTask<TimeSpan?> EvaluateRateLimitRetryAsync(
+        ScaleSetRetryOptions retryOptions,
+        HttpMethod method,
+        string safeUri,
+        int retryAttempt,
+        bool readOnly,
+        HttpStatusCode statusCode,
+        ScaleSetClientDiagnostics.RateLimitClassification rateLimit,
+        ScaleSetRateLimitException rateLimitException,
+        ScaleSetResponseSnapshot snapshot,
+        CancellationToken cancellationToken)
+    {
+        if (retryAttempt >= retryOptions.MaxRetries)
+        {
+            return null;
+        }
+
+        if (retryOptions.OnRateLimit is { } onRateLimit)
+        {
+            ScaleSetRateLimitDecision decision = await onRateLimit(
+                new ScaleSetRateLimitDecisionContext(rateLimitException, retryAttempt, method.Method, safeUri),
+                cancellationToken).ConfigureAwait(false);
+            if (!decision.ShouldRetry)
+            {
+                return null;
+            }
+
+            return decision.Delay > TimeSpan.Zero
+                ? decision.Delay
+                : ComputeBackoffDelay(retryOptions, retryAttempt, snapshot, rateLimit.RetryAfterHeaderDelay, statusCode);
+        }
+
+        if (statusCode != HttpStatusCode.TooManyRequests || !readOnly)
+        {
+            return null;
+        }
+
+        if (retryOptions.MaxRetryAfterDelay is { } maxDelay &&
+            rateLimit.RetryAfterHeaderDelay is { } serverDelay &&
+            serverDelay > maxDelay)
+        {
+            return null;
+        }
+
+        return ComputeBackoffDelay(retryOptions, retryAttempt, snapshot, rateLimit.RetryAfterHeaderDelay, statusCode);
+    }
+
+    private static TimeSpan ComputeBackoffDelay(
+        ScaleSetRetryOptions retryOptions,
+        int attempt,
+        ScaleSetResponseSnapshot? snapshot,
+        TimeSpan? retryAfterHeaderDelay,
+        HttpStatusCode? statusCode)
+    {
+        if (retryOptions.Backoff is { } customBackoff)
+        {
+            TimeSpan customDelay = customBackoff(new ScaleSetBackoffContext(
+                retryOptions.WaitMin,
+                retryOptions.WaitMax,
+                attempt,
+                snapshot,
+                retryAfterHeaderDelay));
+            return customDelay < TimeSpan.Zero ? TimeSpan.Zero : customDelay;
+        }
+
+        if (statusCode is HttpStatusCode.TooManyRequests or HttpStatusCode.ServiceUnavailable &&
+            retryAfterHeaderDelay is { } serverDelay)
+        {
+            return serverDelay;
+        }
+
+        double baseMilliseconds = retryOptions.WaitMin.TotalMilliseconds;
+        if (baseMilliseconds <= 0)
+        {
+            return TimeSpan.Zero;
+        }
+
+        double maxMilliseconds = retryOptions.WaitMax.TotalMilliseconds;
+        double exponential = baseMilliseconds * Math.Pow(2, Math.Min(attempt, 30));
+        if (exponential >= maxMilliseconds)
+        {
+            return retryOptions.WaitMax;
+        }
+
+        double jitter = Random.Shared.NextDouble() * (exponential / 2.0);
+        double delayMilliseconds = Math.Min(maxMilliseconds, exponential + jitter);
+        return TimeSpan.FromMilliseconds(delayMilliseconds);
+    }
+
+    private static ScaleSetApiException CreateResponseExceptionForReadResult(
+        HttpResponseMessage response,
+        HttpMethod method,
+        string safeUri,
+        ScaleSetClientDiagnostics.ResponseBodyReadResult bodyRead,
+        bool queueTokenOnUnauthorized,
+        IReadOnlyCollection<string> knownSecrets,
+        ScaleSetResponseSnapshot snapshot)
+    {
+        string? message = bodyRead.Failure switch
+        {
+            ScaleSetClientDiagnostics.ResponseBodyReadFailure.AttemptTimedOut => "ScaleSet error response body read timed out.",
+            ScaleSetClientDiagnostics.ResponseBodyReadFailure.ReadError => "ScaleSet error response body could not be read.",
+            _ => null,
+        };
+        ReadOnlySpan<byte> previewBytes = bodyRead.IsIncomplete ? [] : bodyRead.RawBytes;
+        return CreateResponseException(
+            response,
+            method,
+            safeUri,
+            previewBytes,
+            bodyRead.Truncated,
+            queueTokenOnUnauthorized,
+            knownSecrets,
+            snapshot,
+            message);
+    }
+
+    private static ScaleSetApiException CreateResponseException(
+        HttpResponseMessage response,
+        HttpMethod method,
+        string safeUri,
+        ReadOnlySpan<byte> body,
+        bool truncated,
+        bool queueTokenOnUnauthorized,
+        IReadOnlyCollection<string> knownSecrets,
+        ScaleSetResponseSnapshot snapshot,
+        string? message = null)
+    {
+        int status = (int)response.StatusCode;
+        ScaleSetDomainError? domainError = queueTokenOnUnauthorized && response.StatusCode == HttpStatusCode.Unauthorized
+            ? ScaleSetDomainError.MessageQueueTokenExpired
+            : ScaleSetClientDiagnostics.ParseDomainError(body);
+        string activityId = ScaleSetClientDiagnostics.CorrelationHeader(response, "ActivityId", knownSecrets);
+        string githubRequestId = ScaleSetClientDiagnostics.CorrelationHeader(response, "X-GitHub-Request-Id", knownSecrets);
+        string? bodyPreview = ScaleSetClientDiagnostics.CreateBodyPreview(body, truncated, knownSecrets);
+        string errorMessage = message ?? $"ScaleSet HTTP request failed with status {status}.";
+        return new ScaleSetApiException(
+            errorMessage,
+            status,
+            domainError,
+            method: method.Method,
+            safeUri: safeUri,
+            activityId: activityId.Length == 0 ? null : activityId,
+            githubRequestId: githubRequestId.Length == 0 ? null : githubRequestId,
+            bodyPreview: bodyPreview,
+            response: snapshot);
+    }
+
+    private static ScaleSetRateLimitException CreateRateLimitException(
+        HttpResponseMessage response,
+        HttpMethod method,
+        string safeUri,
+        ScaleSetClientDiagnostics.ResponseBodyReadResult bodyRead,
+        ScaleSetClientDiagnostics.RateLimitClassification rateLimit,
+        int rateLimitRetries,
+        IReadOnlyCollection<string> knownSecrets,
+        ScaleSetResponseSnapshot snapshot)
+    {
+        ReadOnlySpan<byte> previewBytes = bodyRead.IsIncomplete ? [] : bodyRead.RawBytes;
+        ScaleSetDomainError? domainError = ScaleSetClientDiagnostics.ParseDomainError(previewBytes);
+        string activityId = ScaleSetClientDiagnostics.CorrelationHeader(response, "ActivityId", knownSecrets);
+        string githubRequestId = ScaleSetClientDiagnostics.CorrelationHeader(response, "X-GitHub-Request-Id", knownSecrets);
+        string? bodyPreview = ScaleSetClientDiagnostics.CreateBodyPreview(previewBytes, bodyRead.Truncated, knownSecrets);
+        string message = rateLimit.RetryAfter > TimeSpan.Zero
+            ? $"ScaleSet HTTP request rate limited (retry after {rateLimit.RetryAfter}) with status {rateLimit.StatusCode}."
+            : $"ScaleSet HTTP request rate limited with status {rateLimit.StatusCode}.";
+        return new ScaleSetRateLimitException(
+            message,
+            rateLimit.StatusCode,
+            rateLimit.Kind,
+            rateLimit.RetryAfter,
+            rateLimit.Reset,
+            rateLimitRetries,
+            domainError,
+            method: method.Method,
+            safeUri: safeUri,
+            activityId: activityId.Length == 0 ? null : activityId,
+            githubRequestId: githubRequestId.Length == 0 ? null : githubRequestId,
+            bodyPreview: bodyPreview,
+            response: snapshot);
+    }
+
+    private static ScaleSetMaxElapsedExceededException CreateMaxElapsedException(
+        HttpMethod method,
+        string safeUri,
+        TimeSpan maxElapsed) =>
+        new(
+            $"ScaleSet HTTP request exceeded MaxElapsed budget of {maxElapsed}.",
+            maxElapsed,
+            method: method.Method,
+            safeUri: safeUri);
+
+    private static ScaleSetMaxElapsedExceededException CreateMaxElapsedException(
+        HttpResponseMessage response,
+        HttpMethod method,
+        string safeUri,
+        TimeSpan maxElapsed,
+        IReadOnlyCollection<string> knownSecrets,
+        ScaleSetResponseSnapshot snapshot)
+    {
+        string activityId = ScaleSetClientDiagnostics.CorrelationHeader(response, "ActivityId", knownSecrets);
+        string githubRequestId = ScaleSetClientDiagnostics.CorrelationHeader(response, "X-GitHub-Request-Id", knownSecrets);
+        string? bodyPreview = ScaleSetClientDiagnostics.CreateBodyPreview([], truncated: false, knownSecrets);
+        return new ScaleSetMaxElapsedExceededException(
+            $"ScaleSet HTTP request exceeded MaxElapsed budget of {maxElapsed}.",
+            maxElapsed,
+            (int)response.StatusCode,
+            method.Method,
+            safeUri,
+            activityId: activityId.Length == 0 ? null : activityId,
+            githubRequestId: githubRequestId.Length == 0 ? null : githubRequestId,
+            bodyPreview: bodyPreview,
+            response: snapshot);
+    }
+
+    private static bool IsCertificateError(HttpRequestException exception)
+    {
+        if (exception.HttpRequestError == HttpRequestError.SecureConnectionError)
+        {
+            return true;
+        }
+
+        for (Exception? current = exception; current is not null; current = current.InnerException)
+        {
+            if (current is AuthenticationException)
+            {
+                return true;
             }
         }
+
+        return false;
     }
 
     private HttpRequestMessage CreateRequest(
@@ -555,65 +1227,6 @@ public sealed partial class ScaleSetClient
         }
     }
 
-    private static ScaleSetApiException CreateResponseExceptionForReadResult(
-        HttpResponseMessage response,
-        HttpMethod method,
-        string safeUri,
-        ScaleSetClientDiagnostics.ResponseBodyReadResult bodyRead,
-        bool queueTokenOnUnauthorized,
-        IReadOnlyCollection<string> knownSecrets,
-        ScaleSetResponseSnapshot snapshot)
-    {
-        string? message = bodyRead.Failure switch
-        {
-            ScaleSetClientDiagnostics.ResponseBodyReadFailure.AttemptTimedOut => "ScaleSet error response body read timed out.",
-            ScaleSetClientDiagnostics.ResponseBodyReadFailure.ReadError => "ScaleSet error response body could not be read.",
-            _ => null,
-        };
-        ReadOnlySpan<byte> previewBytes = bodyRead.IsIncomplete ? [] : bodyRead.RawBytes;
-        return CreateResponseException(
-            response,
-            method,
-            safeUri,
-            previewBytes,
-            bodyRead.Truncated,
-            queueTokenOnUnauthorized,
-            knownSecrets,
-            snapshot,
-            message);
-    }
-
-    private static ScaleSetApiException CreateResponseException(
-        HttpResponseMessage response,
-        HttpMethod method,
-        string safeUri,
-        ReadOnlySpan<byte> body,
-        bool truncated,
-        bool queueTokenOnUnauthorized,
-        IReadOnlyCollection<string> knownSecrets,
-        ScaleSetResponseSnapshot snapshot,
-        string? message = null)
-    {
-        var status = (int)response.StatusCode;
-        var domainError = queueTokenOnUnauthorized && response.StatusCode == HttpStatusCode.Unauthorized
-            ? ScaleSetDomainError.MessageQueueTokenExpired
-            : ScaleSetClientDiagnostics.ParseDomainError(body);
-        var activityId = ScaleSetClientDiagnostics.CorrelationHeader(response, "ActivityId", knownSecrets);
-        var githubRequestId = ScaleSetClientDiagnostics.CorrelationHeader(response, "X-GitHub-Request-Id", knownSecrets);
-        var bodyPreview = ScaleSetClientDiagnostics.CreateBodyPreview(body, truncated, knownSecrets);
-        var errorMessage = message ?? $"ScaleSet HTTP request failed with status {status}.";
-        return new ScaleSetApiException(
-            errorMessage,
-            status,
-            domainError,
-            method: method.Method,
-            safeUri: safeUri,
-            activityId: activityId.Length == 0 ? null : activityId,
-            githubRequestId: githubRequestId.Length == 0 ? null : githubRequestId,
-            bodyPreview: bodyPreview,
-            response: snapshot);
-    }
-
     private void LogFailure(ScaleSetApiException exception, Uri requestUri)
     {
         if (_logger is null)
@@ -631,61 +1244,9 @@ public sealed partial class ScaleSetClient
             null);
     }
 
-    private TimeSpan? GetRetryAfterDelay(HttpResponseMessage response)
-    {
-        if (response.StatusCode is not (HttpStatusCode.TooManyRequests or HttpStatusCode.ServiceUnavailable)
-            || !response.Headers.TryGetValues("Retry-After", out IEnumerable<string>? values))
-        {
-            return null;
-        }
-
-        foreach (string value in values)
-        {
-            if (!RetryConditionHeaderValue.TryParse(value, out RetryConditionHeaderValue? retryAfter)
-                || retryAfter is null)
-            {
-                continue;
-            }
-
-            TimeSpan delay = retryAfter.Delta
-                ?? (retryAfter.Date is DateTimeOffset date
-                    ? date - _timeProvider.GetUtcNow()
-                    : TimeSpan.Zero);
-            return delay < TimeSpan.Zero ? TimeSpan.Zero : delay;
-        }
-
-        return null;
-    }
-
-    private async Task DelayBeforeRetryAsync(
-        int retryNumber,
-        CancellationToken cancellationToken,
-        TimeSpan? retryAfter = null)
-    {
-        var baseMilliseconds = _options.RetryBaseDelay.TotalMilliseconds;
-        if (baseMilliseconds <= 0)
-        {
-            if (retryAfter is { } serverDelay && serverDelay > TimeSpan.Zero)
-            {
-                await Task.Delay(serverDelay, _timeProvider, cancellationToken).ConfigureAwait(false);
-            }
-
-            return;
-        }
-
-        var cap = _options.RetryMaxDelay.TotalMilliseconds;
-        var exponential = Math.Min(cap, baseMilliseconds * Math.Pow(2, Math.Min(retryNumber - 1, 30)));
-        var half = exponential / 2;
-        var jittered = TimeSpan.FromMilliseconds(half + (Random.Shared.NextDouble() * half));
-        var delay = retryAfter is { } serverRetryAfter && serverRetryAfter > jittered
-            ? serverRetryAfter
-            : jittered;
-        await Task.Delay(delay, _timeProvider, cancellationToken).ConfigureAwait(false);
-    }
-
     private static bool IsExpectedStatus(HttpStatusCode statusCode, int expectedStatus)
     {
-        var numeric = (int)statusCode;
+        int numeric = (int)statusCode;
         return expectedStatus == 0
             ? numeric is >= 200 and <= 299
             : numeric == expectedStatus;
@@ -693,7 +1254,7 @@ public sealed partial class ScaleSetClient
 
     private static bool IsTransient(HttpStatusCode statusCode) =>
         statusCode is HttpStatusCode.RequestTimeout or HttpStatusCode.TooManyRequests ||
-        (int)statusCode >= 500;
+        ((int)statusCode >= 500 && statusCode != HttpStatusCode.NotImplemented);
 
     private static bool IsDecodeFailure(Exception exception) =>
         exception is JsonException or FormatException or InvalidOperationException or ArgumentException or

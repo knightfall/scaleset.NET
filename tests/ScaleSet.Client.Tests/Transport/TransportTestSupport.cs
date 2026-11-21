@@ -101,6 +101,212 @@ internal sealed class ManualTimeProvider(DateTimeOffset now) : TimeProvider
     internal void Advance(TimeSpan duration) => _now += duration;
 }
 
+internal sealed class VirtualTimeProvider(DateTimeOffset startUtc) : TimeProvider
+{
+    private readonly object _sync = new();
+    private readonly List<VirtualTimer> _timers = [];
+    private readonly List<TaskCompletionSource> _timerScheduledWaiters = [];
+    private DateTimeOffset _now = startUtc;
+    private long _timestamp = 1_000_000;
+
+    public override long TimestampFrequency => TimeSpan.TicksPerSecond;
+
+    public override DateTimeOffset GetUtcNow()
+    {
+        lock (_sync)
+        {
+            return _now;
+        }
+    }
+
+    public override long GetTimestamp()
+    {
+        lock (_sync)
+        {
+            return _timestamp;
+        }
+    }
+
+    public override ITimer CreateTimer(
+        TimerCallback callback,
+        object? state,
+        TimeSpan dueTime,
+        TimeSpan period)
+    {
+        ArgumentNullException.ThrowIfNull(callback);
+        VirtualTimer timer = new(this, callback, state);
+        timer.Change(dueTime, period);
+        return timer;
+    }
+
+    internal async Task<TimeSpan> WaitForActiveTimerAsync(
+        Func<TimeSpan, bool> predicate,
+        CancellationToken cancellationToken)
+    {
+        while (true)
+        {
+            Task waitTask;
+            lock (_sync)
+            {
+                foreach (VirtualTimer timer in _timers)
+                {
+                    if (!timer.IsDisposed && timer.RequestedDueTime is { } dueTime && predicate(dueTime))
+                    {
+                        return dueTime;
+                    }
+                }
+
+                TaskCompletionSource waiter = new(TaskCreationOptions.RunContinuationsAsynchronously);
+                _timerScheduledWaiters.Add(waiter);
+                waitTask = waiter.Task;
+            }
+
+            await waitTask.WaitAsync(cancellationToken);
+        }
+    }
+
+    internal void Advance(TimeSpan duration)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(duration.Ticks, nameof(duration));
+        List<(TimerCallback Callback, object? State)> dueCallbacks = [];
+
+        lock (_sync)
+        {
+            _now += duration;
+            _timestamp += duration.Ticks;
+
+            for (int index = _timers.Count - 1; index >= 0; index--)
+            {
+                VirtualTimer timer = _timers[index];
+                if (timer.IsDisposed || timer.DueTimestamp is not { } dueTimestamp)
+                {
+                    _timers.RemoveAt(index);
+                    continue;
+                }
+
+                if (dueTimestamp <= _timestamp)
+                {
+                    dueCallbacks.Add((timer.Callback, timer.State));
+                    if (timer.Period > TimeSpan.Zero && timer.Period != Timeout.InfiniteTimeSpan)
+                    {
+                        timer.DueTimestamp = _timestamp + timer.Period.Ticks;
+                    }
+                    else
+                    {
+                        timer.DueTimestamp = null;
+                        _timers.RemoveAt(index);
+                    }
+                }
+            }
+        }
+
+        foreach ((TimerCallback callback, object? state) in dueCallbacks)
+        {
+            callback(state);
+        }
+    }
+
+    private void ScheduleTimer(VirtualTimer timer, TimeSpan dueTime, TimeSpan period)
+    {
+        bool fireImmediately = false;
+        TaskCompletionSource[] waiters;
+
+        lock (_sync)
+        {
+            if (timer.IsDisposed)
+            {
+                return;
+            }
+
+            timer.Period = period;
+            if (dueTime == Timeout.InfiniteTimeSpan)
+            {
+                timer.RequestedDueTime = null;
+                timer.DueTimestamp = null;
+                _timers.Remove(timer);
+            }
+            else if (dueTime <= TimeSpan.Zero)
+            {
+                timer.RequestedDueTime = TimeSpan.Zero;
+                timer.DueTimestamp = null;
+                _timers.Remove(timer);
+                fireImmediately = true;
+            }
+            else
+            {
+                timer.RequestedDueTime = dueTime;
+                timer.DueTimestamp = _timestamp + dueTime.Ticks;
+                if (!_timers.Contains(timer))
+                {
+                    _timers.Add(timer);
+                }
+            }
+
+            waiters = _timerScheduledWaiters.ToArray();
+            _timerScheduledWaiters.Clear();
+        }
+
+        foreach (TaskCompletionSource waiter in waiters)
+        {
+            waiter.TrySetResult();
+        }
+
+        if (fireImmediately)
+        {
+            _ = Task.Run(() => timer.Callback(timer.State));
+        }
+    }
+
+    private void RemoveTimer(VirtualTimer timer)
+    {
+        lock (_sync)
+        {
+            _timers.Remove(timer);
+        }
+    }
+
+    private sealed class VirtualTimer(
+        VirtualTimeProvider owner,
+        TimerCallback callback,
+        object? state) : ITimer
+    {
+        public TimerCallback Callback { get; } = callback;
+
+        public object? State { get; } = state;
+
+        public TimeSpan? RequestedDueTime { get; set; }
+
+        public long? DueTimestamp { get; set; }
+
+        public TimeSpan Period { get; set; } = Timeout.InfiniteTimeSpan;
+
+        public bool IsDisposed { get; private set; }
+
+        public bool Change(TimeSpan dueTime, TimeSpan period)
+        {
+            if (IsDisposed)
+            {
+                return false;
+            }
+
+            owner.ScheduleTimer(this, dueTime, period);
+            return true;
+        }
+
+        public void Dispose()
+        {
+            IsDisposed = true;
+            owner.RemoveTimer(this);
+        }
+
+        public ValueTask DisposeAsync()
+        {
+            Dispose();
+            return ValueTask.CompletedTask;
+        }
+    }
+}
+
 internal sealed class PartialReadStream(byte[] prefix, TaskCompletionSource? blockAfterPrefix = null) : Stream
 {
     private int _step;
