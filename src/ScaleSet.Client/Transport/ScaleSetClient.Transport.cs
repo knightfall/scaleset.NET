@@ -239,7 +239,8 @@ public sealed partial class ScaleSetClient
         ArgumentNullException.ThrowIfNull(uri);
         ArgumentNullException.ThrowIfNull(decode);
 
-        ScaleSetRetryOptions retryOptions = ResolveRetryOptions(out bool hasExplicitRetryPolicy);
+        bool hasExplicitRetryPolicy;
+        ScaleSetRetryOptions retryOptions = ResolveRetryOptions(out hasExplicitRetryPolicy);
         bool readOnly = method == HttpMethod.Get || method == HttpMethod.Head;
         bool allowDefaultRetry = dependency != "queue" && (readOnly || retryOptions.RetryAllReplayableRequests);
         string[] knownSecrets = CollectKnownSecrets(authorization, uri);
@@ -348,6 +349,7 @@ public sealed partial class ScaleSetClient
 
                 TimeSpan? delay = await EvaluateStandardFailureRetryAsync(
                     retryOptions,
+                    response: null,
                     method,
                     safeUri,
                     retryAttempt,
@@ -357,6 +359,10 @@ public sealed partial class ScaleSetClient
                     snapshot: null,
                     timeoutException,
                     retryAfterHeaderDelay: null,
+                    maxElapsed,
+                    knownSecrets,
+                    maxElapsedToken,
+                    deadlineToken,
                     cancellationToken).ConfigureAwait(false);
                 if (delay is { } retryDelay &&
                     !WouldWaitOutlastBudget(retryDelay, maxElapsed, requestStartTimestamp, retryOptions.Deadline))
@@ -394,6 +400,7 @@ public sealed partial class ScaleSetClient
 
                 TimeSpan? delay = await EvaluateStandardFailureRetryAsync(
                     retryOptions,
+                    response: null,
                     method,
                     safeUri,
                     retryAttempt,
@@ -403,6 +410,10 @@ public sealed partial class ScaleSetClient
                     snapshot: null,
                     retryOptions.ShouldRetry is not null ? httpException : transportException,
                     retryAfterHeaderDelay: null,
+                    maxElapsed,
+                    knownSecrets,
+                    maxElapsedToken,
+                    deadlineToken,
                     cancellationToken).ConfigureAwait(false);
                 if (delay is { } retryDelay &&
                     !WouldWaitOutlastBudget(retryDelay, maxElapsed, requestStartTimestamp, retryOptions.Deadline))
@@ -506,6 +517,7 @@ public sealed partial class ScaleSetClient
                         {
                             TimeSpan? retryDelay = await EvaluateStandardFailureRetryAsync(
                                 retryOptions,
+                                response,
                                 method,
                                 safeUri,
                                 retryAttempt,
@@ -515,6 +527,10 @@ public sealed partial class ScaleSetClient
                                 snapshot,
                                 readFailure,
                                 retryAfterHeaderDelay: null,
+                                maxElapsed,
+                                knownSecrets,
+                                maxElapsedToken,
+                                deadlineToken,
                                 cancellationToken).ConfigureAwait(false);
                             if (retryDelay is { } approvedDelay &&
                                 !WouldWaitOutlastBudget(approvedDelay, maxElapsed, requestStartTimestamp, retryOptions.Deadline))
@@ -609,6 +625,10 @@ public sealed partial class ScaleSetClient
                             bodyRead.IsIncomplete,
                             now);
 
+                    bool canRetryDiscoveryAuth = retryDiscoveryAuthentication &&
+                        discoveryAuthRetries < maxDiscoveryAuthRetries &&
+                        (!hasExplicitRetryPolicy || retryAttempt < retryOptions.MaxRetries);
+
                     if (rateLimit is not null)
                     {
                         ScaleSetRateLimitException rateLimitException = CreateRateLimitException(
@@ -621,14 +641,13 @@ public sealed partial class ScaleSetClient
                             knownSecrets,
                             snapshot);
 
-                        if (retryDiscoveryAuthentication &&
+                        if (canRetryDiscoveryAuth &&
                             response.StatusCode == HttpStatusCode.Forbidden &&
-                            retryOptions.OnRateLimit is null &&
-                            discoveryAuthRetries < maxDiscoveryAuthRetries)
+                            retryOptions.OnRateLimit is null)
                         {
                             TimeSpan candidateDelay = ComputeBackoffDelay(
                                 retryOptions,
-                                discoveryAuthRetries,
+                                hasExplicitRetryPolicy ? retryAttempt : discoveryAuthRetries,
                                 snapshot,
                                 rateLimit.RetryAfterHeaderDelay,
                                 response.StatusCode);
@@ -643,6 +662,7 @@ public sealed partial class ScaleSetClient
                         {
                             TimeSpan? candidateDelay = await EvaluateRateLimitRetryAsync(
                                 retryOptions,
+                                response,
                                 method,
                                 safeUri,
                                 retryAttempt,
@@ -651,6 +671,10 @@ public sealed partial class ScaleSetClient
                                 rateLimit,
                                 rateLimitException,
                                 snapshot,
+                                maxElapsed,
+                                knownSecrets,
+                                maxElapsedToken,
+                                deadlineToken,
                                 cancellationToken).ConfigureAwait(false);
                             if (candidateDelay is { } approvedDelay &&
                                 !WouldWaitOutlastBudget(approvedDelay, maxElapsed, requestStartTimestamp, retryOptions.Deadline))
@@ -669,13 +693,12 @@ public sealed partial class ScaleSetClient
                             throw rateLimitException;
                         }
                     }
-                    else if (retryDiscoveryAuthentication &&
-                        response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden &&
-                        discoveryAuthRetries < maxDiscoveryAuthRetries)
+                    else if (canRetryDiscoveryAuth &&
+                        response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden)
                     {
                         TimeSpan candidateDelay = ComputeBackoffDelay(
                             retryOptions,
-                            discoveryAuthRetries,
+                            hasExplicitRetryPolicy ? retryAttempt : discoveryAuthRetries,
                             snapshot,
                             retryAfterHeaderDelay: null,
                             response.StatusCode);
@@ -716,6 +739,7 @@ public sealed partial class ScaleSetClient
                             : null;
                         TimeSpan? candidateDelay = await EvaluateStandardFailureRetryAsync(
                             retryOptions,
+                            response,
                             method,
                             safeUri,
                             retryAttempt,
@@ -725,6 +749,10 @@ public sealed partial class ScaleSetClient
                             snapshot,
                             failure,
                             retryAfterHeaderDelay,
+                            maxElapsed,
+                            knownSecrets,
+                            maxElapsedToken,
+                            deadlineToken,
                             cancellationToken).ConfigureAwait(false);
 
                         if (candidateDelay is { } approvedDelay &&
@@ -747,6 +775,10 @@ public sealed partial class ScaleSetClient
             if (countAsDiscoveryRetry)
             {
                 discoveryAuthRetries++;
+                if (hasExplicitRetryPolicy)
+                {
+                    retryAttempt++;
+                }
             }
             else
             {
@@ -883,6 +915,7 @@ public sealed partial class ScaleSetClient
 
     private static async ValueTask<TimeSpan?> EvaluateStandardFailureRetryAsync(
         ScaleSetRetryOptions retryOptions,
+        HttpResponseMessage? response,
         HttpMethod method,
         string safeUri,
         int retryAttempt,
@@ -892,6 +925,10 @@ public sealed partial class ScaleSetClient
         ScaleSetResponseSnapshot? snapshot,
         Exception failureException,
         TimeSpan? retryAfterHeaderDelay,
+        TimeSpan? maxElapsed,
+        IReadOnlyCollection<string> knownSecrets,
+        CancellationToken maxElapsedToken,
+        CancellationToken deadlineToken,
         CancellationToken cancellationToken)
     {
         if (retryAttempt >= retryOptions.MaxRetries)
@@ -902,8 +939,18 @@ public sealed partial class ScaleSetClient
         bool shouldRetry;
         if (retryOptions.ShouldRetry is { } customShouldRetry)
         {
-            shouldRetry = await customShouldRetry(
-                new ScaleSetRetryContext(method, safeUri, retryAttempt, snapshot, failureException),
+            shouldRetry = await InvokeBudgetedHookAsync(
+                hookToken => customShouldRetry(
+                    new ScaleSetRetryContext(method, safeUri, retryAttempt, snapshot, failureException),
+                    hookToken),
+                response,
+                method,
+                safeUri,
+                snapshot,
+                maxElapsed,
+                knownSecrets,
+                maxElapsedToken,
+                deadlineToken,
                 cancellationToken).ConfigureAwait(false);
         }
         else
@@ -931,6 +978,7 @@ public sealed partial class ScaleSetClient
 
     private static async ValueTask<TimeSpan?> EvaluateRateLimitRetryAsync(
         ScaleSetRetryOptions retryOptions,
+        HttpResponseMessage response,
         HttpMethod method,
         string safeUri,
         int retryAttempt,
@@ -939,6 +987,10 @@ public sealed partial class ScaleSetClient
         ScaleSetClientDiagnostics.RateLimitClassification rateLimit,
         ScaleSetRateLimitException rateLimitException,
         ScaleSetResponseSnapshot snapshot,
+        TimeSpan? maxElapsed,
+        IReadOnlyCollection<string> knownSecrets,
+        CancellationToken maxElapsedToken,
+        CancellationToken deadlineToken,
         CancellationToken cancellationToken)
     {
         if (retryAttempt >= retryOptions.MaxRetries)
@@ -948,8 +1000,18 @@ public sealed partial class ScaleSetClient
 
         if (retryOptions.OnRateLimit is { } onRateLimit)
         {
-            ScaleSetRateLimitDecision decision = await onRateLimit(
-                new ScaleSetRateLimitDecisionContext(rateLimitException, retryAttempt, method.Method, safeUri),
+            ScaleSetRateLimitDecision decision = await InvokeBudgetedHookAsync(
+                hookToken => onRateLimit(
+                    new ScaleSetRateLimitDecisionContext(rateLimitException, retryAttempt, method.Method, safeUri),
+                    hookToken),
+                response,
+                method,
+                safeUri,
+                snapshot,
+                maxElapsed,
+                knownSecrets,
+                maxElapsedToken,
+                deadlineToken,
                 cancellationToken).ConfigureAwait(false);
             if (!decision.ShouldRetry)
             {
@@ -974,6 +1036,55 @@ public sealed partial class ScaleSetClient
         }
 
         return ComputeBackoffDelay(retryOptions, retryAttempt, snapshot, rateLimit.RetryAfterHeaderDelay, statusCode);
+    }
+
+    private static async ValueTask<TResult> InvokeBudgetedHookAsync<TResult>(
+        Func<CancellationToken, ValueTask<TResult>> invoke,
+        HttpResponseMessage? response,
+        HttpMethod method,
+        string safeUri,
+        ScaleSetResponseSnapshot? snapshot,
+        TimeSpan? maxElapsed,
+        IReadOnlyCollection<string> knownSecrets,
+        CancellationToken maxElapsedToken,
+        CancellationToken deadlineToken,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (deadlineToken.IsCancellationRequested)
+        {
+            throw new OperationCanceledException("The ScaleSet request exceeded its configured deadline.", deadlineToken);
+        }
+
+        if (maxElapsedToken.IsCancellationRequested)
+        {
+            throw response is not null && snapshot is not null
+                ? CreateMaxElapsedException(response, method, safeUri, maxElapsed!.Value, knownSecrets, snapshot)
+                : CreateMaxElapsedException(method, safeUri, maxElapsed!.Value);
+        }
+
+        using CancellationTokenSource linkedHook = CancellationTokenSource.CreateLinkedTokenSource(
+            cancellationToken,
+            maxElapsedToken,
+            deadlineToken);
+        try
+        {
+            return await invoke(linkedHook.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw new OperationCanceledException("The ScaleSet request was canceled by the caller.", cancellationToken);
+        }
+        catch (OperationCanceledException) when (deadlineToken.IsCancellationRequested)
+        {
+            throw new OperationCanceledException("The ScaleSet request exceeded its configured deadline.", deadlineToken);
+        }
+        catch (OperationCanceledException) when (maxElapsedToken.IsCancellationRequested)
+        {
+            throw response is not null && snapshot is not null
+                ? CreateMaxElapsedException(response, method, safeUri, maxElapsed!.Value, knownSecrets, snapshot)
+                : CreateMaxElapsedException(method, safeUri, maxElapsed!.Value);
+        }
     }
 
     private static TimeSpan ComputeBackoffDelay(

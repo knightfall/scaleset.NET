@@ -399,6 +399,179 @@ public sealed class RetryPolicyTests
         Assert.Equal(2, Volatile.Read(ref retryCalls));
     }
 
+    [Fact]
+    public async Task MaxElapsedAndDeadlineCancelAsyncShouldRetryAndOnRateLimitHooks()
+    {
+        VirtualTimeProvider clock = new(BaseNow);
+        TaskCompletionSource shouldRetryEntered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        using HttpClient shouldRetryHttp = new(CreateConnectedHandler((_, _) =>
+            Task.FromResult(TestResponses.Json(HttpStatusCode.ServiceUnavailable, "slow hook"))));
+        using ScaleSetClient shouldRetryClient = CreateClient(
+            shouldRetryHttp,
+            new ScaleSetRetryOptions
+            {
+                MaxRetries = 2,
+                MaxElapsed = TimeSpan.FromSeconds(5),
+                ShouldRetry = async (_, token) =>
+                {
+                    shouldRetryEntered.TrySetResult();
+                    await Task.Delay(Timeout.InfiniteTimeSpan, token);
+                    return true;
+                },
+            },
+            clock);
+
+        Task<ScaleSetMaxElapsedExceededException> shouldRetryTask = Assert.ThrowsAsync<ScaleSetMaxElapsedExceededException>(
+            () => shouldRetryClient.GetScaleSetAsync(1, TestContext.Current.CancellationToken));
+        await shouldRetryEntered.Task.WaitAsync(TestContext.Current.CancellationToken);
+        clock.Advance(TimeSpan.FromSeconds(5));
+        ScaleSetMaxElapsedExceededException shouldRetryEx = await shouldRetryTask;
+        Assert.Equal(503, shouldRetryEx.StatusCode);
+        Assert.NotNull(shouldRetryEx.Response);
+
+        TaskCompletionSource onRateLimitMaxElapsedEntered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        using HttpClient rateLimitMaxElapsedHttp = new(CreateConnectedHandler((_, _) =>
+            Task.FromResult(TestResponses.Json(HttpStatusCode.TooManyRequests, "{}"))));
+        using ScaleSetClient rateLimitMaxElapsedClient = CreateClient(
+            rateLimitMaxElapsedHttp,
+            new ScaleSetRetryOptions
+            {
+                MaxRetries = 2,
+                MaxElapsed = TimeSpan.FromSeconds(5),
+                OnRateLimit = async (_, token) =>
+                {
+                    onRateLimitMaxElapsedEntered.TrySetResult();
+                    await Task.Delay(Timeout.InfiniteTimeSpan, token);
+                    return ScaleSetRateLimitDecision.RetryWithBackoff;
+                },
+            },
+            clock);
+
+        Task<ScaleSetMaxElapsedExceededException> rateLimitMaxElapsedTask = Assert.ThrowsAsync<ScaleSetMaxElapsedExceededException>(
+            () => rateLimitMaxElapsedClient.GetScaleSetAsync(2, TestContext.Current.CancellationToken));
+        await onRateLimitMaxElapsedEntered.Task.WaitAsync(TestContext.Current.CancellationToken);
+        clock.Advance(TimeSpan.FromSeconds(5));
+        ScaleSetMaxElapsedExceededException rateLimitMaxElapsedEx = await rateLimitMaxElapsedTask;
+        Assert.Equal(429, rateLimitMaxElapsedEx.StatusCode);
+        Assert.NotNull(rateLimitMaxElapsedEx.Response);
+
+        TaskCompletionSource onRateLimitDeadlineEntered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        using HttpClient rateLimitDeadlineHttp = new(CreateConnectedHandler((_, _) =>
+            Task.FromResult(TestResponses.Json(HttpStatusCode.TooManyRequests, "{}"))));
+        DateTimeOffset deadlineAt = clock.GetUtcNow().AddSeconds(3);
+        using ScaleSetClient rateLimitDeadlineClient = CreateClient(
+            rateLimitDeadlineHttp,
+            new ScaleSetRetryOptions
+            {
+                MaxRetries = 2,
+                Deadline = deadlineAt,
+                OnRateLimit = async (_, token) =>
+                {
+                    onRateLimitDeadlineEntered.TrySetResult();
+                    await Task.Delay(Timeout.InfiniteTimeSpan, token);
+                    return ScaleSetRateLimitDecision.RetryWithBackoff;
+                },
+            },
+            clock);
+
+        Task<OperationCanceledException> rateLimitDeadlineTask = Assert.ThrowsAsync<OperationCanceledException>(
+            () => rateLimitDeadlineClient.GetScaleSetAsync(3, TestContext.Current.CancellationToken));
+        await onRateLimitDeadlineEntered.Task.WaitAsync(TestContext.Current.CancellationToken);
+        clock.Advance(TimeSpan.FromSeconds(3));
+        OperationCanceledException deadlineEx = await rateLimitDeadlineTask;
+        Assert.IsNotType<ScaleSetMaxElapsedExceededException>(deadlineEx);
+        Assert.NotEqual(TestContext.Current.CancellationToken, deadlineEx.CancellationToken);
+
+        TaskCompletionSource onRateLimitCallerEntered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        using CancellationTokenSource callerCts = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+        using HttpClient rateLimitCallerHttp = new(CreateConnectedHandler((_, _) =>
+            Task.FromResult(TestResponses.Json(HttpStatusCode.TooManyRequests, "{}"))));
+        using ScaleSetClient rateLimitCallerClient = CreateClient(
+            rateLimitCallerHttp,
+            new ScaleSetRetryOptions
+            {
+                MaxRetries = 2,
+                MaxElapsed = TimeSpan.FromSeconds(30),
+                OnRateLimit = async (_, token) =>
+                {
+                    onRateLimitCallerEntered.TrySetResult();
+                    await Task.Delay(Timeout.InfiniteTimeSpan, token);
+                    return ScaleSetRateLimitDecision.RetryWithBackoff;
+                },
+            },
+            clock);
+
+        Task<OperationCanceledException> rateLimitCallerTask = Assert.ThrowsAsync<OperationCanceledException>(
+            () => rateLimitCallerClient.GetScaleSetAsync(4, callerCts.Token));
+        await onRateLimitCallerEntered.Task.WaitAsync(TestContext.Current.CancellationToken);
+        callerCts.Cancel();
+        OperationCanceledException callerEx = await rateLimitCallerTask;
+        Assert.Equal(callerCts.Token, callerEx.CancellationToken);
+    }
+
+    [Fact]
+    public async Task ExplicitRetryPolicySharesMaxRetriesAcrossDiscoveryAuthAndTransientFailures()
+    {
+        ScaleSetRetryOptions policy = ScaleSetRetryOptions.CreateUpstreamDefault() with
+        {
+            MaxRetries = 1,
+            WaitMin = TimeSpan.Zero,
+            WaitMax = TimeSpan.Zero,
+        };
+
+        int authThenTransientCalls = 0;
+        using HttpClient authThenTransientHttp = new(new RecordingHttpMessageHandler((request, _) =>
+        {
+            string path = request.RequestUri!.AbsolutePath;
+            if (path.EndsWith("/runners/registration-token", StringComparison.Ordinal))
+            {
+                return Task.FromResult(TestResponses.Json(HttpStatusCode.Created, "{\"token\":\"registration-token\"}"));
+            }
+
+            if (path == "/actions/runner-registration")
+            {
+                authThenTransientCalls++;
+                return Task.FromResult(authThenTransientCalls == 1
+                    ? TestResponses.Json(HttpStatusCode.Unauthorized, "{\"message\":\"stale registration\"}")
+                    : TestResponses.Json(HttpStatusCode.ServiceUnavailable, "{\"message\":\"service unavailable\"}"));
+            }
+
+            return Task.FromResult(TestResponses.Json(HttpStatusCode.OK, "{}"));
+        }));
+        using ScaleSetClient authThenTransientClient = CreateClient(authThenTransientHttp, policy);
+
+        ScaleSetApiException authThenTransientEx = await Assert.ThrowsAsync<ScaleSetApiException>(
+            () => authThenTransientClient.GetScaleSetAsync(1, TestContext.Current.CancellationToken));
+        Assert.Equal(503, authThenTransientEx.StatusCode);
+        Assert.Equal(2, authThenTransientCalls);
+
+        int transientThenAuthCalls = 0;
+        using HttpClient transientThenAuthHttp = new(new RecordingHttpMessageHandler((request, _) =>
+        {
+            string path = request.RequestUri!.AbsolutePath;
+            if (path.EndsWith("/runners/registration-token", StringComparison.Ordinal))
+            {
+                return Task.FromResult(TestResponses.Json(HttpStatusCode.Created, "{\"token\":\"registration-token\"}"));
+            }
+
+            if (path == "/actions/runner-registration")
+            {
+                transientThenAuthCalls++;
+                return Task.FromResult(transientThenAuthCalls == 1
+                    ? TestResponses.Json(HttpStatusCode.ServiceUnavailable, "{\"message\":\"service unavailable\"}")
+                    : TestResponses.Json(HttpStatusCode.Unauthorized, "{\"message\":\"stale registration\"}"));
+            }
+
+            return Task.FromResult(TestResponses.Json(HttpStatusCode.OK, "{}"));
+        }));
+        using ScaleSetClient transientThenAuthClient = CreateClient(transientThenAuthHttp, policy);
+
+        ScaleSetApiException transientThenAuthEx = await Assert.ThrowsAsync<ScaleSetApiException>(
+            () => transientThenAuthClient.GetScaleSetAsync(2, TestContext.Current.CancellationToken));
+        Assert.Equal(401, transientThenAuthEx.StatusCode);
+        Assert.Equal(2, transientThenAuthCalls);
+    }
+
     private static ScaleSetClient CreateClient(
         HttpClient httpClient,
         ScaleSetRetryOptions retry,
