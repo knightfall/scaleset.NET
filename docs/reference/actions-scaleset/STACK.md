@@ -1,8 +1,9 @@
 # Go Reference: Technology Stack
 
 This describes the Go reference source, pinned to upstream commit
-`e6daac702355cdb5b880b4fbdcf6d85dcd9e48e5`. Target design is in
-[the product roadmap](../../product/ROADMAP.md). Inspection date: 2026-10-02.
+`716908e507993947ada4273aecf2361c02e5836c` (syncing PRs `#130`–`#145` after the earlier
+`e6daac702355cdb5b880b4fbdcf6d85dcd9e48e5` scan). Target design is in
+[the product roadmap](../../product/ROADMAP.md). Inspection date: 2026-11-21.
 
 ## 1) Runtime Summary
 
@@ -21,11 +22,12 @@ Go 1.26.4 on macOS arm64; .NET SDKs 10.0.203 and 10.0.400 were installed.
 | Dependency | Version | Source use |
 |---|---|---|
 | `golang-jwt/jwt/v5` | 5.3.1 | App JWT signing and admin-token expiry parsing |
-| `hashicorp/go-retryablehttp` | 0.7.8 | HTTP retries and transport configuration |
 | `google/uuid` | 1.6.0 | Session IDs and example runner identities |
 | `docker/docker` | 28.5.2+incompatible | Docker example provisioning |
 | `spf13/cobra` | 1.10.2 | Example CLI flags |
 | `golang.org/x/net` | 0.54.0 | Test HTTP proxy support; direct manifest requirement |
+
+Note: `hashicorp/go-retryablehttp` was removed in upstream PR `#130` (`7ac570d7`); retries and `DefaultTransport` now live directly in `common_client.go` and `http_client.go`.
 
 `google/go-github/v79` 79.0.0 is used by the example E2E test, not by the
 core scale-set HTTP client. The large indirect dependency list includes lint
@@ -61,8 +63,9 @@ No database configuration is present.
 
 ## 6) Evidence
 
-- [Manifest](https://github.com/actions/scaleset/blob/e6daac702355cdb5b880b4fbdcf6d85dcd9e48e5/go.mod)
-- [HTTP transport](https://github.com/actions/scaleset/blob/e6daac702355cdb5b880b4fbdcf6d85dcd9e48e5/common_client.go)
-- [CI](https://github.com/actions/scaleset/blob/e6daac702355cdb5b880b4fbdcf6d85dcd9e48e5/.github/workflows/go.yaml)
-- [Devcontainer](https://github.com/actions/scaleset/blob/e6daac702355cdb5b880b4fbdcf6d85dcd9e48e5/.devcontainer/Dockerfile)
-- [Saved scan](source-scan.txt)
+- [Manifest](https://github.com/actions/scaleset/blob/716908e507993947ada4273aecf2361c02e5836c/go.mod)
+- [HTTP transport](https://github.com/actions/scaleset/blob/716908e507993947ada4273aecf2361c02e5836c/common_client.go)
+- [HTTP client & retries](https://github.com/actions/scaleset/blob/716908e507993947ada4273aecf2361c02e5836c/http_client.go)
+- [CI](https://github.com/actions/scaleset/blob/716908e507993947ada4273aecf2361c02e5836c/.github/workflows/go.yaml)
+- [Devcontainer](https://github.com/actions/scaleset/blob/716908e507993947ada4273aecf2361c02e5836c/.devcontainer/Dockerfile)
+- [Saved scan](source-scan.txt) (initial baseline scan; see `ARCHITECTURE.md` and `STRUCTURE.md` for `#130`–`#145` additions)

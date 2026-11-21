@@ -1,7 +1,7 @@
 # Go Reference: External Integrations
 
 Observed source baseline: `actions/scaleset` at
-`e6daac702355cdb5b880b4fbdcf6d85dcd9e48e5`.
+`716908e507993947ada4273aecf2361c02e5836c`.
 
 ## 1) Integration Inventory
 
@@ -34,11 +34,15 @@ scope restriction for App authentication; see the [GitHub protocol contract](../
 ## 4) Reliability and Failure Behavior
 
 Default transport: four retries, maximum wait 30 seconds, HTTP timeout five
-minutes. Registration exchange specially retries 401/403. Session poll/ack/
-acquire refresh queue credentials on 401 and attempt the operation once more.
-Concurrent refreshes use state rechecks. Poll 202 is an empty result, not an
-error. Handler or acknowledgment failure terminates the listener. No explicit
-circuit breaker is configured in this source.
+minutes, with HTTP/2 keep-alive health pings (`#142`), `Retry-After` and
+rate-limit classification with configurable retry/rate-limit/`MaxElapsed` hooks
+(`#134`–`#137`), strict JSON/null decoding (`#145`), and inspectable bounded
+response snapshots on HTTP failures (`#144`). Registration exchange specially
+retries 401/403. Session poll/ack/acquire refresh queue credentials on 401 and
+attempt the operation once more. Concurrent refreshes use state rechecks. Poll
+202 is an empty result, not an error. Handler or acknowledgment failure
+terminates the listener. No explicit circuit breaker is configured in this
+source.
 
 ## 5) Observability for Integrations
 
@@ -50,8 +54,8 @@ OpenTelemetry dependencies do not establish core instrumentation coverage.
 
 ## 6) Evidence
 
-- [Client](https://github.com/actions/scaleset/blob/e6daac702355cdb5b880b4fbdcf6d85dcd9e48e5/client.go)
-- [Session transport](https://github.com/actions/scaleset/blob/e6daac702355cdb5b880b4fbdcf6d85dcd9e48e5/session_client.go)
-- [Shared HTTP](https://github.com/actions/scaleset/blob/e6daac702355cdb5b880b4fbdcf6d85dcd9e48e5/common_client.go)
-- [Example](https://github.com/actions/scaleset/blob/e6daac702355cdb5b880b4fbdcf6d85dcd9e48e5/examples/dockerscaleset/scaler.go)
+- [Client](https://github.com/actions/scaleset/blob/716908e507993947ada4273aecf2361c02e5836c/client.go)
+- [Session transport](https://github.com/actions/scaleset/blob/716908e507993947ada4273aecf2361c02e5836c/session_client.go)
+- [Shared HTTP](https://github.com/actions/scaleset/blob/716908e507993947ada4273aecf2361c02e5836c/common_client.go)
+- [Example](https://github.com/actions/scaleset/blob/716908e507993947ada4273aecf2361c02e5836c/examples/dockerscaleset/scaler.go)
 - [GitHub auth guidance](https://docs.github.com/en/actions/how-tos/manage-runners/use-actions-runner-controller/authenticate-to-the-api)

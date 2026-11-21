@@ -1,7 +1,7 @@
 # Go Reference: Design Considerations
 
 Go-reference design considerations at upstream commit
-`e6daac702355cdb5b880b4fbdcf6d85dcd9e48e5`. These are planning risks,
+`716908e507993947ada4273aecf2361c02e5836c`. These are planning risks,
 not a comprehensive security audit or verified production defect inventory.
 
 ## 1) Top Risks (Prioritized)
@@ -32,7 +32,7 @@ establish an absence of design gaps.
 
 | Source behavior | Implication | Planned handling |
 |---|---|---|
-| Error bodies may be included in errors | Credential-bearing responses need redaction | Bounded, redacted structured exceptions |
+| Error responses and snapshots may include headers/bodies | Credential-bearing responses need bounded capture and redaction | Bounded snapshots, secret-free formatting, and redaction on logs/telemetry |
 | Example credentials on command line; JIT in container env | Operational exposure to host/process/container inspectors | Mounted credential files; controlled JIT delivery |
 | Disable-verification option | Can remove server identity checks | Deliberate explicit opt-in and diagnostic reporting |
 | mTLS certificate offered to all connections | Enterprise deployments may need narrower scope | Host-aware certificate selection |
@@ -65,7 +65,7 @@ Detailed AWS infrastructure planning remains intentionally deferred.
 ## 7) Evidence
 
 - [Saved scan/history](source-scan.txt)
-- [Example state and shutdown](https://github.com/actions/scaleset/blob/e6daac702355cdb5b880b4fbdcf6d85dcd9e48e5/examples/dockerscaleset/scaler.go)
-- [Example startup](https://github.com/actions/scaleset/blob/e6daac702355cdb5b880b4fbdcf6d85dcd9e48e5/examples/dockerscaleset/main.go)
-- [Listener contracts](https://github.com/actions/scaleset/blob/e6daac702355cdb5b880b4fbdcf6d85dcd9e48e5/listener/listener.go)
+- [Example state and shutdown](https://github.com/actions/scaleset/blob/716908e507993947ada4273aecf2361c02e5836c/examples/dockerscaleset/scaler.go)
+- [Example startup](https://github.com/actions/scaleset/blob/716908e507993947ada4273aecf2361c02e5836c/examples/dockerscaleset/main.go)
+- [Listener contracts](https://github.com/actions/scaleset/blob/716908e507993947ada4273aecf2361c02e5836c/listener/listener.go)
 - [Validation](../../product/VERIFICATION.md)
