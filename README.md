@@ -1,5 +1,11 @@
 # scaleset.NET
 
+[![.NET CI](https://github.com/knightfall/scaleset.NET/actions/workflows/dotnet.yml/badge.svg?branch=main)](https://github.com/knightfall/scaleset.NET/actions/workflows/dotnet.yml)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/knightfall/scaleset.NET/badge)](https://scorecard.dev/viewer/?uri=github.com/knightfall/scaleset.NET)
+[![NuGet prerelease](https://img.shields.io/nuget/vpre/Knightfall.ScaleSet.Client)](https://www.nuget.org/packages/Knightfall.ScaleSet.Client)
+[![GitHub release](https://img.shields.io/github/v/release/knightfall/scaleset.NET?include_prereleases)](https://github.com/knightfall/scaleset.NET/releases)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+
 **scaleset.NET is a .NET-native autoscaler for GitHub Actions self-hosted runners.**
 It is built for teams that want to run runners on infrastructure they control
 without operating Kubernetes. The controller reads GitHub Runner Scale Set
@@ -18,8 +24,32 @@ planning, health endpoints, and bounded drain-and-preserve shutdown. The
 provided container and Compose deployment run the controller without
 Kubernetes.
 
-The initial GitHub target is GitHub.com at repository or organization scope,
-using a GitHub App or PAT. GHES and enterprise scope are not supported yet.
+The client supports repository, organization, and enterprise targets on
+GitHub.com and GitHub Enterprise Cloud (`*.ghe.com`) with GitHub App or
+personal access token (PAT) authentication. Its protocol baseline is
+[`actions/scaleset` at `716908e5`](https://github.com/actions/scaleset/tree/716908e507993947ada4273aecf2361c02e5836c).
+It includes HTTP/2 keep-alives, rate-limit classification, configurable retry
+budgets, and bounded response snapshots. GitHub Enterprise Server (GHES)
+support is planned.
+
+## NuGet quickstart
+
+The `0.1.0-alpha.1` prerelease targets .NET 10. Use the install commands once
+the packages are available in the registry.
+
+| Package | Purpose |
+| --- | --- |
+| [`Knightfall.ScaleSet.Client`](https://www.nuget.org/packages/Knightfall.ScaleSet.Client) | GitHub authentication, scale-set administration, and message sessions |
+| [`Knightfall.ScaleSet.Listener`](https://www.nuget.org/packages/Knightfall.ScaleSet.Listener) | Polling, callbacks, job acquisition, and acknowledgment |
+| [`Knightfall.ScaleSet.Hosting`](https://www.nuget.org/packages/Knightfall.ScaleSet.Hosting) | Provider contracts, scaling, and durable runner lifecycle |
+| [`Knightfall.ScaleSet.Providers.Docker`](https://www.nuget.org/packages/Knightfall.ScaleSet.Providers.Docker) | Docker Engine runner provisioning and recovery |
+
+```sh
+dotnet add package Knightfall.ScaleSet.Client --version 0.1.0-alpha.1
+```
+
+See the [usage guide](docs/usage.md) for a client example, GitHub Packages
+configuration, and the Docker controller setup.
 
 ## AWS direction
 
@@ -36,6 +66,9 @@ IAM role authorizes AWS operations.
 
 ## Documentation
 
+- [Alpha release notes](docs/releases/0.1.0-alpha.1.md)
+- [Publishing and provenance verification](docs/releases/PUBLISHING.md)
+- [Security policy](SECURITY.md)
 - [Product roadmap](docs/product/ROADMAP.md)
 - [Product decisions](docs/product/DECISIONS.md)
 - [GitHub protocol contract](docs/product/GITHUB-PROTOCOL.md)
@@ -54,9 +87,9 @@ build-time analyzer dependency. Enabled compiler and analyzer warnings are
 build errors.
 
 ```sh
-dotnet restore ScaleSet.slnx
+dotnet restore ScaleSet.slnx --locked-mode
 dotnet build ScaleSet.slnx --configuration Release --no-restore
-dotnet test --solution ScaleSet.slnx --configuration Release
+dotnet test --solution ScaleSet.slnx --configuration Release --no-build
 ```
 
 Tests use xUnit v3 with native Microsoft Testing Platform. Dependencies are

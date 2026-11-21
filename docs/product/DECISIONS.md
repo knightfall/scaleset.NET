@@ -15,7 +15,7 @@ Recorded on 2026-10-02, Australia/Sydney.
 | D05 | ECS tasks and direct EC2 runner instances are the initial AWS runner providers | Implement separate adapters for each backend; an ECS cluster may use EC2 capacity without making that the direct-EC2 provider |
 | D06 | One active instance per scale set, restart reconciliation, preserved scale-set identity | Recover owned resources and refuse conflicting ownership; defer automatic failover/shared leadership |
 | D07 | Runner scale, resource/architecture needs, and Docker/privilege behavior should be configurable | Per-scale-set resource profiles and hard limits; do not bake in one workload size or advertise an unmeasured throughput guarantee |
-| D08 | GitHub.com repository/organization scopes, GitHub App and PAT first | GHES, enterprise scope, and concrete KMS/HSM integrations are later work; external JWT seam can be kept without a cloud dependency |
+| D08 | GitHub.com repository/organization scopes, GitHub App and PAT first | The client now also supports enterprise scope and GHEC tenant hosts. GHES and concrete KMS/HSM integrations remain deferred. |
 | D09 | NuGet client/listener libraries plus a controller service and deployment artifacts | Keep API/protocol packages reusable without Docker or AWS dependencies |
 | D10 | Support both spare-capacity and total-floor scaling policies | Require a named policy in deployment examples; test both formulas |
 | D12 | Normal shutdown uses A: drain and preserve | Stop new acquisition/provisioning, drain for a configurable period, retain the scale set, and leave unfinished/uncertain runners intact for reconciliation on restart |
@@ -39,10 +39,9 @@ details remain open where D14 marks them for design rather than assumption.
 These are accepted design requirements, not existing implementation or measured
 runtime results.
 
-- Public package/namespace family: `ScaleSet.Client`, `ScaleSet.Listener`,
-  `ScaleSet.Hosting`; executable `ScaleSet.Autoscaler`. Provider assemblies:
-  `ScaleSet.Providers.Docker`, then `.Ecs` and `.Ec2`. Package-ID availability
-  must be checked before publication; no affiliation with GitHub is implied.
+- The public package family uses `Knightfall.ScaleSet.*` IDs, documented in
+  the [alpha release notes](../releases/0.1.0-alpha.1.md). Namespaces and
+  assemblies use `ScaleSet.*`. The executable is `ScaleSet.Autoscaler`.
 - xUnit tests with local HTTP fixtures and deterministic clocks/fake providers.
   Resolve exact compatible package versions during implementation, not from
   speculative version pins in this plan.

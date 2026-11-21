@@ -29,13 +29,10 @@ At the foundation milestone, local verification on macOS arm64 with .NET SDK
 10.0.400 reported:
 
 - Solution tests: 108 passed, 0 failed, 0 skipped.
-- Three alpha library packages were created locally and not published.
 - Configuration validation passed with synthetic environment values and made
   no GitHub or Docker requests.
 - Roslynator rejected a temporary invalid example; the corrected example
   built with zero warnings or errors.
 
-The later Docker and controller work has its own evidence in
-[Implementation Status](WORK-STATE.md), [Client](CLIENT.md), and
-[Docker provider](DOCKER-PROVIDER.md). These foundation results do not establish
-live GitHub, AWS, or production runner compatibility.
+The alpha packages and current test counts are documented in the
+[implementation status](WORK-STATE.md) and [verification record](../product/VERIFICATION.md).

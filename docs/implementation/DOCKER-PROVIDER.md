@@ -61,16 +61,12 @@ responsible for TLS, redirects, proxy and connection lifetime.
 
 ## Verification
 
-The Release build completed with zero warnings and errors. The native-MTP
-solution suite passed 335 tests with no failures or skips: 141 Client, 20
-Listener, 126 Hosting, 46 Docker-unit and 2 opt-in Docker-integration tests.
-The integration run used the local Docker 29.8.1 Linux arm64 daemon and only a
-pinned public BusyBox image with synthetic JIT data. It verified ownership
-scoping, survival after provider disposal, safe terminal cleanup and journal
-reopen. Scoped cleanup left no test-owned containers. Four local alpha packages
-were created and none published. The hosted workflow passed on Linux, macOS,
-and Windows, including the multi-platform container build. No package or image
-has been published.
+The Linux release candidate passed 424 solution tests, including both Docker
+integration tests. Their fixtures use a pinned public BusyBox image and
+synthetic JIT data to verify ownership scoping, survival after provider
+disposal, safe terminal cleanup, and reopening durable state.
+`Knightfall.ScaleSet.Providers.Docker` was also packed and loaded by the
+external candidate consumer. See the [verification record](../product/VERIFICATION.md).
 
 The direct evidence is in [Docker unit tests](../../tests/ScaleSet.Docker.Tests),
 [live integration tests](../../tests/ScaleSet.Docker.IntegrationTests),

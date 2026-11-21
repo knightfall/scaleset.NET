@@ -1,10 +1,9 @@
 # Implementation Status
 
-Updated: 2026-11-21 (Australia/Sydney). Upstream `actions/scaleset`
-(`716908e507993947ada4273aecf2361c02e5836c`) parity work is tracked per issue in
-`#14`–`#19`: `#14`–`#18` (PRs `#22`–`#26`) are merged into `main` (`694f9b0`),
-`#19` refreshes the documentation baseline, and `#20`–`#21` track deferred backlog
-items.
+Updated 2026-11-22 (Australia/Sydney). The protocol baseline is
+[`actions/scaleset` at `716908e5`](https://github.com/actions/scaleset/tree/716908e507993947ada4273aecf2361c02e5836c).
+Issues `#14`–`#19` track the implemented client parity work and baseline
+refresh. Issues `#20`–`#21` track GHES and custom TLS transport work.
 
 ## Available today
 
@@ -26,18 +25,19 @@ items.
   Linux x64/arm64 container packaging, and a Compose deployment.
 - OpenTelemetry traces and metrics plus structured logs exported to a configured
   OTLP receiver.
+- Four .NET 10 packages at `0.1.0-alpha.1` in the `Knightfall.ScaleSet.*` family.
+  See the [usage guide](../usage.md) and [release runbook](../releases/PUBLISHING.md).
 
 The Docker product can run without Kubernetes. The current executable is wired
 to the Docker provider; AWS resource management is not implemented yet.
 
 ## Verification
 
-- The latest .NET 10 Release build (`dotnet build ScaleSet.slnx --configuration Release --no-restore -m:1 -nr:false`) completed with 0 warnings and 0 errors.
-- The latest Release test run on macOS arm64 (`dotnet test --solution ScaleSet.slnx --configuration Release --no-build`) passed 422/422 non-integration tests (194 Client, 20 Listener, 161 Hosting including loopback OTLP telemetry, and 47 Docker unit tests), with 2 opt-in `ScaleSet.Docker.IntegrationTests` skipped (requires a Linux Docker daemon and `SCALESET_DOCKER_INTEGRATION=1`).
-
-These checks cover deterministic protocol behavior and the Docker controller
-unit/hosting suites. They do not establish live GitHub or AWS compatibility. A
-designated GitHub canary and AWS test environment are still required.
+The Linux release candidate passed 424 tests, including two Docker integration
+tests, and ran a fresh consumer against all four alpha packages. The local
+macOS arm64 run passed 422 tests, with the two Docker integration tests skipped.
+See the [verification record](../product/VERIFICATION.md) for run links and
+remaining live-canary work.
 
 ## AWS product direction
 
@@ -55,8 +55,8 @@ operations. No AWS resources have been inspected, deployed, or changed.
 ## Known limits
 
 - Custom GHES hosts (`#20`) and custom root CA / mTLS transport factories (`#21`) are not implemented (GHEC `github.com/enterprises/...` and `*.ghe.com` targets are supported).
-- Mutable runtime `SystemInfo` (`SetSystemInfo`) and Docker live E2E execution on this host are out of the current client-parity wave.
+- Mutable runtime `SystemInfo` (`SetSystemInfo`) is outside the current client-parity wave.
 - Private-registry Docker image authentication is not implemented.
 - Live GitHub workflows and AWS-backed runner provisioning have not been
   exercised.
-- No package or container image has been published.
+- Registry publication and registry consumer verification remain pending.

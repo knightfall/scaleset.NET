@@ -2,8 +2,8 @@
 
 Status: **Docker-backed autoscaler available; AWS controller and runner
 providers are planned**. Detailed AWS resource and deployment design remains
-open. Source protocol reference: [actions/scaleset at
-e6daac702355cdb5b880b4fbdcf6d85dcd9e48e5](https://github.com/actions/scaleset/tree/e6daac702355cdb5b880b4fbdcf6d85dcd9e48e5).
+open. The protocol reference is
+[`actions/scaleset` at `716908e5`](https://github.com/actions/scaleset/tree/716908e507993947ada4273aecf2361c02e5836c).
 
 ## 1. Product objective and scope
 
@@ -27,10 +27,10 @@ neutral. Docker and future AWS providers are adapters around those shared
 contracts. GitHub App or PAT credentials authorize GitHub API calls; AWS IAM
 authorizes operations on configured AWS resources.
 
-The initial supported GitHub target is GitHub.com at repository or
-organization scope, using App or PAT authentication. GHES, enterprise scope,
-concrete remote JWT signers, a web dashboard, automatic failover, and
-cross-account AWS control are outside the current product scope.
+GitHub.com and GitHub Enterprise Cloud (`*.ghe.com`) repository, organization,
+and enterprise scopes are supported with GitHub App or PAT authentication.
+GHES, concrete remote JWT signers, a web dashboard, automatic failover, and
+cross-account AWS control remain outside the current product scope.
 
 Product decisions are tracked in [DECISIONS.md](DECISIONS.md). The product
 uses reusable NuGet client/listener libraries, a configurable controller,
@@ -78,7 +78,7 @@ contracts, not the product boundary for scaleset.NET. Its source has about
 | Shutdown/state | Example in-memory maps; force-removes runners and deletes scale set | Confirmed drain-and-preserve with retained identity and restart reconciliation |
 | Scaling policies | Docker example uses additive minimum/spare capacity | SpareCapacity and TotalFloor selectable by configuration |
 | Health/UI | Example has no health host or dashboard | Health endpoints; no dashboard |
-| GitHub targets | Go also supports GHES, enterprise scope and external JWT signing | Current support: GitHub.com repo/org scopes with App/PAT; other targets/signers are deferred |
+| GitHub targets | GitHub.com, GitHub Enterprise Cloud, and GHES with App or PAT authentication | GitHub.com and GitHub Enterprise Cloud repo/org/enterprise scopes with App or PAT. GHES is deferred. |
 
 Compose deploys the controller and its dependencies; runner containers are
 still created through the provider's Docker API. Multi-architecture packaging
@@ -171,7 +171,7 @@ the same quality gate alongside their behavioral checks.
 | GitHub reference source | scaleset.NET responsibility | Completion evidence |
 |---|---|---|
 | `types.go` | Wire models, parsed job messages, JSON context/converters | Golden JSON fixtures, omission/casing/large-ID cases |
-| `config.go` | GitHub target/scope parser and endpoint resolver | Repo/org hosted URL matrix; reject deferred targets clearly |
+| `config.go` | GitHub target/scope parser and endpoint resolver | GitHub.com and GHEC repo/org/enterprise URL matrix and GHES rejection |
 | `jwt_provider.go` | App credential provider and async JWT seam | Signature/claims/key-format/time/cancellation tests |
 | `errors.go` | ScaleSetApiException and status/domain classifications | Correlation IDs, invalid/plain/empty error payloads, redaction |
 | `common_client.go` | Transport factory, per-request auth, retries, BOM, diagnostics | Timeout/proxy/TLS/disposal tests |
@@ -196,8 +196,9 @@ Proposed public surface:
   safe session snapshot, and explicit async close with bounded cancellation.
 - `ScaleSetListener.RunAsync(handler, cancellationToken)` plus thread-safe
   maximum-capacity update. Callback receives initial, empty, or real message.
-- `ScaleSetApiException`: HTTP status, domain code, method, safe URI,
-  ActivityId, GitHub request ID, and bounded redacted body preview.
+- `ScaleSetApiException` includes HTTP status, domain code, method, safe URI,
+  activity and request IDs, and a bounded response snapshot with redacted
+  diagnostics.
 
 Separate transport policies for GitHub REST, administration, queue long polls,
 and short control/cleanup operations. Use reusable HttpClient/handlers with
@@ -211,16 +212,15 @@ poll window, plus a configurable total budget. Avoid hedging session polls or
 mutations. Set Authorization per request so admin/queue credentials cannot
 race through shared default headers.
 
-Retry policy is request-class aware: read-only control-plane requests may retry
-bounded transient failures with jitter; valid `Retry-After` values on 429/503
-are honored up to one minute; larger values skip automatic retry rather than
-retrying early. Registration discovery has its scoped 401/403 retry behavior; queue 401
-performs one coordinated refresh/retry, while long polls are not generically
-retried or hedged. Mutations require an explicit operation-specific replay
-strategy or post-failure reconciliation, especially scale-set creation and JIT
-generation. This preserves response/status contracts while avoiding blind
-mutation replay. Microsoft notes that [standard retries apply to all methods
-unless configured](https://learn.microsoft.com/en-us/dotnet/core/resilience/http-resilience).
+The current retry policy classifies requests before retrying. Read-only
+control-plane calls can retry bounded transient failures with jitter. The
+default policy honors valid `Retry-After` values on 429/503 up to one minute
+and leaves longer waits to the caller. `ScaleSetRetryOptions` provides
+rate-limit handling and elapsed-time budgets. `ScaleSetRequestRetry` allows
+per-call policy and deadlines. Registration discovery has scoped 401/403
+retry behavior, and queue 401 triggers one coordinated refresh and retry.
+Mutations use operation-specific replay or post-failure reconciliation.
+See the [client implementation](../implementation/CLIENT.md).
 
 App/PAT descriptors are mutually exclusive. Bind credential values/references
 from environment configuration in the executable, keep token caches per
@@ -385,9 +385,12 @@ adding any durable asynchronous job queue.
 
 ## 9. Operations and distribution
 
-Accepted artifacts: Client/Listener/Hosting NuGet packages, provider assembly,
-CLI binary, versioned multi-architecture controller image, Compose example,
-validated example environment configuration, recovery runbooks, and package notices.
+The `0.1.0-alpha.1` distribution defines four .NET 10 NuGet packages:
+`Knightfall.ScaleSet.Client`, `Knightfall.ScaleSet.Listener`,
+`Knightfall.ScaleSet.Hosting`, and `Knightfall.ScaleSet.Providers.Docker`.
+The source includes the controller executable project, a multi-architecture
+Docker build, and a Compose example. Package publishing and verification are
+documented in the [release runbook](../releases/PUBLISHING.md).
 
 Confirmed D16-D17: use Microsoft ILogger<T>, routed by Serilog.Extensions.Hosting
 to Serilog.Sinks.OpenTelemetry for OTLP logs. The executable separately registers
@@ -585,6 +588,7 @@ separate experimental/deferred capabilities.
 
 Preserve the existing Apache-2.0 repository license. Add upstream GitHub MIT
 copyright/license notices for translated source/fixtures and include them in
-published packages/images. Check public package IDs and publishing ownership
-before release. Actual publication/deployment is a separate execution step;
-this branch creates no NuGet release, image push, AWS deployment, or PR.
+published packages and images. The package pipeline uses locked restore,
+SourceLink, NuGet auditing, a build dependency SBOM, and signed attestations.
+Publication requires a protected tag and a manually approved run on `main`.
+See the [alpha release notes](../releases/0.1.0-alpha.1.md).
