@@ -17,7 +17,7 @@ public enum ScaleSetDomainError
 }
 
 /// <summary>An HTTP or domain error returned while using the ScaleSet client.</summary>
-public sealed class ScaleSetApiException : Exception
+public class ScaleSetApiException : Exception
 {
     /// <summary>Creates an exception with a default message.</summary>
     public ScaleSetApiException()
@@ -45,6 +45,12 @@ public sealed class ScaleSetApiException : Exception
     /// <param name="statusCode">HTTP status code, when a response was received.</param>
     /// <param name="domainError">Scale set service error classification, when known.</param>
     /// <param name="innerException">Underlying exception, when available.</param>
+    /// <param name="method">HTTP method associated with the failure.</param>
+    /// <param name="safeUri">Redacted URI associated with the failure.</param>
+    /// <param name="activityId">Actions activity correlation identifier.</param>
+    /// <param name="githubRequestId">GitHub request correlation identifier.</param>
+    /// <param name="bodyPreview">Bounded, redacted preview of the response body.</param>
+    /// <param name="response">Optional in-memory snapshot of the HTTP response.</param>
     public ScaleSetApiException(
         string message,
         int? statusCode,
@@ -54,7 +60,8 @@ public sealed class ScaleSetApiException : Exception
         string? safeUri = null,
         string? activityId = null,
         string? githubRequestId = null,
-        string? bodyPreview = null)
+        string? bodyPreview = null,
+        ScaleSetResponseSnapshot? response = null)
         : base(message, innerException)
     {
         if (statusCode is < 100 or > 599)
@@ -69,6 +76,7 @@ public sealed class ScaleSetApiException : Exception
         ActivityId = activityId;
         GitHubRequestId = githubRequestId;
         BodyPreview = bodyPreview;
+        Response = response;
     }
 
     /// <summary>HTTP status code, or <see langword="null"/> when no response was received.</summary>
@@ -91,4 +99,7 @@ public sealed class ScaleSetApiException : Exception
 
     /// <summary>Bounded, redacted preview of the response body.</summary>
     public string? BodyPreview { get; }
+
+    /// <summary>Inspectable snapshot of the final HTTP response, or <see langword="null"/> if no response was received.</summary>
+    public ScaleSetResponseSnapshot? Response { get; }
 }
