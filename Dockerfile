@@ -11,9 +11,12 @@ RUN set -eux; \
       arm64) runtime_id=linux-arm64 ;; \
       *) echo "Unsupported target architecture: $TARGETARCH" >&2; exit 1 ;; \
     esac; \
+    dotnet restore src/ScaleSet.Autoscaler/ScaleSet.Autoscaler.csproj \
+      --locked-mode; \
     dotnet publish src/ScaleSet.Autoscaler/ScaleSet.Autoscaler.csproj \
       --configuration Release \
       --runtime "$runtime_id" \
+      --no-restore \
       --self-contained false \
       -p:UseAppHost=false \
       --output /app/publish

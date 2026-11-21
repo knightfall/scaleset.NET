@@ -39,7 +39,7 @@ jobs:
         with:
           global-json-file: global.json
       - name: Restore
-        run: dotnet restore ScaleSet.slnx
+        run: dotnet restore ScaleSet.slnx --locked-mode
       - name: Build with analyzer warnings as errors
         run: dotnet build ScaleSet.slnx --configuration Release --no-restore
       - name: Test solution discovery and behavior
