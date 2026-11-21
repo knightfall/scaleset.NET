@@ -758,6 +758,48 @@ public sealed class ScaleSetClientTransportTests
         Assert.Equal(TimeSpan.FromSeconds(30), handler.KeepAlivePingDelay);
         Assert.Equal(TimeSpan.FromSeconds(10), handler.KeepAlivePingTimeout);
         Assert.Equal(HttpKeepAlivePingPolicy.WithActiveRequests, handler.KeepAlivePingPolicy);
+
+        var httpClientField = typeof(ScaleSetClient).GetField("_httpClient", BindingFlags.Instance | BindingFlags.NonPublic);
+        var ownedHttpClient = Assert.IsType<HttpClient>(httpClientField!.GetValue(client));
+        Assert.Equal(HttpVersion.Version20, ownedHttpClient.DefaultRequestVersion);
+        Assert.Equal(HttpVersionPolicy.RequestVersionOrLower, ownedHttpClient.DefaultVersionPolicy);
+
+        var createRequest = typeof(ScaleSetClient).GetMethod("CreateRequest", BindingFlags.Instance | BindingFlags.NonPublic);
+        using var request = Assert.IsType<HttpRequestMessage>(createRequest!.Invoke(
+            client,
+            [HttpMethod.Get, new Uri("https://actions.example/test"), null, "Bearer synthetic-token", null, null, "queue"]));
+        Assert.Equal(HttpVersion.Version20, request.Version);
+        Assert.Equal(HttpVersionPolicy.RequestVersionOrLower, request.VersionPolicy);
+    }
+
+    [Fact]
+    public async Task SendRequestAppliesHttpClientDefaultVersionAndPolicy()
+    {
+        Version? sentVersion = null;
+        HttpVersionPolicy? sentPolicy = null;
+        using var httpClient = new HttpClient(new RecordingHttpMessageHandler((request, _) =>
+        {
+            sentVersion = request.Version;
+            sentPolicy = request.VersionPolicy;
+            return Task.FromResult(TestResponses.Json(HttpStatusCode.OK, "payload"));
+        }))
+        {
+            DefaultRequestVersion = HttpVersion.Version20,
+            DefaultVersionPolicy = HttpVersionPolicy.RequestVersionOrLower,
+        };
+        using var client = CreateClient(httpClient);
+
+        _ = await client.SendQueueAsync(
+            HttpMethod.Get,
+            new Uri("https://queue.example/poll"),
+            "queue-token",
+            body: null,
+            headers: null,
+            allowAccepted: true,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(HttpVersion.Version20, sentVersion);
+        Assert.Equal(HttpVersionPolicy.RequestVersionOrLower, sentPolicy);
     }
 
     [Fact]

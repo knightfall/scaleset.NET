@@ -532,7 +532,11 @@ public sealed partial class ScaleSetClient
         IReadOnlyDictionary<string, string>? headers,
         string dependency)
     {
-        var request = new HttpRequestMessage(method, uri);
+        var request = new HttpRequestMessage(method, uri)
+        {
+            Version = _httpClient.DefaultRequestVersion,
+            VersionPolicy = _httpClient.DefaultVersionPolicy,
+        };
         try
         {
             request.Headers.Authorization = AuthenticationHeaderValue.Parse(authorization);

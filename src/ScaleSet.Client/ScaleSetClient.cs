@@ -1,3 +1,4 @@
+using System.Net;
 using Microsoft.Extensions.Logging;
 
 namespace ScaleSet.Client;
@@ -59,6 +60,8 @@ public sealed partial class ScaleSetClient : IDisposable
             _httpClient = new HttpClient(_ownedHandler, disposeHandler: false)
             {
                 Timeout = Timeout.InfiniteTimeSpan,
+                DefaultRequestVersion = HttpVersion.Version20,
+                DefaultVersionPolicy = HttpVersionPolicy.RequestVersionOrLower,
             };
             _ownsHttpClient = true;
         }
