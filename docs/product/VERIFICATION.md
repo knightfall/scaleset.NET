@@ -1,7 +1,8 @@
 # Verification Evidence
 
-Updated: 2026-11-21 (Australia/Sydney)
-Baseline: `actions/scaleset` `716908e507993947ada4273aecf2361c02e5836c` (Australia/Sydney).
+Updated 2026-11-22 (Australia/Sydney).
+
+The reference baseline is `actions/scaleset` `716908e507993947ada4273aecf2361c02e5836c`.
 
 ## Reference protocol source
 
@@ -21,22 +22,28 @@ test was gated off.
 
 ## scaleset.NET verification
 
-The latest .NET 10 Release validation on macOS arm64 completed with 0 warnings
+Local .NET 10 Release validation on macOS arm64 completed with 0 warnings
 and 0 errors (`dotnet build ScaleSet.slnx --configuration Release --no-restore -m:1 -nr:false`),
 and `dotnet test --solution ScaleSet.slnx --configuration Release --no-build`
 passed 422/422 non-integration tests (`194` Client, `20` Listener, `161`
 Hosting including loopback OTLP telemetry, and `47` Docker unit tests) with 0
-failures and `2` opt-in `ScaleSet.Docker.IntegrationTests` skipped (requires a
-Linux Docker daemon and `SCALESET_DOCKER_INTEGRATION=1`).
+failures. The two opt-in `ScaleSet.Docker.IntegrationTests` were skipped. They
+require a Linux Docker daemon and `SCALESET_DOCKER_INTEGRATION=1`.
+
+The [release candidate run on main](https://github.com/knightfall/scaleset.NET/actions/runs/44953792103)
+on Linux passed 424 tests with 0 failures and 0 skips, including the two Docker
+integration tests. It built with 0 warnings and 0 errors, packed the four
+`Knightfall.ScaleSet.*` packages and their symbols, validated the SPDX SBOM
+and manifest through the artifact round trip, and ran a fresh .NET 10 consumer
+against the candidate. The [workflow security run](https://github.com/knightfall/scaleset.NET/actions/runs/44953792165)
+passed 19 release automation tests, actionlint, and zizmor.
 
 These results cover deterministic GitHub protocol tests (including GHEC
 `github.com/enterprises/...` and `*.ghe.com` + PAT targeting, HTTP/2
 `SocketsHttpHandler` configuration, strict JSON/null validation, rate-limit
 classification, retry budgets/`OnRateLimit`, and response snapshots) and the
-Docker provider/runtime unit suites. They do not verify a live GitHub runner
-workflow or Docker live E2E daemon execution on macOS. No live GitHub canary,
-AWS resource operation, AWS deployment, NuGet publication, or container
-publication has been performed.
+Docker provider/runtime suites. Live GitHub runner workflows, AWS deployments,
+registry publication, and post-publish registry verification remain pending.
 
 ## Current support and limits
 

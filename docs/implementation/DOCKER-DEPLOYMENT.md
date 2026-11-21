@@ -7,10 +7,11 @@ created separately by the Docker provider.
 
 ## Prepare and validate
 
-Copy `examples/docker-compose/.env.example` to `.env`. Set the GitHub.com
-repository or organization URL, scale-set name, a pinned runner image digest,
-the PAT, and the OTLP endpoint. The sample uses a PAT; GitHub App credentials
-are also supported through `SCALESET__Credentials__github__ClientId`,
+Copy `examples/docker-compose/.env.example` to `examples/docker-compose/.env`.
+Set the [GitHub target URL](../usage.md#use-the-client-library), scale-set name,
+pinned runner image digest, PAT, and OTLP endpoint. To use a GitHub App,
+replace the sample's `SCALESET__Credentials__github__Pat` mapping with
+`SCALESET__Credentials__github__ClientId`,
 `SCALESET__Credentials__github__InstallationId`, and
 `SCALESET__Credentials__github__PrivateKeyPem`.
 
@@ -20,13 +21,13 @@ group. Create the state directory and make it writable by `SCALESET_UID` and
 `SCALESET_GID` before starting the container. Keep `.env` private; it is
 excluded from Git.
 
-From the repository root, validate the composed configuration and the
-application configuration, then build and start the service:
+From the repository root, validate the Compose configuration, build the image,
+and validate the application configuration before starting the service.
 
 ```sh
 docker compose --env-file examples/docker-compose/.env -f examples/docker-compose/compose.yaml config --quiet
-docker compose --env-file examples/docker-compose/.env -f examples/docker-compose/compose.yaml run --rm autoscaler validate-config
 docker compose --env-file examples/docker-compose/.env -f examples/docker-compose/compose.yaml build
+docker compose --env-file examples/docker-compose/.env -f examples/docker-compose/compose.yaml run --rm autoscaler validate-config
 docker compose --env-file examples/docker-compose/.env -f examples/docker-compose/compose.yaml up -d
 ```
 

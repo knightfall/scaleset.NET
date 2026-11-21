@@ -113,9 +113,10 @@ Compiler, Roslynator, .NET and xUnit analyzer diagnostics remain build errors
 `ScaleSetMaxElapsedExceededException` over unsealed `ScaleSetApiException`).
 Tests use fake HTTP handlers and injected clocks/time providers, with no live
 GitHub credentials or remote API effects. The existing hosting tests also
-verify actual OTLP export to a loopback receiver. These results do not establish
-a real runner workflow, platform trust-store/custom-root-CA behavior, or AWS
-integration. No packages were published.
+verify OTLP export to a loopback receiver. The Linux release candidate ran
+all 424 tests and exercised `Knightfall.ScaleSet.Client` and
+`Knightfall.ScaleSet.Listener` in a fresh consumer. See the
+[verification record](../product/VERIFICATION.md).
 
 The table maps requirements to exact tests. Paths are beneath `tests/`.
 
