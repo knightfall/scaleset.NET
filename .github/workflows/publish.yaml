@@ -1,0 +1,209 @@
+name: Package release
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish the verified 0.1.0-alpha.1 candidate (requires production approval)
+        type: boolean
+        default: false
+
+permissions: {}
+
+concurrency:
+  group: package-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build release candidate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    outputs:
+      artifact_id: ${{ steps.upload.outputs.artifact-id }}
+      manifest_sha256: ${{ steps.manifest.outputs.sha256 }}
+    env:
+      CI: true
+      DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+      TESTINGPLATFORM_TELEMETRY_OPTOUT: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
+        with:
+          global-json-file: global.json
+      - name: Restore locked solution
+        run: dotnet restore ScaleSet.slnx --locked-mode
+      - name: Build solution
+        run: dotnet build ScaleSet.slnx --configuration Release --no-restore
+      - name: Run solution tests
+        run: dotnet test --solution ScaleSet.slnx --configuration Release --no-build
+        env:
+          SCALESET_DOCKER_INTEGRATION: '1'
+      - name: Pack libraries
+        run: dotnet pack ScaleSet.slnx --configuration Release --no-build --output artifacts/packages
+      - name: Prepare source-bound candidate and validated SPDX SBOM
+        run: python3 .github/release/prepare.py --output "$RUNNER_TEMP/release" --cache "$RUNNER_TEMP/release-tools" --packages artifacts/packages
+      - name: Check actual package layouts and manifest integrity
+        run: python3 .github/release/check-candidate.py "$RUNNER_TEMP/release"
+        env:
+          RELEASE_EXPECTED_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Verify NuGet package and symbol retry behavior on loopback
+        run: python3 .github/release/check-push-retry.py "$RUNNER_TEMP/release"
+      - name: Run the external consumer against the candidate before publication
+        shell: pwsh
+        run: .github/release/verify-published.ps1 -Registry candidate -ReleaseDirectory "$env:RUNNER_TEMP/release"
+      - name: Record manifest digest for this run
+        id: manifest
+        run: echo "sha256=$(sha256sum "$RUNNER_TEMP/release/release.json" | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        id: upload
+        with:
+          name: release-candidate-${{ github.event.pull_request.head.sha || github.sha }}
+          path: ${{ runner.temp }}/release/
+          if-no-files-found: error
+          include-hidden-files: true
+          retention-days: 30
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ steps.upload.outputs.artifact-id }}
+          path: ${{ runner.temp }}/downloaded-release
+          merge-multiple: true
+      - name: Verify the downloaded manifest and complete evidence round trip
+        run: |
+          cmp "$RUNNER_TEMP/release/release.json" "$RUNNER_TEMP/downloaded-release/release.json"
+          python3 .github/release/check-candidate.py "$RUNNER_TEMP/downloaded-release"
+        env:
+          RELEASE_EXPECTED_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+
+  publish:
+    name: Attest and publish verified packages
+    if: github.event_name == 'workflow_dispatch' && inputs.publish && github.repository == 'knightfall/scaleset.NET' && github.ref == 'refs/heads/main'
+    needs: build
+    environment: production
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      packages: write
+      id-token: write
+      attestations: write
+    env:
+      RELEASE_PUBLISH: 'true'
+      RELEASE_MANIFEST_SHA256: ${{ needs.build.outputs.manifest_sha256 }}
+      GH_TOKEN: ${{ github.token }}
+      DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          sparse-checkout: |
+            .github/release
+            global.json
+            docs/releases
+          sparse-checkout-cone-mode: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.build.outputs.artifact_id }}
+          path: ${{ runner.temp }}/release
+          merge-multiple: true
+      - uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
+        with:
+          global-json-file: global.json
+      - name: Verify source, package allowlist, and every artifact digest
+        run: python3 .github/release/verify.py "$RUNNER_TEMP/release"
+      - name: Verify protected release tag and main CI
+        shell: pwsh
+        run: .github/release/preflight.ps1
+      - name: Attest build provenance
+        id: provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: |
+            ${{ runner.temp }}/release/packages/*
+            ${{ runner.temp }}/release/release.json
+            ${{ runner.temp }}/release/_manifest/spdx_2.2/manifest.spdx.json
+          create-storage-record: false
+      - name: Attest build dependency SBOM
+        id: build_sbom
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: ${{ runner.temp }}/release/packages/*
+          sbom-path: ${{ runner.temp }}/release/_manifest/spdx_2.2/manifest.spdx.json
+          create-storage-record: false
+      - name: Verify provenance and SBOM bundles and exact subjects
+        run: python3 .github/release/verify-attestations.py "$RUNNER_TEMP/release"
+        env:
+          PROVENANCE_BUNDLE: ${{ steps.provenance.outputs.bundle-path }}
+          BUILD_SBOM_BUNDLE: ${{ steps.build_sbom.outputs.bundle-path }}
+      - name: Authenticate to NuGet using trusted publishing policy
+        id: nuget
+        uses: NuGet/login@8d196754b4036150537f80ac539e15c2f1028841 # v1.2.0
+        with:
+          user: knightfall
+      - name: Publish identical verified packages and draft release assets
+        shell: pwsh
+        run: .github/release/publish.ps1 -ReleaseDirectory "$env:RUNNER_TEMP/release"
+        env:
+          NUGET_API_KEY: ${{ steps.nuget.outputs.NUGET_API_KEY }}
+          PROVENANCE_BUNDLE: ${{ steps.provenance.outputs.bundle-path }}
+          BUILD_SBOM_BUNDLE: ${{ steps.build_sbom.outputs.bundle-path }}
+
+  verify-published:
+    name: Verify external consumption (${{ matrix.registry }})
+    if: github.event_name == 'workflow_dispatch' && inputs.publish && github.repository == 'knightfall/scaleset.NET' && github.ref == 'refs/heads/main'
+    needs: [build, publish]
+    strategy:
+      fail-fast: false
+      matrix:
+        registry: [nuget, github]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          sparse-checkout: |
+            .github/release
+            global.json
+          sparse-checkout-cone-mode: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.build.outputs.artifact_id }}
+          path: ${{ runner.temp }}/release
+          merge-multiple: true
+      - uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
+        with:
+          global-json-file: global.json
+      - name: Verify published package payloads and a fresh consumer
+        shell: pwsh
+        run: .github/release/verify-published.ps1 -Registry $env:RELEASE_REGISTRY -ReleaseDirectory "$env:RUNNER_TEMP/release"
+        env:
+          RELEASE_REGISTRY: ${{ matrix.registry }}
+          GH_TOKEN: ${{ github.token }}
+
+  announce:
+    name: Announce verified release
+    if: github.event_name == 'workflow_dispatch' && inputs.publish && github.repository == 'knightfall/scaleset.NET' && github.ref == 'refs/heads/main'
+    needs: verify-published
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - name: Publish release announcement after both registry consumers pass
+        run: gh release edit v0.1.0-alpha.1 --repo "$GITHUB_REPOSITORY" --draft=false
+        env:
+          GH_TOKEN: ${{ github.token }}
