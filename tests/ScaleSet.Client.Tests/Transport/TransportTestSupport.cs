@@ -55,6 +55,26 @@ internal static class TestResponses
         return $"{header}.{payload}.test-signature";
     }
 
+    public static RecordingHttpMessageHandler CreateConnectedHandler(
+        DateTimeOffset adminExpiry,
+        Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>> actionsHandler) =>
+        new(async (request, cancellationToken) =>
+        {
+            string path = request.RequestUri!.AbsolutePath;
+            if (path.EndsWith("/runners/registration-token", StringComparison.Ordinal))
+            {
+                return Json(HttpStatusCode.Created, "{\"token\":\"registration-token\"}");
+            }
+
+            if (path == "/actions/runner-registration")
+            {
+                string token = CreateAdminToken(adminExpiry);
+                return Json(HttpStatusCode.OK, $"{{\"url\":\"https://actions.example/tenant\",\"token\":\"{token}\"}}");
+            }
+
+            return await actionsHandler(request, cancellationToken).ConfigureAwait(false);
+        });
+
     private static string Base64Url(string value) =>
         Convert.ToBase64String(Encoding.UTF8.GetBytes(value))
             .TrimEnd('=')
@@ -79,4 +99,51 @@ internal sealed class ManualTimeProvider(DateTimeOffset now) : TimeProvider
         TimeSpan period) => new Timer(callback, state, dueTime, period);
 
     internal void Advance(TimeSpan duration) => _now += duration;
+}
+
+internal sealed class PartialReadStream(byte[] prefix, TaskCompletionSource? blockAfterPrefix = null) : Stream
+{
+    private int _step;
+
+    public override bool CanRead => true;
+
+    public override bool CanSeek => false;
+
+    public override bool CanWrite => false;
+
+    public override long Length => throw new NotSupportedException();
+
+    public override long Position
+    {
+        get => throw new NotSupportedException();
+        set => throw new NotSupportedException();
+    }
+
+    public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+    {
+        if (_step++ == 0)
+        {
+            prefix.CopyTo(buffer);
+            return prefix.Length;
+        }
+
+        if (blockAfterPrefix is not null)
+        {
+            blockAfterPrefix.TrySetResult();
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            return 0;
+        }
+
+        throw new IOException("stream interrupted mid-body");
+    }
+
+    public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+
+    public override void Flush() => throw new NotSupportedException();
+
+    public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+
+    public override void SetLength(long value) => throw new NotSupportedException();
+
+    public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
 }

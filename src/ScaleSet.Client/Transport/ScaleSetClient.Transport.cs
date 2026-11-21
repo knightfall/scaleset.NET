@@ -239,6 +239,10 @@ public sealed partial class ScaleSetClient
 
         var readOnly = dependency != "queue" && (method == HttpMethod.Get || method == HttpMethod.Head);
         var knownSecrets = CollectKnownSecrets(authorization, uri);
+        string safeUri = ScaleSetClientDiagnostics.CreateSafeUri(
+            uri,
+            knownSecrets,
+            redactPath: dependency == "queue").AbsoluteUri;
         var transientRetries = 0;
         var authenticationRetries = 0;
         while (true)
@@ -294,9 +298,7 @@ public sealed partial class ScaleSetClient
                     "ScaleSet HTTP request timed out.",
                     statusCode: null,
                     method: method.Method,
-                    safeUri: ScaleSetClientDiagnostics.CreateSafeUri(
-                        uri,
-                        redactPath: dependency == "queue").AbsoluteUri);
+                    safeUri: safeUri);
                 LogFailure(exception, uri);
                 throw exception;
             }
@@ -325,9 +327,7 @@ public sealed partial class ScaleSetClient
                     "ScaleSet HTTP transport failed.",
                     statusCode: null,
                     method: method.Method,
-                    safeUri: ScaleSetClientDiagnostics.CreateSafeUri(
-                        uri,
-                        redactPath: dependency == "queue").AbsoluteUri);
+                    safeUri: safeUri);
                 LogFailure(exception, uri);
                 throw exception;
             }
@@ -350,51 +350,43 @@ public sealed partial class ScaleSetClient
                         return default;
                     }
 
-                    byte[] responseBody;
-                    try
+                    ScaleSetClientDiagnostics.ResponseBodyReadResult bodyRead =
+                        await ScaleSetClientDiagnostics.ReadResponseBytesAsync(
+                            response,
+                            int.MaxValue,
+                            cancellationToken,
+                            linkedSource.Token).ConfigureAwait(false);
+                    if (bodyRead.Failure != ScaleSetClientDiagnostics.ResponseBodyReadFailure.None)
                     {
-                        responseBody = await ReadResponseBodyAsync(response, linkedSource.Token).ConfigureAwait(false);
-                    }
-                    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-                    {
-                        activity?.SetTag("error.type", "caller_canceled");
-                        activity?.SetStatus(ActivityStatusCode.Error, "caller canceled response read");
-                        throw new OperationCanceledException("The ScaleSet response read was canceled by the caller.", cancellationToken);
-                    }
-                    catch (OperationCanceledException)
-                    {
-                        activity?.SetTag("error.type", "response_timeout");
-                        activity?.SetStatus(ActivityStatusCode.Error, "response body read timed out");
-                        var wrapped = CreateResponseException(
+                        ScaleSetResponseSnapshot snapshot = ScaleSetResponseSnapshot.FromHttpResponse(
+                            response,
+                            bodyRead.RawBytes,
+                            bodyRead.IsIncomplete,
+                            bodyRead.Truncated);
+                        bool isTimeout = bodyRead.Failure == ScaleSetClientDiagnostics.ResponseBodyReadFailure.AttemptTimedOut;
+                        activity?.SetTag("error.type", isTimeout ? "response_timeout" : "response_read");
+                        activity?.SetStatus(ActivityStatusCode.Error, isTimeout ? "response body read timed out" : "response body read failed");
+                        ScaleSetClientDiagnostics.RecordAttempt(
+                            dependency,
+                            method.Method,
+                            statusCode,
+                            _timeProvider.GetElapsedTime(startTimestamp).TotalSeconds);
+                        ScaleSetApiException wrapped = CreateResponseException(
                             response,
                             method,
-                            uri,
+                            safeUri,
                             [],
                             truncated: false,
                             queueTokenOnUnauthorized: false,
-                            redactPath: dependency == "queue",
                             knownSecrets: knownSecrets,
-                            message: "ScaleSet response body read timed out.");
+                            snapshot: snapshot,
+                            message: isTimeout
+                                ? "ScaleSet response body read timed out."
+                                : "ScaleSet response body could not be read.");
                         LogFailure(wrapped, uri);
                         throw wrapped;
                     }
-                    catch (Exception exception) when (exception is HttpRequestException or IOException)
-                    {
-                        activity?.SetTag("error.type", "response_read");
-                        activity?.SetStatus(ActivityStatusCode.Error, "response body read failed");
-                        var wrapped = CreateResponseException(
-                            response,
-                            method,
-                            uri,
-                            [],
-                            truncated: false,
-                            queueTokenOnUnauthorized: false,
-                            redactPath: dependency == "queue",
-                            knownSecrets: knownSecrets,
-                            message: "ScaleSet response body could not be read.");
-                        LogFailure(wrapped, uri);
-                        throw wrapped;
-                    }
+
                     ScaleSetClientDiagnostics.RecordAttempt(
                         dependency,
                         method.Method,
@@ -402,21 +394,27 @@ public sealed partial class ScaleSetClient
                         _timeProvider.GetElapsedTime(startTimestamp).TotalSeconds);
                     try
                     {
-                        return decode(responseBody);
+                        byte[] decodedInput = ScaleSetClientDiagnostics.TrimUtf8Bom(bodyRead.RawBytes).ToArray();
+                        return decode(decodedInput);
                     }
                     catch (Exception exception) when (IsDecodeFailure(exception))
                     {
                         activity?.SetTag("error.type", "response_decode");
                         activity?.SetStatus(ActivityStatusCode.Error, "response body decode failed");
-                        var wrapped = CreateResponseException(
+                        ScaleSetResponseSnapshot snapshot = ScaleSetResponseSnapshot.FromHttpResponse(
+                            response,
+                            bodyRead.RawBytes,
+                            isBodyIncomplete: false,
+                            isBodyTruncated: false);
+                        ScaleSetApiException wrapped = CreateResponseException(
                             response,
                             method,
-                            uri,
-                            responseBody,
+                            safeUri,
+                            bodyRead.RawBytes,
                             truncated: false,
                             queueTokenOnUnauthorized: false,
-                            redactPath: dependency == "queue",
                             knownSecrets: knownSecrets,
+                            snapshot: snapshot,
                             message: "ScaleSet response body could not be decoded.");
                         LogFailure(wrapped, uri);
                         throw wrapped;
@@ -460,47 +458,17 @@ public sealed partial class ScaleSetClient
                 }
 
                 activity?.SetStatus(ActivityStatusCode.Error, $"HTTP {statusCode}");
-                (byte[] Body, bool Truncated) boundedBody;
-                try
-                {
-                    boundedBody = await ScaleSetClientDiagnostics.ReadBoundedErrorBodyAsync(
+                ScaleSetClientDiagnostics.ResponseBodyReadResult errorBodyRead =
+                    await ScaleSetClientDiagnostics.ReadResponseBytesAsync(
                         response,
+                        ScaleSetClientDiagnostics.MaximumErrorBodyBytes,
+                        cancellationToken,
                         linkedSource.Token).ConfigureAwait(false);
-                }
-                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-                {
-                    throw new OperationCanceledException("The ScaleSet error response read was canceled by the caller.", cancellationToken);
-                }
-                catch (OperationCanceledException)
-                {
-                    var wrapped = CreateResponseException(
-                        response,
-                        method,
-                        uri,
-                        [],
-                        truncated: false,
-                        queueTokenOnUnauthorized: queueTokenOnUnauthorized,
-                        redactPath: dependency == "queue",
-                        knownSecrets: knownSecrets,
-                        message: "ScaleSet error response body read timed out.");
-                    LogFailure(wrapped, uri);
-                    throw wrapped;
-                }
-                catch (Exception exception) when (exception is HttpRequestException or IOException)
-                {
-                    var wrapped = CreateResponseException(
-                        response,
-                        method,
-                        uri,
-                        [],
-                        truncated: false,
-                        queueTokenOnUnauthorized: queueTokenOnUnauthorized,
-                        redactPath: dependency == "queue",
-                        knownSecrets: knownSecrets,
-                        message: "ScaleSet error response body could not be read.");
-                    LogFailure(wrapped, uri);
-                    throw wrapped;
-                }
+                ScaleSetResponseSnapshot errorSnapshot = ScaleSetResponseSnapshot.FromHttpResponse(
+                    response,
+                    errorBodyRead.RawBytes,
+                    errorBodyRead.IsIncomplete,
+                    errorBodyRead.Truncated);
 
                 activity?.SetTag("error.type", $"http_{statusCode}");
                 ScaleSetClientDiagnostics.RecordAttempt(
@@ -508,15 +476,14 @@ public sealed partial class ScaleSetClient
                     method.Method,
                     statusCode,
                     _timeProvider.GetElapsedTime(startTimestamp).TotalSeconds);
-                var failure = CreateResponseException(
+                ScaleSetApiException failure = CreateResponseExceptionForReadResult(
                     response,
                     method,
-                    uri,
-                    boundedBody.Body,
-                    boundedBody.Truncated,
+                    safeUri,
+                    errorBodyRead,
                     queueTokenOnUnauthorized: queueTokenOnUnauthorized,
-                    redactPath: dependency == "queue",
-                    knownSecrets: knownSecrets);
+                    knownSecrets: knownSecrets,
+                    snapshot: errorSnapshot);
                 LogFailure(failure, uri);
                 throw failure;
             }
@@ -584,22 +551,49 @@ public sealed partial class ScaleSetClient
         }
     }
 
+    private static ScaleSetApiException CreateResponseExceptionForReadResult(
+        HttpResponseMessage response,
+        HttpMethod method,
+        string safeUri,
+        ScaleSetClientDiagnostics.ResponseBodyReadResult bodyRead,
+        bool queueTokenOnUnauthorized,
+        IReadOnlyCollection<string> knownSecrets,
+        ScaleSetResponseSnapshot snapshot)
+    {
+        string? message = bodyRead.Failure switch
+        {
+            ScaleSetClientDiagnostics.ResponseBodyReadFailure.AttemptTimedOut => "ScaleSet error response body read timed out.",
+            ScaleSetClientDiagnostics.ResponseBodyReadFailure.ReadError => "ScaleSet error response body could not be read.",
+            _ => null,
+        };
+        ReadOnlySpan<byte> previewBytes = bodyRead.IsIncomplete ? [] : bodyRead.RawBytes;
+        return CreateResponseException(
+            response,
+            method,
+            safeUri,
+            previewBytes,
+            bodyRead.Truncated,
+            queueTokenOnUnauthorized,
+            knownSecrets,
+            snapshot,
+            message);
+    }
+
     private static ScaleSetApiException CreateResponseException(
         HttpResponseMessage response,
         HttpMethod method,
-        Uri uri,
+        string safeUri,
         ReadOnlySpan<byte> body,
         bool truncated,
         bool queueTokenOnUnauthorized,
-        bool redactPath,
         IReadOnlyCollection<string> knownSecrets,
+        ScaleSetResponseSnapshot snapshot,
         string? message = null)
     {
         var status = (int)response.StatusCode;
         var domainError = queueTokenOnUnauthorized && response.StatusCode == HttpStatusCode.Unauthorized
             ? ScaleSetDomainError.MessageQueueTokenExpired
             : ScaleSetClientDiagnostics.ParseDomainError(body);
-        var safeUri = ScaleSetClientDiagnostics.CreateSafeUri(uri, knownSecrets, redactPath).AbsoluteUri;
         var activityId = ScaleSetClientDiagnostics.CorrelationHeader(response, "ActivityId", knownSecrets);
         var githubRequestId = ScaleSetClientDiagnostics.CorrelationHeader(response, "X-GitHub-Request-Id", knownSecrets);
         var bodyPreview = ScaleSetClientDiagnostics.CreateBodyPreview(body, truncated, knownSecrets);
@@ -612,7 +606,8 @@ public sealed partial class ScaleSetClient
             safeUri: safeUri,
             activityId: activityId.Length == 0 ? null : activityId,
             githubRequestId: githubRequestId.Length == 0 ? null : githubRequestId,
-            bodyPreview: bodyPreview);
+            bodyPreview: bodyPreview,
+            response: snapshot);
     }
 
     private void LogFailure(ScaleSetApiException exception, Uri requestUri)
@@ -682,24 +677,6 @@ public sealed partial class ScaleSetClient
             ? serverRetryAfter
             : jittered;
         await Task.Delay(delay, _timeProvider, cancellationToken).ConfigureAwait(false);
-    }
-
-    private static async Task<byte[]> ReadResponseBodyAsync(
-        HttpResponseMessage response,
-        CancellationToken cancellationToken)
-    {
-        if (response.Content is null)
-        {
-            return [];
-        }
-
-        var bytes = await response.Content.ReadAsByteArrayAsync(cancellationToken).ConfigureAwait(false);
-        if (bytes.Length >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF)
-        {
-            return bytes.AsSpan(3).ToArray();
-        }
-
-        return bytes;
     }
 
     private static bool IsExpectedStatus(HttpStatusCode statusCode, int expectedStatus)

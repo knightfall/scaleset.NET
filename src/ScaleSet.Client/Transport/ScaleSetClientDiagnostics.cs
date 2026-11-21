@@ -18,7 +18,7 @@ public static class ScaleSetClientTelemetry
 
 internal static partial class ScaleSetClientDiagnostics
 {
-    private const int MaximumErrorBodyBytes = 4096;
+    internal const int MaximumErrorBodyBytes = 65536;
     private const int MaximumPreviewCharacters = 1024;
     private const int MaximumCorrelationCharacters = 128;
 
@@ -101,33 +101,78 @@ internal static partial class ScaleSetClientDiagnostics
         _ => "OTHER",
     };
 
-    internal static async ValueTask<(byte[] Body, bool Truncated)> ReadBoundedErrorBodyAsync(
+    internal static async ValueTask<ResponseBodyReadResult> ReadResponseBytesAsync(
         HttpResponseMessage response,
-        CancellationToken cancellationToken)
+        int maxBytes,
+        CancellationToken callerToken,
+        CancellationToken attemptLinkedToken)
     {
         if (response.Content is null)
         {
-            return ([], false);
+            return new ResponseBodyReadResult([], false, false, ResponseBodyReadFailure.None);
         }
 
-        await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
-        var buffer = new byte[MaximumErrorBodyBytes + 1];
-        var offset = 0;
-        while (offset < buffer.Length)
+        await using MemoryStream memory = new();
+        byte[] buffer = new byte[8192];
+        bool truncated = false;
+        int totalRead = 0;
+
+        try
         {
-            var read = await stream.ReadAsync(buffer.AsMemory(offset), cancellationToken).ConfigureAwait(false);
-            if (read == 0)
+            await using Stream stream = await response.Content.ReadAsStreamAsync(attemptLinkedToken).ConfigureAwait(false);
+            while (true)
             {
-                break;
+                int remainingWithProbe = maxBytes == int.MaxValue
+                    ? buffer.Length
+                    : Math.Min(buffer.Length, (maxBytes + 1) - totalRead);
+                if (remainingWithProbe <= 0)
+                {
+                    truncated = true;
+                    break;
+                }
+
+                int read = await stream.ReadAsync(buffer.AsMemory(0, remainingWithProbe), attemptLinkedToken).ConfigureAwait(false);
+                if (read == 0)
+                {
+                    break;
+                }
+
+                if (maxBytes != int.MaxValue && totalRead + read > maxBytes)
+                {
+                    int writable = maxBytes - totalRead;
+                    if (writable > 0)
+                    {
+                        memory.Write(buffer, 0, writable);
+                    }
+
+                    truncated = true;
+                    break;
+                }
+
+                memory.Write(buffer, 0, read);
+                totalRead += read;
             }
 
-            offset += read;
+            return new ResponseBodyReadResult(memory.ToArray(), truncated, IsIncomplete: false, ResponseBodyReadFailure.None);
         }
-
-        var truncated = offset > MaximumErrorBodyBytes;
-        var length = Math.Min(offset, MaximumErrorBodyBytes);
-        return (buffer.AsSpan(0, length).ToArray(), truncated);
+        catch (OperationCanceledException) when (callerToken.IsCancellationRequested)
+        {
+            throw new OperationCanceledException("The ScaleSet response read was canceled by the caller.", callerToken);
+        }
+        catch (OperationCanceledException)
+        {
+            return new ResponseBodyReadResult(memory.ToArray(), Truncated: false, IsIncomplete: true, ResponseBodyReadFailure.AttemptTimedOut);
+        }
+        catch (Exception exception) when (exception is HttpRequestException or IOException)
+        {
+            return new ResponseBodyReadResult(memory.ToArray(), Truncated: false, IsIncomplete: true, ResponseBodyReadFailure.ReadError);
+        }
     }
+
+    internal static ReadOnlySpan<byte> TrimUtf8Bom(ReadOnlySpan<byte> bytes) =>
+        bytes.Length >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF
+            ? bytes[3..]
+            : bytes;
 
     internal static string? CreateBodyPreview(
         ReadOnlySpan<byte> body,
@@ -366,4 +411,17 @@ internal static partial class ScaleSetClientDiagnostics
 
     [GeneratedRegex("""(?i)([\"']?\b(?:access[_-]?token|messagequeueaccesstoken|admin[_-]?token|token|secret|password|authorization|private[_-]?key|encodedjitconfig)\b[\"']?\s*[:=]\s*)(\"[^\"]*\"|'[^']*'|[^,;\s}]+)""")]
     private static partial Regex NamedSecretRegex();
+
+    internal enum ResponseBodyReadFailure
+    {
+        None = 0,
+        AttemptTimedOut = 1,
+        ReadError = 2,
+    }
+
+    internal readonly record struct ResponseBodyReadResult(
+        byte[] RawBytes,
+        bool Truncated,
+        bool IsIncomplete,
+        ResponseBodyReadFailure Failure);
 }
