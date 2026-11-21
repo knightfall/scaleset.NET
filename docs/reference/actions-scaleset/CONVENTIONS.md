@@ -1,7 +1,7 @@
 # Go Reference: Coding Conventions
 
 Observed upstream conventions at commit
-`e6daac702355cdb5b880b4fbdcf6d85dcd9e48e5`. C# recommendations are separate
+`716908e507993947ada4273aecf2361c02e5836c`. C# recommendations are separate
 in [the product roadmap](../../product/ROADMAP.md).
 
 ## 1) Naming Rules
@@ -34,11 +34,13 @@ public packages; `internal/testserver` is internal test infrastructure.
 ## 4) Error and Logging Conventions
 
 Methods accept `context.Context`, return values plus `error`, and add context
-through `%w`. Status sentinels coexist with runner-domain sentinels, allowing
-`errors.Is` matching. Error details include method, URL, HTTP status, ActivityId,
-and X-GitHub-Request-Id. Errors may include response bodies. `slog` handles
-structured logging and defaults to a discard logger. Source advises treating
-JIT configs as secrets; no universal response-body redaction layer is visible.
+through `%w`. Status sentinels coexist with runner-domain, rate-limit, and
+retry-budget error handling, allowing `errors.Is` and typed error matching.
+Error details include method, URL, HTTP status, ActivityId, and
+X-GitHub-Request-Id, alongside bounded HTTP response data (`#144`) and strict
+JSON/null response decoding (`#145`). `slog` handles structured logging and
+defaults to a discard logger. Source advises treating JIT configs as secrets;
+no universal response-body redaction layer is visible.
 
 ## 5) Testing Conventions
 
@@ -49,8 +51,8 @@ threshold or measured coverage was found in the inspected CI/configuration.
 
 ## 6) Evidence
 
-- [Errors](https://github.com/actions/scaleset/blob/e6daac702355cdb5b880b4fbdcf6d85dcd9e48e5/errors.go)
-- [Types](https://github.com/actions/scaleset/blob/e6daac702355cdb5b880b4fbdcf6d85dcd9e48e5/types.go)
-- [Lint config](https://github.com/actions/scaleset/blob/e6daac702355cdb5b880b4fbdcf6d85dcd9e48e5/.golangci.yaml)
-- [Mock generator](https://github.com/actions/scaleset/blob/e6daac702355cdb5b880b4fbdcf6d85dcd9e48e5/.mockery.yml)
-- [Listener tests](https://github.com/actions/scaleset/blob/e6daac702355cdb5b880b4fbdcf6d85dcd9e48e5/listener/listener_test.go)
+- [Errors](https://github.com/actions/scaleset/blob/716908e507993947ada4273aecf2361c02e5836c/errors.go)
+- [Types](https://github.com/actions/scaleset/blob/716908e507993947ada4273aecf2361c02e5836c/types.go)
+- [Lint config](https://github.com/actions/scaleset/blob/716908e507993947ada4273aecf2361c02e5836c/.golangci.yaml)
+- [Mock generator](https://github.com/actions/scaleset/blob/716908e507993947ada4273aecf2361c02e5836c/.mockery.yml)
+- [Listener tests](https://github.com/actions/scaleset/blob/716908e507993947ada4273aecf2361c02e5836c/listener/listener_test.go)

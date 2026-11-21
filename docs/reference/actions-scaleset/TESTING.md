@@ -1,7 +1,7 @@
 # Go Reference: Testing Patterns
 
 Source baseline: `actions/scaleset` at
-`e6daac702355cdb5b880b4fbdcf6d85dcd9e48e5`.
+`716908e507993947ada4273aecf2361c02e5836c`.
 
 ## 1) Test Stack and Commands
 
@@ -54,7 +54,7 @@ alone cannot establish supported live environments.
 ## 6) Evidence
 
 - [Executed baseline](../../product/VERIFICATION.md)
-- [Session tests](https://github.com/actions/scaleset/blob/e6daac702355cdb5b880b4fbdcf6d85dcd9e48e5/session_client_test.go)
-- [Listener tests](https://github.com/actions/scaleset/blob/e6daac702355cdb5b880b4fbdcf6d85dcd9e48e5/listener/listener_test.go)
-- [TLS assertion](https://github.com/actions/scaleset/blob/e6daac702355cdb5b880b4fbdcf6d85dcd9e48e5/client_test.go#L1468)
-- [E2E gate](https://github.com/actions/scaleset/blob/e6daac702355cdb5b880b4fbdcf6d85dcd9e48e5/examples/dockerscaleset/e2e_test.go#L22)
+- [Session tests](https://github.com/actions/scaleset/blob/716908e507993947ada4273aecf2361c02e5836c/session_client_test.go)
+- [Listener tests](https://github.com/actions/scaleset/blob/716908e507993947ada4273aecf2361c02e5836c/listener/listener_test.go)
+- [TLS assertion](https://github.com/actions/scaleset/blob/716908e507993947ada4273aecf2361c02e5836c/client_test.go)
+- [E2E gate](https://github.com/actions/scaleset/blob/716908e507993947ada4273aecf2361c02e5836c/examples/dockerscaleset/e2e_test.go)

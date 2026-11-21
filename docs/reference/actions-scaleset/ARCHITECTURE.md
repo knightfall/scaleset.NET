@@ -1,7 +1,8 @@
 # Go Reference Architecture
 
 This guide records the observed Go reference architecture at commit
-`e6daac702355cdb5b880b4fbdcf6d85dcd9e48e5`. See the product roadmap and
+`716908e507993947ada4273aecf2361c02e5836c` (updating the earlier
+`e6daac702355cdb5b880b4fbdcf6d85dcd9e48e5` baseline with upstream PRs `#130`–`#145`). See the product roadmap and
 implementation notes for scaleset.NET design and current status.
 
 ## 1) Architectural Style
@@ -47,8 +48,9 @@ flowchart LR
 | Module | Owns | Delegates | Evidence |
 |---|---|---|---|
 | `Client` | Admin-token refresh, API requests, message parser | Container lifecycle | `client.go` |
-| `commonClient` | Transport, buffering, retry configuration | Business policy | `common_client.go` |
-| `MessageSessionClient` | Queue token, refresh-on-401, acquisition HTTP | Which jobs to acquire | `session_client.go` |
+| `commonClient` / `http_client.go` | SDK-owned per-request retries, `MaxElapsed`/deadline wait skipping, rate-limit hooks, `WithRequestRetry`, `NewHTTPClient` & HTTP/2 pings | Caller-injected `HTTPClient` transport & business policy | `common_client.go`, `http_client.go` |
+| `MessageSessionClient` | Queue token, refresh-on-401, acquisition HTTP, `MessagePollTimeout` per poll attempt | Which jobs to acquire | `session_client.go` |
+| `errors.go` | `RequestResponseError` response snapshots, `RateLimitError` (`Primary`/`Secondary`), `MaxElapsedExceededError`, URL redaction | Call-site retry/requeue handling | `errors.go` |
 | `Listener` | Ordered callbacks and ack sequencing | Scaling and runner state | `listener/listener.go` |
 | Docker `Scaler` | Additive minimum, event handling, container state | HTTP details | `examples/dockerscaleset/scaler.go` |
 
@@ -74,8 +76,10 @@ These are source-derived design considerations, not validated production inciden
 
 ## 6) Evidence
 
-- [Client/authentication](https://github.com/actions/scaleset/blob/e6daac702355cdb5b880b4fbdcf6d85dcd9e48e5/client.go)
-- [Session](https://github.com/actions/scaleset/blob/e6daac702355cdb5b880b4fbdcf6d85dcd9e48e5/session_client.go)
-- [Listener](https://github.com/actions/scaleset/blob/e6daac702355cdb5b880b4fbdcf6d85dcd9e48e5/listener/listener.go)
-- [Docker scaler](https://github.com/actions/scaleset/blob/e6daac702355cdb5b880b4fbdcf6d85dcd9e48e5/examples/dockerscaleset/scaler.go)
-- [Runner DTO](https://github.com/actions/scaleset/blob/e6daac702355cdb5b880b4fbdcf6d85dcd9e48e5/types.go#L152)
+- [Client/authentication](https://github.com/actions/scaleset/blob/716908e507993947ada4273aecf2361c02e5836c/client.go)
+- [HTTP client and retries](https://github.com/actions/scaleset/blob/716908e507993947ada4273aecf2361c02e5836c/http_client.go)
+- [Errors and rate limits](https://github.com/actions/scaleset/blob/716908e507993947ada4273aecf2361c02e5836c/errors.go)
+- [Session](https://github.com/actions/scaleset/blob/716908e507993947ada4273aecf2361c02e5836c/session_client.go)
+- [Listener](https://github.com/actions/scaleset/blob/716908e507993947ada4273aecf2361c02e5836c/listener/listener.go)
+- [Docker scaler](https://github.com/actions/scaleset/blob/716908e507993947ada4273aecf2361c02e5836c/examples/dockerscaleset/scaler.go)
+- [Runner DTO](https://github.com/actions/scaleset/blob/716908e507993947ada4273aecf2361c02e5836c/types.go)

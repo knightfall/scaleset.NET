@@ -1,10 +1,10 @@
 # GitHub API and Message Protocol Contract
 
-Baseline: [actions/scaleset, e6daac702355cdb5b880b4fbdcf6d85dcd9e48e5](https://github.com/actions/scaleset/tree/e6daac702355cdb5b880b4fbdcf6d85dcd9e48e5).
+Baseline: [actions/scaleset, 716908e507993947ada4273aecf2361c02e5836c](https://github.com/actions/scaleset/tree/716908e507993947ada4273aecf2361c02e5836c).
 The .NET client and listener implement the listed GitHub API and message
-contracts for the currently supported GitHub.com targets. Deterministic
-wire/fake-handler tests cover these behaviors; they do not establish live
-GitHub workflow compatibility. See the
+contracts for the currently supported GitHub.com and GitHub Enterprise Cloud
+targets. Deterministic wire/fake-handler tests cover these behaviors; they do
+not establish live GitHub workflow compatibility. See the
 [client verification evidence](../implementation/CLIENT.md).
 
 ## URL and credential domains
@@ -16,9 +16,9 @@ rather than shared mutable default Authorization headers.
 
 | Contract | Source | Required C# behavior |
 |---|---|---|
-| Registration scope | `config.go`, `createRegistrationTokenPath` | Current repo/org URL parser and correct `/repos/{org}/{repo}` or `/orgs/{org}` paths |
-| Hosted API host | `config.go` | `github.com`/`www.github.com` map to `api.github.com`; validate supported origins |
-| Other hosts/enterprise | `config.go` | Record as deferred support, reject clearly rather than advertise unvalidated GHES/enterprise compatibility |
+| Registration scope | `config.go`, `createRegistrationTokenPath` | Repo/org/enterprise URL parser and `/repos/{org}/{repo}`, `/orgs/{org}`, or `/enterprises/{enterprise}` paths (GitHub App and PAT auth) |
+| Hosted API host | `config.go` | `github.com`/`www.github.com` map to `api.github.com`; valid GHEC `*.ghe.com` hosts map to `api.<host>`; validate supported origins |
+| Other hosts/custom TLS | `config.go` | Custom GHES hosts and custom root CA/mTLS transport factories are deferred; reject unsupported hosts clearly rather than advertising unvalidated GHES compatibility |
 | App token | `jwt_provider.go`, `fetchAccessToken` | RS256; issuer ClientID; iat now-1 minute; exp iat+9 minutes; installation-token POST returns 201 |
 | PAT | `getRunnerRegistrationToken` | Bearer PAT; mutually exclusive with App auth |
 | Registration token | `getRunnerRegistrationToken` | POST scoped runners/registration-token; expect 201 |
@@ -38,16 +38,16 @@ content type is application/json and Authorization is the admin bearer token.
 
 | Reference operation | scaleset.NET operation | Verb/path and success/result contract |
 |---|---|---|
-| GetRunnerScaleSet | `FindScaleSetAsync` | GET `_apis/runtime/runnerscalesets?runnerGroupId=...&name=...`; 200; zero returns null, one returns object, multiple fail |
-| ListRunnerScaleSets | `ListScaleSetsAsync` | GET same collection with runnerGroupId only; decode `value` array |
+| GetRunnerScaleSet | `FindScaleSetAsync` | GET `_apis/runtime/runnerscalesets?runnerGroupId=...&name=...`; 200; zero returns null, one returns object, multiple/null-JSON fail |
+| ListRunnerScaleSets | `ListScaleSetsAsync` | GET same collection with runnerGroupId only; decode `value` array; reject `null`/invalid JSON |
 | GetRunnerScaleSetByID | `GetScaleSetAsync` | GET collection/{id}; deserialize object/null as received |
-| GetRunnerGroupByName | `GetRunnerGroupByNameAsync` | GET `_apis/runtime/runnergroups/?groupName=...`; zero/multiple groups fail |
-| CreateRunnerScaleSet | `CreateScaleSetAsync` | POST scale-set collection; default absent labels to scale-set name; label type defaults to System |
-| UpdateRunnerScaleSet | `UpdateScaleSetAsync` | PATCH collection/{id}; default supplied label types, without create-only name-label fallback |
+| GetRunnerGroupByName | `GetRunnerGroupByNameAsync` | GET `_apis/runtime/runnergroups/?groupName=...`; zero/multiple groups or `null`/invalid JSON fail |
+| CreateRunnerScaleSet | `CreateScaleSetAsync` | POST scale-set collection; default absent labels to scale-set name; label type defaults to System; reject `null`/invalid JSON |
+| UpdateRunnerScaleSet | `UpdateScaleSetAsync` | PATCH collection/{id}; default supplied label types, without create-only name-label fallback; reject `null`/invalid JSON |
 | DeleteRunnerScaleSet | `DeleteScaleSetAsync` | DELETE collection/{id}; 204 |
-| GenerateJitRunnerConfig | `GenerateJitConfigAsync` | POST collection/{id}/generatejitconfig; name/workFolder body; runner plus `encodedJITConfig` |
-| GetRunner | `GetRunnerAsync` | GET `_apis/distributedtask/pools/0/agents/{id}`; 200 |
-| GetRunnerByName | `FindRunnerByNameAsync` | GET agents?agentName=...; zero=null; multiple fail |
+| GenerateJitRunnerConfig | `GenerateJitConfigAsync` | POST collection/{id}/generatejitconfig; name/workFolder body; runner plus `encodedJITConfig`; reject `null`/invalid JSON |
+| GetRunner | `GetRunnerAsync` | GET `_apis/distributedtask/pools/0/agents/{id}`; 200 (preserves JSON `null`) |
+| GetRunnerByName | `FindRunnerByNameAsync` | GET agents?agentName=...; zero=null; multiple or `null`/invalid JSON fail |
 | RemoveRunner | `RemoveRunnerAsync` | DELETE agents/{id}; preserve JobStillRunning/NotFound classifications |
 | MessageSessionClient | `CreateMessageSessionAsync` | POST scale-set/{id}/sessions; ownerName body; initialized session object |
 
@@ -121,10 +121,21 @@ Stable scale-set identity; owned-resource discovery; replay-safe state;
 bounded parallel provisioning; two named scaling policies; explicit idle
 retirement; safe drain; configurable resources; packaged deployment and
 telemetry. These are application changes, not invented changes to GitHub's
-HTTP/message semantics. The transport retries selected read-only failures;
-valid 429/503 `Retry-After` values are honored up to one minute. It does not
-blindly replay mutations or automatically retry/hedge long polls. Queue-token
-401 refresh and registration-discovery auth retries remain operation-specific.
+HTTP/message semantics. The owned `SocketsHttpHandler` disables auto-redirects,
+enables HTTP/2 keep-alive pings (`KeepAlivePingDelay = 30s`,
+`KeepAlivePingTimeout = 10s`), and negotiates `HttpVersion.Version20`
+(`RequestVersionOrLower`, propagated onto outgoing requests). Default
+`ScaleSetClientOptions` retries bounded read-only transient failures and honors
+`Retry-After` up to one minute, while opt-in `ScaleSetRetryOptions` (including
+`CreateUpstreamDefault()`, `Disabled`, custom `ShouldRetry`/`Backoff`,
+`OnRateLimit`/`ScaleSetRateLimitPolicies`, and `ScaleSetRequestRetry` per-call
+scopes) adds upstream-compatible retry and rate-limit policies. Primary and
+secondary rate limits surface as `ScaleSetRateLimitException`, expired
+`MaxElapsed` budgets raise `ScaleSetMaxElapsedExceededException`, expired
+`Deadline` budgets raise `OperationCanceledException`, and `ScaleSetApiException.Response`
+carries a bounded inspectable `ScaleSetResponseSnapshot`. It does
+not automatically retry long-poll `queue` receives; queue-token 401 refresh and
+registration-discovery auth retries remain operation-specific.
 
 Confirmed D12 adds drain-and-preserve shutdown: stop acquisition/provisioning,
 allow a bounded drain, then exit without stopping busy/unknown runners or
@@ -134,8 +145,8 @@ resources; preservation does not guarantee survival of Docker-host shutdown.
 
 ## Evidence
 
-- [Client](https://github.com/actions/scaleset/blob/e6daac702355cdb5b880b4fbdcf6d85dcd9e48e5/client.go)
-- [Session client](https://github.com/actions/scaleset/blob/e6daac702355cdb5b880b4fbdcf6d85dcd9e48e5/session_client.go)
-- [Wire types](https://github.com/actions/scaleset/blob/e6daac702355cdb5b880b4fbdcf6d85dcd9e48e5/types.go)
-- [Listener](https://github.com/actions/scaleset/blob/e6daac702355cdb5b880b4fbdcf6d85dcd9e48e5/listener/listener.go)
-- [HTTP behavior](https://github.com/actions/scaleset/blob/e6daac702355cdb5b880b4fbdcf6d85dcd9e48e5/common_client.go)
+- [Client](https://github.com/actions/scaleset/blob/716908e507993947ada4273aecf2361c02e5836c/client.go)
+- [Session client](https://github.com/actions/scaleset/blob/716908e507993947ada4273aecf2361c02e5836c/session_client.go)
+- [Wire types](https://github.com/actions/scaleset/blob/716908e507993947ada4273aecf2361c02e5836c/types.go)
+- [Listener](https://github.com/actions/scaleset/blob/716908e507993947ada4273aecf2361c02e5836c/listener/listener.go)
+- [HTTP behavior](https://github.com/actions/scaleset/blob/716908e507993947ada4273aecf2361c02e5836c/common_client.go)
