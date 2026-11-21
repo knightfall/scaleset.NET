@@ -1,0 +1,11 @@
+# Release trust boundaries and executable supply-chain inputs.
+/.github/ @knightfall
+/Directory.* @knightfall
+/global.json @knightfall
+/NuGet.Config @knightfall
+/**/*.lock.json @knightfall
+/Dockerfile @knightfall
+/src/**/*.csproj @knightfall
+/LICENSE @knightfall
+/THIRD-PARTY-NOTICES.md @knightfall
+/docs/releases/ @knightfall
