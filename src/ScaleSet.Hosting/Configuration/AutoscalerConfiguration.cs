@@ -1,5 +1,6 @@
 using System.Globalization;
 using Microsoft.Extensions.Configuration;
+using ScaleSet.Client;
 using ScaleSet.Hosting.Scaling;
 
 namespace ScaleSet.Hosting.Configuration;
@@ -334,7 +335,7 @@ public static class AutoscalerConfiguration
 
         if (!TryParseGitHubScope(scaleSet.GithubUrl, out GitHubScope scope))
         {
-            errors.Add($"{path}.GithubUrl must be an HTTPS GitHub.com organization or repository URL.");
+            errors.Add($"{path}.GithubUrl must be an HTTPS GitHub.com or GitHub Enterprise Cloud (*.ghe.com) organization, repository, or enterprise URL.");
         }
         else if (!string.IsNullOrWhiteSpace(scaleSet.Name))
         {
@@ -565,46 +566,43 @@ public static class AutoscalerConfiguration
     private static bool TryParseGitHubScope(string? value, out GitHubScope scope)
     {
         scope = default;
-        if (string.IsNullOrWhiteSpace(value)
-            || !Uri.TryCreate(value, UriKind.Absolute, out Uri? uri)
-            || !string.Equals(uri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)
-            || !string.Equals(uri.Host, "github.com", StringComparison.OrdinalIgnoreCase)
-            || !uri.IsDefaultPort
-            || uri.UserInfo.Length > 0
-            || uri.Query.Length > 0
-            || uri.Fragment.Length > 0)
+        if (string.IsNullOrWhiteSpace(value))
         {
             return false;
         }
 
-        string[] pathSegments = uri.AbsolutePath.Split('/', StringSplitOptions.RemoveEmptyEntries);
-        if (pathSegments.Length is < 1 or > 2)
+        GitHubTarget target;
+        try
+        {
+            target = GitHubTarget.Parse(value);
+        }
+        catch (Exception exception) when (exception is ArgumentException or NotSupportedException)
         {
             return false;
         }
 
-        string[] decodedSegments = new string[pathSegments.Length];
-        for (int index = 0; index < pathSegments.Length; index++)
+        if (target.Owner.Any(char.IsWhiteSpace)
+            || target.Repository?.Any(char.IsWhiteSpace) == true
+            || target.Enterprise?.Any(char.IsWhiteSpace) == true)
         {
-            string segment = Uri.UnescapeDataString(pathSegments[index]);
-            if (segment.Length == 0
-                || segment is "." or ".."
-                || segment.Contains('/')
-                || segment.Contains('\\')
-                || segment.Any(char.IsWhiteSpace))
-            {
-                return false;
-            }
-
-            decodedSegments[index] = segment.ToUpperInvariant();
+            return false;
         }
 
-        scope = new GitHubScope(decodedSegments[0], decodedSegments.Length == 2 ? decodedSegments[1] : null);
+        string normalizedHost = string.Equals(target.SourceUri.Host, "www.github.com", StringComparison.OrdinalIgnoreCase)
+            ? "GITHUB.COM"
+            : target.SourceUri.Host.ToUpperInvariant();
+        scope = new GitHubScope(
+            normalizedHost,
+            target.Scope,
+            target.Owner.ToUpperInvariant(),
+            target.Repository?.ToUpperInvariant());
         return true;
     }
 
     private static bool HasSameOwnershipIdentity(ScaleSetIdentity left, ScaleSetIdentity right) =>
-        string.Equals(left.Target.Organization, right.Target.Organization, StringComparison.OrdinalIgnoreCase)
+        string.Equals(left.Target.Host, right.Target.Host, StringComparison.OrdinalIgnoreCase)
+        && left.Target.Scope == right.Target.Scope
+        && string.Equals(left.Target.Owner, right.Target.Owner, StringComparison.OrdinalIgnoreCase)
         && string.Equals(left.Target.Repository, right.Target.Repository, StringComparison.OrdinalIgnoreCase)
         && string.Equals(left.RunnerGroup, right.RunnerGroup, StringComparison.OrdinalIgnoreCase)
         && string.Equals(left.Name, right.Name, StringComparison.OrdinalIgnoreCase);
@@ -636,7 +634,7 @@ public static class AutoscalerConfiguration
             && tag.All(static character => char.IsLetterOrDigit(character) || character is '.' or '_' or '-');
     }
 
-    private readonly record struct GitHubScope(string Organization, string? Repository);
+    private readonly record struct GitHubScope(string Host, GitHubTargetScope Scope, string Owner, string? Repository);
 
     private readonly record struct ScaleSetIdentity(GitHubScope Target, string RunnerGroup, string Name);
 

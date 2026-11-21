@@ -204,6 +204,58 @@ public sealed class AdminTokenRefreshTests
         Assert.Equal(2, discoveryCalls);
     }
 
+    [Theory]
+    [InlineData("https://github.com/enterprises/acme", "api.github.com", "/enterprises/acme/actions/runners/registration-token")]
+    [InlineData("https://acme.ghe.com/enterprises/acme", "api.acme.ghe.com", "/enterprises/acme/actions/runners/registration-token")]
+    [InlineData("https://acme.ghe.com/org", "api.acme.ghe.com", "/orgs/org/actions/runners/registration-token")]
+    public async Task PatAuthenticationSupportsEnterpriseAndHostedGheTargets(
+        string targetUrl,
+        string expectedApiHost,
+        string expectedRegistrationPath)
+    {
+        const string pat = "pat-ghec-sentinel";
+        var target = GitHubTarget.Parse(targetUrl);
+        string? discoveryBody = null;
+        string? registrationAuth = null;
+        string? discoveryAuth = null;
+        var handler = new RecordingHttpMessageHandler(async (request, cancellationToken) =>
+        {
+            var path = request.RequestUri!.AbsolutePath;
+            if (string.Equals(request.RequestUri.Host, expectedApiHost, StringComparison.OrdinalIgnoreCase)
+                && string.Equals(path, expectedRegistrationPath, StringComparison.Ordinal))
+            {
+                registrationAuth = request.Headers.Authorization?.ToString();
+                return TestResponses.Json(HttpStatusCode.Created, "{\"token\":\"registration-token\"}");
+            }
+
+            if (string.Equals(request.RequestUri.Host, expectedApiHost, StringComparison.OrdinalIgnoreCase)
+                && path == "/actions/runner-registration")
+            {
+                discoveryAuth = request.Headers.Authorization?.ToString();
+                discoveryBody = request.Content is null
+                    ? string.Empty
+                    : await request.Content.ReadAsStringAsync(cancellationToken);
+                var token = TestResponses.CreateAdminToken(DateTimeOffset.UtcNow.AddMinutes(10));
+                return TestResponses.Json(HttpStatusCode.OK, $"{{\"url\":\"https://actions.example/tenant\",\"token\":\"{token}\"}}");
+            }
+
+            return TestResponses.Json(HttpStatusCode.OK, "ok");
+        });
+        using var httpClient = new HttpClient(handler);
+        using var client = new ScaleSetClient(
+            target,
+            ScaleSetCredentials.FromPersonalAccessToken(pat),
+            httpClient: httpClient);
+
+        await SendReadAsync(client, "ghec-test");
+
+        Assert.Equal($"Bearer {pat}", registrationAuth);
+        Assert.Equal("RemoteAuth registration-token", discoveryAuth);
+        Assert.NotNull(discoveryBody);
+        using var discoveryJson = System.Text.Json.JsonDocument.Parse(discoveryBody);
+        Assert.Equal(target.SourceUri.AbsoluteUri, discoveryJson.RootElement.GetProperty("url").GetString());
+    }
+
     private static Task<byte[]> SendReadAsync(ScaleSetClient client, string name) =>
         client.SendActionsAsync(
             HttpMethod.Get,
