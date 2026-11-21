@@ -85,4 +85,5 @@ gh attestation verify Knightfall.ScaleSet.Client.0.1.0-alpha.1.nupkg \
 For the matching SBOM attestation, use the `build-sbom-*.sigstore.json` bundle
 and predicate type `https://spdx.dev/Document/v2.2`. Verify attestations against
 the original GitHub release artifacts. NuGet.org adds a repository signature
-to package archives. Verify that signature with `dotnet nuget verify --all`.
+to package archives. Verify the registry copy with
+`dotnet nuget verify Knightfall.ScaleSet.Client.0.1.0-alpha.1.nupkg --all`.
