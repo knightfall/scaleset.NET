@@ -343,7 +343,7 @@ public sealed partial class ScaleSetRuntimeFactory : IScaleSetRuntimeFactory
                     null,
                     true);
                 await _bootstrapLease.WriteIdentityAsync(marker, token).ConfigureAwait(false);
-                scaleSet = await CreateOrResolveScaleSetAsync(group, token).ConfigureAwait(false);
+                scaleSet = await CreateOrResolveScaleSetAsync(group, _bootstrapLease, token).ConfigureAwait(false);
             }
 
             ValidateResolvedScaleSet(scaleSet, group, _scaleSetOptions.Name!);
@@ -563,7 +563,10 @@ public sealed partial class ScaleSetRuntimeFactory : IScaleSetRuntimeFactory
             }
         }
 
-        private async Task<RunnerScaleSet> CreateOrResolveScaleSetAsync(RunnerGroup group, CancellationToken cancellationToken)
+        private async Task<RunnerScaleSet> CreateOrResolveScaleSetAsync(
+            RunnerGroup group,
+            ScaleSetBootstrapLease bootstrapLease,
+            CancellationToken cancellationToken)
         {
             RunnerScaleSet request = new()
             {
@@ -578,12 +581,20 @@ public sealed partial class ScaleSetRuntimeFactory : IScaleSetRuntimeFactory
             {
                 return await _client.CreateScaleSetAsync(request, cancellationToken).ConfigureAwait(false);
             }
-            catch (Exception) when (!cancellationToken.IsCancellationRequested)
+            catch (ScaleSetApiException exception) when (exception.StatusCode is 400 or 401 or 403 or 404 or 422)
+            {
+                // The server rejected the request. A future startup can try again
+                // after the operator corrects the configuration or credential.
+                bootstrapLease.ClearPendingIdentity();
+                throw;
+            }
+            catch (Exception exception) when (!cancellationToken.IsCancellationRequested)
             {
                 // Create is a mutation and the response may be lost. Resolve by
                 // the stable configured name before deciding the identity is absent.
                 RunnerScaleSet? resolved = await _client.FindScaleSetAsync(group.Id, _scaleSetOptions.Name!, cancellationToken).ConfigureAwait(false);
-                return resolved ?? throw new InvalidOperationException("Scale-set creation outcome is uncertain; refusing to create another set.");
+                return resolved ?? throw new InvalidOperationException(
+                    "Scale-set creation outcome is uncertain; refusing to create another set.", exception);
             }
         }
 
@@ -850,6 +861,8 @@ public sealed partial class ScaleSetRuntimeFactory : IScaleSetRuntimeFactory
         public bool HasExistingJournal => File.Exists(Path.Combine(StateDirectory, "runner-state.json"));
 
         private string IdentityPath => Path.Combine(StateDirectory, "scale-set-identity.json");
+
+        public void ClearPendingIdentity() => File.Delete(IdentityPath);
 
         public static Task<ScaleSetBootstrapLease> OpenAsync(
             string stateRoot,

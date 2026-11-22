@@ -7,10 +7,10 @@ refresh. Issues `#20`–`#21` track GHES and custom TLS transport work.
 
 ## Available today
 
-- .NET 10 GitHub Runner Scale Set client and listener libraries with GitHub App
-  and PAT authentication for GitHub.com (`github.com`/`www.github.com`) and
-  GitHub Enterprise Cloud (`github.com/enterprises/{enterprise}`, `*.ghe.com`)
-  repository, organization, and enterprise targets, aligned to upstream
+- .NET 10 GitHub Runner Scale Set client and listener libraries for GitHub.com
+  and GitHub Enterprise Cloud (`*.ghe.com`). Repository and organization scopes
+  accept GitHub App or PAT credentials. Enterprise scope uses a classic PAT.
+  The libraries align to upstream
   `actions/scaleset` (`716908e507993947ada4273aecf2361c02e5836c`) for:
   `SocketsHttpHandler` HTTP/2 keep-alive pings with HTTP/2 negotiation
   (`HttpVersion.Version20` with HTTP/1.1 fallback), strict JSON/null validation,
@@ -33,11 +33,10 @@ to the Docker provider; AWS resource management is not implemented yet.
 
 ## Verification
 
-The Linux release candidate passed 424 tests, including two Docker integration
-tests, and ran a fresh consumer against all four alpha packages. The local
-macOS arm64 run passed 422 tests, with the two Docker integration tests skipped.
-See the [verification record](../product/VERIFICATION.md) for run links and
-remaining live-canary work.
+The latest Linux arm64 run passed 429 tests, including both Docker integration
+tests. The Compose controller and the standalone .NET worker each completed
+a real GitHub Actions job on an ephemeral Linux ARM64 runner. The worker used
+all four locally packed alpha packages. See the [verification record](../product/VERIFICATION.md).
 
 ## AWS product direction
 
@@ -57,6 +56,6 @@ operations. No AWS resources have been inspected, deployed, or changed.
 - Custom GHES hosts (`#20`) and custom root CA / mTLS transport factories (`#21`) are not implemented (GHEC `github.com/enterprises/...` and `*.ghe.com` targets are supported).
 - Mutable runtime `SystemInfo` (`SetSystemInfo`) is outside the current client-parity wave.
 - Private-registry Docker image authentication is not implemented.
-- Live GitHub workflows and AWS-backed runner provisioning have not been
-  exercised.
+- Live engineering coverage is limited to the GitHub.com repository canaries.
+  AWS-backed runner provisioning remains planned.
 - Registry publication and registry consumer verification remain pending.

@@ -46,8 +46,10 @@ now. Close the remote message session before disposing its parent client.
 
 - GitHub.com (`github.com`/`www.github.com`) and GitHub Enterprise Cloud
   (`github.com/enterprises/{enterprise}` and `*.ghe.com`) repository,
-  organization, and enterprise targets with App/PAT authentication are
-  supported. Custom GHES hosts remain deferred and throw `NotSupportedException`.
+  organization, and enterprise targets are supported. Repository and
+  organization scopes accept App or PAT credentials. Enterprise scope uses a
+  classic PAT with `manage_runners:enterprise`. Custom GHES hosts remain
+  deferred and throw `NotSupportedException`.
   App JWTs use RS256, `iat = now - 1 minute`, and `exp = iat + 9 minutes`.
 - Scoped registration precedes `RemoteAuth` administration discovery. A coherent
   URL/token snapshot is refreshed below 60 seconds of remaining lifetime;
@@ -150,6 +152,7 @@ cancellation-sharing and credential-redaction defects and strengthened boundary
 and bookkeeping assertions. No mutation-testing or coverage-percentage result
 is claimed.
 
-The client and listener libraries are now composed into the Docker controller.
-AWS runner providers, AWS controller hosting, and live GitHub canaries remain
-planned work; see [Implementation Status](WORK-STATE.md).
+The client and listener libraries are composed into the Docker controller and
+the standalone .NET worker. Both completed a GitHub.com repository canary.
+AWS runner providers and controller hosting remain planned. See the
+[implementation status](WORK-STATE.md).

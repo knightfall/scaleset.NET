@@ -5,7 +5,7 @@
     <PackageReleaseNotes>https://github.com/knightfall/scaleset.NET/releases/tag/v$(Version)</PackageReleaseNotes>
   </PropertyGroup>
   <ItemGroup Condition="'$(IsPackable)' != 'false'">
-    <None Include="$(MSBuildThisFileDirectory)README.md" Pack="true" PackagePath="/" />
+    <None Update="README.md" Pack="true" PackagePath="/" />
     <None Include="$(MSBuildThisFileDirectory)THIRD-PARTY-NOTICES.md" Pack="true" PackagePath="/" />
     <None Include="$(MSBuildThisFileDirectory)LICENSE" Pack="true" PackagePath="licenses/" />
     <None Include="$(MSBuildThisFileDirectory)docs/releases/provenance.json" Pack="true" PackagePath="security/" />

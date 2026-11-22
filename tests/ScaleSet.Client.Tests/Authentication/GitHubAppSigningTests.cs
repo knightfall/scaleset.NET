@@ -132,6 +132,20 @@ public sealed class GitHubAppSigningTests
         Assert.Throws<ArgumentNullException>(() => ScaleSetCredentials.FromPersonalAccessToken(null!));
     }
 
+    [Theory]
+    [InlineData("https://github.com/enterprises/acme")]
+    [InlineData("https://acme.ghe.com/enterprises/acme")]
+    public void ClientRejectsEnterpriseTargetsWithGitHubAppCredentials(string url)
+    {
+        RecordingJwtProvider signer = new("synthetic-jwt");
+        ScaleSetCredentials credentials = ScaleSetCredentials.FromGitHubApp("app", 1, signer);
+
+        ArgumentException failure = Assert.Throws<ArgumentException>("credentials", () => new ScaleSetClient(GitHubTarget.Parse(url), credentials));
+
+        Assert.Contains("manage_runners:enterprise", failure.Message, StringComparison.Ordinal);
+        Assert.Empty(signer.Calls);
+    }
+
     [Fact]
     public void FromGitHubAppValidatesRequiredFieldsInstallationAndPrivatePem()
     {

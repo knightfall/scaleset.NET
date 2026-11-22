@@ -25,7 +25,7 @@ test was gated off.
 Local .NET 10 Release validation on macOS arm64 completed with 0 warnings
 and 0 errors (`dotnet build ScaleSet.slnx --configuration Release --no-restore -m:1 -nr:false`),
 and `dotnet test --solution ScaleSet.slnx --configuration Release --no-build`
-passed 422/422 non-integration tests (`194` Client, `20` Listener, `161`
+passed 427/427 non-integration tests (`196` Client, `20` Listener, `164`
 Hosting including loopback OTLP telemetry, and `47` Docker unit tests) with 0
 failures. The two opt-in `ScaleSet.Docker.IntegrationTests` were skipped. They
 require a Linux Docker daemon and `SCALESET_DOCKER_INTEGRATION=1`.
@@ -42,14 +42,37 @@ These results cover deterministic GitHub protocol tests (including GHEC
 `github.com/enterprises/...` and `*.ghe.com` + PAT targeting, HTTP/2
 `SocketsHttpHandler` configuration, strict JSON/null validation, rate-limit
 classification, retry budgets/`OnRateLimit`, and response snapshots) and the
-Docker provider/runtime suites. Live GitHub runner workflows, AWS deployments,
-registry publication, and post-publish registry verification remain pending.
+Docker provider/runtime suites. A subsequent Linux arm64 build with Roslynator
+enabled passed all 429 tests, including both Docker integration tests.
+
+The package-based worker also built in isolation using the pinned repository
+analyzer and `.editorconfig`. A temporary namespace diagnostic (`RCS1110`)
+failed the build, confirming that the release candidate treats Roslynator
+warnings as errors.
+
+## Alpha quickstart canaries
+
+- The Compose quickstart built the controller, validated configuration, reached
+  readiness, and ran the supplied workflow in a private GitHub.com repository.
+  The job ran on an ephemeral Linux ARM64 runner, and the controller recorded
+  it as gone after cleanup. Docker and GitHub both reported zero remaining
+  runners. The bundled collector received logs, metrics, and traces.
+- The .NET worker restored all four candidate packages from a local feed into a
+  fresh cache. The worker authenticated, resolved the existing scale set,
+  opened its own session, and completed the same smoke workflow. It removed
+  the runner and closed its session on `SIGTERM`.
+
+The canaries exercised repository scope with the authenticated GitHub CLI
+account credential. Live organization, enterprise, and GitHub App runs, AWS
+deployments, registry publication, and post-publish registry verification remain
+pending.
 
 ## Current support and limits
 
-- GitHub.com (repository, organization, enterprise) and GitHub Enterprise
-  Cloud (`*.ghe.com`) targets with GitHub App and PAT authentication are covered
-  by deterministic tests. Custom GHES hosts and custom root CA / mTLS
+- Deterministic tests cover GitHub.com and GitHub Enterprise Cloud (`*.ghe.com`)
+  targets, with GitHub App and PAT authentication for repository and
+  organization scopes and PAT authentication for enterprise scope. Custom
+  GHES hosts and custom root CA / mTLS
   transport helpers have not been implemented or exercised.
 - Docker is the implemented runner provider. ECS task and direct EC2 providers,
   AWS role-based resource management, and Lambda/ECS controller deployment
@@ -58,6 +81,4 @@ registry publication, and post-publish registry verification remain pending.
   the .NET implementation. Product implementation evidence is in
   [`docs/implementation`](../implementation/CLIENT.md).
 
-Re-run the appropriate build and test gates after code changes. A designated
-GitHub.com canary and AWS integration environment are required before claiming
-live GitHub or AWS compatibility.
+Re-run the build, tests, and matching canary when changing a supported path.

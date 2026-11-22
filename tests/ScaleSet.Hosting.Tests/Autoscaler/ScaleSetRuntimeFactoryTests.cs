@@ -73,6 +73,35 @@ public sealed class ScaleSetRuntimeFactoryTests
     }
 
     [Fact]
+    public async Task InitializeAsync_RejectedFirstCreateSurfacesApiErrorAndCanRetryOnRestart()
+    {
+        using TemporaryStateDirectory directory = new();
+        (AutoscalerOptions options, ScaleSetOptions scaleSet) = CreateOptions(directory.Path);
+        CancellationToken cancellationToken = TestContext.Current.CancellationToken;
+        ScaleSetApiException rejection = new("Scale-set creation denied", statusCode: 403);
+        FakeScaleSetRuntimeClient deniedClient = new() { OnCreate = (_, _) => throw rejection };
+        ScaleSetRuntimeFactory firstFactory = CreateFactory(options, deniedClient, new FakeRunnerProvider());
+        await using (IScaleSetRuntime runtime = await firstFactory.CreateAsync(
+            scaleSet, new HostCapacityCoordinator(options.HostCapacity, options.ScaleSets), cancellationToken))
+        {
+            Assert.Same(rejection, await Assert.ThrowsAsync<ScaleSetApiException>(() => runtime.InitializeAsync(cancellationToken)));
+        }
+
+        string statePath = GetSetStateDirectory(directory.Path, scaleSet.Key!);
+        Assert.False(File.Exists(Path.Combine(statePath, "scale-set-identity.json")));
+
+        FakeScaleSetRuntimeClient permittedClient = new();
+        ScaleSetRuntimeFactory restartFactory = CreateFactory(options, permittedClient, new FakeRunnerProvider());
+        await using IScaleSetRuntime restarted = await restartFactory.CreateAsync(
+            scaleSet, new HostCapacityCoordinator(options.HostCapacity, options.ScaleSets), cancellationToken);
+        await restarted.InitializeAsync(cancellationToken);
+
+        Assert.Equal(1, deniedClient.CreateCount);
+        Assert.Equal(1, permittedClient.CreateCount);
+        Assert.True(File.Exists(Path.Combine(statePath, "runner-state.json")));
+    }
+
+    [Fact]
     public async Task InitializeAsync_PendingIdentityWithoutRemoteScaleSetFailsClosedWithoutSecondCreate()
     {
         using TemporaryStateDirectory directory = new();
@@ -97,8 +126,9 @@ public sealed class ScaleSetRuntimeFactoryTests
 
         try
         {
-            await Assert.ThrowsAsync<InvalidOperationException>(
+            InvalidOperationException failure = await Assert.ThrowsAsync<InvalidOperationException>(
                 () => firstRuntime.InitializeAsync(TestContext.Current.CancellationToken));
+            Assert.IsType<HttpRequestException>(failure.InnerException);
         }
         finally
         {
