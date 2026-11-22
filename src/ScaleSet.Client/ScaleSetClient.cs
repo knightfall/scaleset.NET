@@ -20,8 +20,8 @@ public sealed partial class ScaleSetClient : IDisposable
     private int _disposed;
 
     /// <summary>Creates a ScaleSet client with PAT or GitHub App credentials.</summary>
-    /// <param name="target">Validated GitHub.com repository or organization target.</param>
-    /// <param name="credentials">PAT or GitHub App credentials.</param>
+    /// <param name="target">Validated GitHub.com or GitHub Enterprise Cloud target.</param>
+    /// <param name="credentials">PAT or GitHub App credentials. Enterprise targets use a classic PAT with manage_runners:enterprise.</param>
     /// <param name="options">Timeout, retry, and metadata options.</param>
     /// <param name="httpClient">Optional caller-owned HTTP client; its redirect and TLS settings remain caller-controlled.</param>
     /// <param name="logger">Optional application logger.</param>
@@ -36,6 +36,10 @@ public sealed partial class ScaleSetClient : IDisposable
     {
         ArgumentNullException.ThrowIfNull(target);
         ArgumentNullException.ThrowIfNull(credentials);
+        if (target.Scope == GitHubTargetScope.Enterprise && credentials is GitHubAppCredentials)
+        {
+            throw new ArgumentException("Enterprise targets require a classic PAT with manage_runners:enterprise.", nameof(credentials));
+        }
 
         _options = options ?? new ScaleSetClientOptions();
         _options.Validate();
@@ -72,7 +76,7 @@ public sealed partial class ScaleSetClient : IDisposable
         }
     }
 
-    /// <summary>The validated repository or organization target for this client.</summary>
+    /// <summary>The validated GitHub target for this client.</summary>
     public GitHubTarget Target { get; }
 
     /// <summary>Configured client timeouts, retries, and host metadata.</summary>

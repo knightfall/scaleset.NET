@@ -327,8 +327,9 @@ public static class AutoscalerConfiguration
             errors.Add($"{path}.Provider must be Docker in phase one.");
         }
 
+        CredentialOptions? credential = null;
         if (string.IsNullOrWhiteSpace(scaleSet.CredentialsRef)
-            || !credentials.ContainsKey(scaleSet.CredentialsRef))
+            || !credentials.TryGetValue(scaleSet.CredentialsRef, out credential))
         {
             errors.Add($"{path}.CredentialsRef must reference a configured credential key.");
         }
@@ -337,19 +338,27 @@ public static class AutoscalerConfiguration
         {
             errors.Add($"{path}.GithubUrl must be an HTTPS GitHub.com or GitHub Enterprise Cloud (*.ghe.com) organization, repository, or enterprise URL.");
         }
-        else if (!string.IsNullOrWhiteSpace(scaleSet.Name))
+        else
         {
-            string runnerGroup = string.IsNullOrWhiteSpace(scaleSet.RunnerGroup)
-                ? "Default"
-                : scaleSet.RunnerGroup.Trim();
-            ScaleSetIdentity identity = new(scope, runnerGroup, scaleSet.Name.Trim());
-            if (ownershipIdentities.Any(existingIdentity => HasSameOwnershipIdentity(identity, existingIdentity)))
+            if (scope.Scope == GitHubTargetScope.Enterprise && credential is { Pat: null, ClientId: not null })
             {
-                errors.Add($"{path}.Name duplicates a scale-set name for the same GitHub target and runner group.");
+                errors.Add($"{path}.CredentialsRef must reference a classic PAT with manage_runners:enterprise for enterprise targets.");
             }
-            else
+
+            if (!string.IsNullOrWhiteSpace(scaleSet.Name))
             {
-                ownershipIdentities.Add(identity);
+                string runnerGroup = string.IsNullOrWhiteSpace(scaleSet.RunnerGroup)
+                    ? "Default"
+                    : scaleSet.RunnerGroup.Trim();
+                ScaleSetIdentity identity = new(scope, runnerGroup, scaleSet.Name.Trim());
+                if (ownershipIdentities.Any(existingIdentity => HasSameOwnershipIdentity(identity, existingIdentity)))
+                {
+                    errors.Add($"{path}.Name duplicates a scale-set name for the same GitHub target and runner group.");
+                }
+                else
+                {
+                    ownershipIdentities.Add(identity);
+                }
             }
         }
 

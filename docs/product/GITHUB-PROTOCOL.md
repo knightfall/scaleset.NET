@@ -16,7 +16,7 @@ rather than shared mutable default Authorization headers.
 
 | Contract | Source | Required C# behavior |
 |---|---|---|
-| Registration scope | `config.go`, `createRegistrationTokenPath` | Repo/org/enterprise URL parser and `/repos/{org}/{repo}`, `/orgs/{org}`, or `/enterprises/{enterprise}` paths (GitHub App and PAT auth) |
+| Registration scope | `config.go`, `createRegistrationTokenPath` | Repo/org/enterprise URL parser and `/repos/{org}/{repo}`, `/orgs/{org}`, or `/enterprises/{enterprise}` paths. Enterprise registration uses a classic PAT. |
 | Hosted API host | `config.go` | `github.com`/`www.github.com` map to `api.github.com`; valid GHEC `*.ghe.com` hosts map to `api.<host>`; validate supported origins |
 | Other hosts/custom TLS | `config.go` | Custom GHES hosts and custom root CA/mTLS transport factories are deferred; reject unsupported hosts clearly rather than advertising unvalidated GHES compatibility |
 | App token | `jwt_provider.go`, `fetchAccessToken` | RS256; issuer ClientID; iat now-1 minute; exp iat+9 minutes; installation-token POST returns 201 |

@@ -1,0 +1,17 @@
+name: Scale set runner smoke
+
+on: workflow_dispatch
+
+permissions: {}
+
+jobs:
+  runner-smoke:
+    runs-on: ci-linux
+    timeout-minutes: 5
+    steps:
+      - name: Verify the self-hosted Linux runner
+        shell: bash
+        run: |
+          test "$RUNNER_ENVIRONMENT" = self-hosted
+          test "$RUNNER_OS" = Linux
+          printf 'Scale set runner %s completed the smoke step (%s %s).\n' "$RUNNER_NAME" "$RUNNER_OS" "$RUNNER_ARCH"

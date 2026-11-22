@@ -28,7 +28,8 @@ contracts. GitHub App or PAT credentials authorize GitHub API calls; AWS IAM
 authorizes operations on configured AWS resources.
 
 GitHub.com and GitHub Enterprise Cloud (`*.ghe.com`) repository, organization,
-and enterprise scopes are supported with GitHub App or PAT authentication.
+and enterprise scopes are supported. Repository and organization scopes accept
+GitHub App or PAT credentials. Enterprise scope uses a classic PAT.
 GHES, concrete remote JWT signers, a web dashboard, automatic failover, and
 cross-account AWS control remain outside the current product scope.
 
@@ -78,7 +79,7 @@ contracts, not the product boundary for scaleset.NET. Its source has about
 | Shutdown/state | Example in-memory maps; force-removes runners and deletes scale set | Confirmed drain-and-preserve with retained identity and restart reconciliation |
 | Scaling policies | Docker example uses additive minimum/spare capacity | SpareCapacity and TotalFloor selectable by configuration |
 | Health/UI | Example has no health host or dashboard | Health endpoints; no dashboard |
-| GitHub targets | GitHub.com, GitHub Enterprise Cloud, and GHES with App or PAT authentication | GitHub.com and GitHub Enterprise Cloud repo/org/enterprise scopes with App or PAT. GHES is deferred. |
+| GitHub targets | GitHub.com, GitHub Enterprise Cloud, and GHES with scope-specific credentials | GitHub.com and GitHub Enterprise Cloud repo/org/enterprise scopes. Enterprise uses a classic PAT. GHES is deferred. |
 
 Compose deploys the controller and its dependencies; runner containers are
 still created through the provider's Docker API. Multi-architecture packaging

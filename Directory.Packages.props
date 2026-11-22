@@ -1,9 +1,10 @@
 <Project>
   <PropertyGroup>
     <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+    <RoslynatorVersion>5.0.0</RoslynatorVersion>
   </PropertyGroup>
   <ItemGroup>
-    <GlobalPackageReference Include="Roslynator.Analyzers" Version="5.0.0" PrivateAssets="all" IncludeAssets="analyzers" />
+    <GlobalPackageReference Include="Roslynator.Analyzers" Version="$(RoslynatorVersion)" PrivateAssets="all" IncludeAssets="analyzers" />
     <PackageVersion Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.12" />
     <PackageVersion Include="Microsoft.Extensions.Options" Version="10.0.12" />
     <PackageVersion Include="Microsoft.Extensions.Configuration.Binder" Version="10.0.12" />

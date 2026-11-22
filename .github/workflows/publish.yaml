@@ -47,14 +47,22 @@ jobs:
           global-json-file: global.json
       - name: Restore locked solution
         run: dotnet restore ScaleSet.slnx --locked-mode
-      - name: Build solution
-        run: dotnet build ScaleSet.slnx --configuration Release --no-restore
+      - name: Build solution with Roslynator and compiler warnings as errors
+        run: dotnet build ScaleSet.slnx --configuration Release --no-restore -p:RunAnalyzersDuringBuild=true
       - name: Run solution tests
         run: dotnet test --solution ScaleSet.slnx --configuration Release --no-build
         env:
           SCALESET_DOCKER_INTEGRATION: '1'
       - name: Pack libraries
         run: dotnet pack ScaleSet.slnx --configuration Release --no-build --output artifacts/packages
+      - name: Build the package-based worker with Roslynator
+        run: |
+          worker="$RUNNER_TEMP/scaleset-worker"
+          mkdir -p "$worker/feed"
+          cp artifacts/packages/*.nupkg "$worker/feed/"
+          cp Directory.Packages.props .editorconfig examples/dotnet-worker/*.cs examples/dotnet-worker/*.csproj examples/dotnet-worker/NuGet.Local.Config "$worker/"
+          dotnet restore "$worker/ScaleSet.Worker.Example.csproj" --configfile "$worker/NuGet.Local.Config" --packages "$worker/packages"
+          dotnet build "$worker/ScaleSet.Worker.Example.csproj" --configuration Release --no-restore -p:RunAnalyzersDuringBuild=true
       - name: Prepare source-bound candidate and validated SPDX SBOM
         run: python3 .github/release/prepare.py --output "$RUNNER_TEMP/release" --cache "$RUNNER_TEMP/release-tools" --packages artifacts/packages
       - name: Check actual package layouts and manifest integrity

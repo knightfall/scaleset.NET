@@ -356,6 +356,27 @@ public sealed class AutoscalerConfigurationTests
         Assert.Contains(errors, error => error.StartsWith("Credentials[build-credential] must define PAT", StringComparison.Ordinal));
     }
 
+    [Theory]
+    [InlineData("https://github.com/enterprises/acme")]
+    [InlineData("https://acme.ghe.com/enterprises/acme")]
+    public void Validate_RejectsEnterpriseTargetWithAppCredential(string url)
+    {
+        AutoscalerOptions options = ValidOptions();
+        options.ScaleSets[0].GithubUrl = url;
+        options.Credentials["build-credential"] = new CredentialOptions
+        {
+            ClientId = "app",
+            InstallationId = "1",
+            PrivateKeyPem = SecretSentinel,
+        };
+
+        string error = Assert.Single(AutoscalerConfiguration.Validate(options));
+
+        Assert.StartsWith("ScaleSets[0].CredentialsRef", error, StringComparison.Ordinal);
+        Assert.Contains("manage_runners:enterprise", error, StringComparison.Ordinal);
+        Assert.DoesNotContain(SecretSentinel, error, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void Validate_RejectsNonDockerProviderUnpinnedImagesAndInvalidResources()
     {

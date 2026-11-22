@@ -13,7 +13,7 @@ services:
       SCALESET__Controller__Identity: "${SCALESET__Controller__Identity:-scaleset-controller}"
       SCALESET__Controller__StateDirectory: /var/lib/scaleset
       SCALESET__Health__ListenUrl: http://0.0.0.0:8080
-      SCALESET__ScaleSets__0__Key: "${SCALESET__ScaleSets__0__Key:-linux-x64}"
+      SCALESET__ScaleSets__0__Key: "${SCALESET__ScaleSets__0__Key:-ci-linux}"
       SCALESET__ScaleSets__0__GithubUrl: "${SCALESET__ScaleSets__0__GithubUrl:?Set a GitHub repository or organization URL}"
       SCALESET__ScaleSets__0__Name: "${SCALESET__ScaleSets__0__Name:?Set a GitHub runner scale-set name}"
       SCALESET__ScaleSets__0__CredentialsRef: github
@@ -26,7 +26,7 @@ services:
       SCALESET__ScaleSets__0__RunnerProfile__Cpu: "${SCALESET__ScaleSets__0__RunnerProfile__Cpu:-1}"
       SCALESET__ScaleSets__0__RunnerProfile__Memory: "${SCALESET__ScaleSets__0__RunnerProfile__Memory:-2048}"
       SCALESET__Credentials__github__Pat: "${GITHUB_TOKEN:?Set GITHUB_TOKEN in the local .env file}"
-      OTEL_EXPORTER_OTLP_ENDPOINT: "${OTEL_EXPORTER_OTLP_ENDPOINT:?Set the configured OTLP receiver endpoint}"
+      OTEL_EXPORTER_OTLP_ENDPOINT: "${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4318}"
       OTEL_EXPORTER_OTLP_PROTOCOL: "${OTEL_EXPORTER_OTLP_PROTOCOL:-http/protobuf}"
       SCALESET_HEALTH_URL: http://127.0.0.1:8080/health/live
     volumes:
@@ -41,3 +41,8 @@ services:
       timeout: 3s
       start_period: 30s
       retries: 3
+  otel-collector:
+    image: otel/opentelemetry-collector@sha256:34b24b740c3c88d3467740e8642a397c13898ef76d7295c5425164c482ed1b73
+    command: [--config=/etc/otelcol/config.yaml]
+    volumes:
+      - ./otel-collector.yaml:/etc/otelcol/config.yaml:ro

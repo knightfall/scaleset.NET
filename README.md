@@ -24,9 +24,10 @@ planning, health endpoints, and bounded drain-and-preserve shutdown. The
 provided container and Compose deployment run the controller without
 Kubernetes.
 
-The client supports repository, organization, and enterprise targets on
-GitHub.com and GitHub Enterprise Cloud (`*.ghe.com`) with GitHub App or
-personal access token (PAT) authentication. Its protocol baseline is
+The client supports GitHub.com and GitHub Enterprise Cloud (`*.ghe.com`).
+Repository and organization targets accept a GitHub App or a personal access
+token (PAT). Enterprise targets use a classic PAT with `manage_runners:enterprise`.
+Its protocol baseline is
 [`actions/scaleset` at `716908e5`](https://github.com/actions/scaleset/tree/716908e507993947ada4273aecf2361c02e5836c).
 It includes HTTP/2 keep-alives, rate-limit classification, configurable retry
 budgets, and bounded response snapshots. GitHub Enterprise Server (GHES)
@@ -39,17 +40,19 @@ the packages are available in the registry.
 
 | Package | Purpose |
 | --- | --- |
-| [`Knightfall.ScaleSet.Client`](https://www.nuget.org/packages/Knightfall.ScaleSet.Client) | GitHub authentication, scale-set administration, and message sessions |
-| [`Knightfall.ScaleSet.Listener`](https://www.nuget.org/packages/Knightfall.ScaleSet.Listener) | Polling, callbacks, job acquisition, and acknowledgment |
-| [`Knightfall.ScaleSet.Hosting`](https://www.nuget.org/packages/Knightfall.ScaleSet.Hosting) | Provider contracts, scaling, and durable runner lifecycle |
-| [`Knightfall.ScaleSet.Providers.Docker`](https://www.nuget.org/packages/Knightfall.ScaleSet.Providers.Docker) | Docker Engine runner provisioning and recovery |
+| [`Knightfall.ScaleSet.Client`](src/ScaleSet.Client/README.md) | GitHub authentication, scale-set administration, and message sessions |
+| [`Knightfall.ScaleSet.Listener`](src/ScaleSet.Listener/README.md) | Polling, handler callbacks, and acknowledgment |
+| [`Knightfall.ScaleSet.Hosting`](src/ScaleSet.Hosting/README.md) | Job acquisition, provider contracts, scaling, and durable runner lifecycle |
+| [`Knightfall.ScaleSet.Providers.Docker`](src/ScaleSet.Providers.Docker/README.md) | Docker Engine runner provisioning and recovery |
 
 ```sh
 dotnet add package Knightfall.ScaleSet.Client --version 0.1.0-alpha.1
 ```
 
-See the [usage guide](docs/usage.md) for a client example, GitHub Packages
-configuration, and the Docker controller setup.
+Use the [authenticated client quickstart](docs/usage.md) for GitHub API access,
+the [.NET worker example](examples/dotnet-worker/README.md) to compose the
+packages in your own service, or the [Docker quickstart](docs/implementation/DOCKER-DEPLOYMENT.md)
+to run a job with the supplied [autoscaler](src/ScaleSet.Autoscaler/README.md).
 
 ## AWS direction
 
@@ -82,9 +85,11 @@ IAM role authorizes AWS operations.
 
 ## Development
 
-Use the SDK pinned by `global.json` (.NET 10). Roslynator is a private
-build-time analyzer dependency. Enabled compiler and analyzer warnings are
-build errors.
+Use the SDK pinned by `global.json` (.NET 10). The solution and release
+candidate builds run the centrally pinned Roslynator analyzers. The release
+candidate also builds the worker example against the packages it just packed.
+Enabled compiler and analyzer warnings are build errors. Roslynator is a
+private build dependency of the libraries.
 
 ```sh
 dotnet restore ScaleSet.slnx --locked-mode
