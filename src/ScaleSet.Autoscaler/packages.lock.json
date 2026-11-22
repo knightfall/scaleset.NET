@@ -178,7 +178,8 @@
           "Knightfall.ScaleSet.Client": "[0.1.0-alpha.1, )",
           "Knightfall.ScaleSet.Listener": "[0.1.0-alpha.1, )",
           "Microsoft.Extensions.Configuration.Binder": "[11.0.0, )",
-          "Microsoft.Extensions.Logging.Abstractions": "[11.0.0, )"
+          "Microsoft.Extensions.Logging.Abstractions": "[11.0.0, )",
+          "Microsoft.Extensions.Options": "[11.0.0, )"
         }
       },
       "Knightfall.ScaleSet.Listener": {
@@ -213,6 +214,16 @@
         "dependencies": {
           "Microsoft.Extensions.DependencyInjection.Abstractions": "11.0.0",
           "System.Diagnostics.DiagnosticSource": "11.0.0"
+        }
+      },
+      "Microsoft.Extensions.Options": {
+        "type": "CentralTransitive",
+        "requested": "[11.0.0, )",
+        "resolved": "11.0.0",
+        "contentHash": "AaNswJ3NqdNCNqQVlU7iTkvrrrzqrSSxkOC3bLlrwv/CPN7YRz3HoJk7o4ey5v6U8bOHocHsyYoJ7ihK1KUWyQ==",
+        "dependencies": {
+          "Microsoft.Extensions.DependencyInjection.Abstractions": "11.0.0",
+          "Microsoft.Extensions.Primitives": "11.0.0"
         }
       }
     },
