@@ -116,7 +116,7 @@ static async Task ListenAsync(ScaleSetListener listener, ScaleSetMessageHandler 
     }
     catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
     {
-        if (!await handler.WaitForDrainAsync(TimeSpan.FromSeconds(30), TimeProvider.System))
+        if (!await handler.WaitForDrainAsync(TimeSpan.FromSeconds(30), TimeProvider.System, CancellationToken.None))
         {
             Console.Error.WriteLine("Drain deadline elapsed. Unfinished runners are preserved.");
         }

@@ -6,16 +6,26 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
+    <AnalysisLevel>latest-recommended</AnalysisLevel>
     <IsPackable>false</IsPackable>
     <ManagePackageVersionsCentrally>false</ManagePackageVersionsCentrally>
     <RestorePackagesWithLockFile>false</RestorePackagesWithLockFile>
+    <UseScaleSetProjectReferences Condition="Exists('$(MSBuildThisFileDirectory)../../src/ScaleSet.Client/ScaleSet.Client.csproj')">true</UseScaleSetProjectReferences>
   </PropertyGroup>
   <ItemGroup>
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
+    <PackageReference Include="Roslynator.Analyzers" Version="$(RoslynatorVersion)" PrivateAssets="all" IncludeAssets="analyzers" Condition="'$(RoslynatorVersion)' != ''" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(UseScaleSetProjectReferences)' == 'true'">
+    <ProjectReference Include="../../src/ScaleSet.Client/ScaleSet.Client.csproj" />
+    <ProjectReference Include="../../src/ScaleSet.Listener/ScaleSet.Listener.csproj" />
+    <ProjectReference Include="../../src/ScaleSet.Hosting/ScaleSet.Hosting.csproj" />
+    <ProjectReference Include="../../src/ScaleSet.Providers.Docker/ScaleSet.Providers.Docker.csproj" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(UseScaleSetProjectReferences)' != 'true'">
     <PackageReference Include="Knightfall.ScaleSet.Client" Version="0.1.0-alpha.1" />
     <PackageReference Include="Knightfall.ScaleSet.Listener" Version="0.1.0-alpha.1" />
     <PackageReference Include="Knightfall.ScaleSet.Hosting" Version="0.1.0-alpha.1" />
     <PackageReference Include="Knightfall.ScaleSet.Providers.Docker" Version="0.1.0-alpha.1" />
-    <PackageReference Include="Roslynator.Analyzers" Version="$(RoslynatorVersion)" PrivateAssets="all" IncludeAssets="analyzers" Condition="'$(RoslynatorVersion)' != ''" />
   </ItemGroup>
 </Project>

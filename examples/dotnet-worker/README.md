@@ -9,8 +9,10 @@ for that scale set before starting this worker.
 
 ## Restore local candidate packages
 
-From the repository root in a shell like Bash, build the packages and copy the
-example outside the repository to use an independent project and package cache.
+The project builds against source within the repository. To exercise it as a
+package consumer, build the packages and copy the example outside the checkout
+with a fresh package cache. Run these commands from the repository root in a
+shell like Bash.
 
 ```sh
 dotnet pack ScaleSet.slnx --configuration Release --output "$PWD/artifacts/packages"
