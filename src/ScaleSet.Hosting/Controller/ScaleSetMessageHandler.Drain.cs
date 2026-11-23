@@ -18,7 +18,7 @@ public sealed partial class ScaleSetMessageHandler
             _drainStarted = true;
         }
 
-        _capacity?.SetListenerMaximum(0);
+        _capacity.SetListenerMaximum(0);
     }
 
     /// <summary>Gets whether shutdown has closed admission for this handler.</summary>

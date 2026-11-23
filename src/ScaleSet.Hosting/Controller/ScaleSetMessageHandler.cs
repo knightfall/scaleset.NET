@@ -64,30 +64,31 @@ public sealed partial class ScaleSetMessageHandler : IScaleSetMessageHandler
     private readonly RunnerLifecycleManager _lifecycle;
     private readonly IRunnerStateJournal _journal;
     private readonly ILogger<ScaleSetMessageHandler> _logger;
-    private readonly ScaleSetCapacityContext? _capacity;
+    private readonly ScaleSetCapacityContext _capacity;
     private int _latestAssignedJobs = -1;
 
-    /// <summary>Creates a message handler bound to one ownership scope and its durable journal.</summary>
+    /// <summary>Creates a message handler bound to one ownership scope, its durable journal, and the host capacity ledger.</summary>
     public ScaleSetMessageHandler(
         RunnerOwnershipScope scope,
         IMessageSessionClient session,
         ScaleSetRunnerProvisioner provisioner,
         RunnerLifecycleManager lifecycle,
         IRunnerStateJournal journal,
-        ILogger<ScaleSetMessageHandler>? logger = null,
-        ScaleSetCapacityContext? capacity = null)
+        ScaleSetCapacityContext capacity,
+        ILogger<ScaleSetMessageHandler>? logger = null)
     {
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(session);
         ArgumentNullException.ThrowIfNull(provisioner);
         ArgumentNullException.ThrowIfNull(lifecycle);
         ArgumentNullException.ThrowIfNull(journal);
+        ArgumentNullException.ThrowIfNull(capacity);
         if (journal.Scope != scope)
         {
             throw new ArgumentException("The journal must match the message-handler ownership scope.", nameof(journal));
         }
 
-        if (capacity is not null && !string.Equals(capacity.ScaleSet.Key, scope.ScaleSetKey, StringComparison.OrdinalIgnoreCase))
+        if (!string.Equals(capacity.ScaleSet.Key, scope.ScaleSetKey, StringComparison.OrdinalIgnoreCase))
         {
             throw new ArgumentException("The capacity context must match the message-handler scale-set key.", nameof(capacity));
         }
@@ -129,130 +130,7 @@ public sealed partial class ScaleSetMessageHandler : IScaleSetMessageHandler
             Volatile.Write(ref _latestAssignedJobs, statistics.TotalAssignedJobs);
         }
 
-        if (_capacity is not null)
-        {
-            await HandleCapacityAwareAsync(message, cancellationToken).ConfigureAwait(false);
-            await ReconcileCompletedOperationsAsync(cancellationToken).ConfigureAwait(false);
-            return;
-        }
-
-        if (message is null)
-        {
-            return;
-        }
-
-        if (TryEnterAdmission(out IDisposable? admission))
-        {
-            using (admission)
-            {
-                await AcquireAndProvisionAsync(message.JobAvailableMessages, cancellationToken).ConfigureAwait(false);
-            }
-        }
-
-        foreach (JobAssignedMessage assigned in message.JobAssignedMessages)
-        {
-            await ApplyActivityAsync(
-                assigned.RunnerRequestId,
-                RunnerActivityEvidence.JobAssigned,
-                runnerId: null,
-                runnerName: null,
-                cancellationToken).ConfigureAwait(false);
-        }
-
-        foreach (JobStartedMessage started in message.JobStartedMessages)
-        {
-            RecordJobStarted(started.RunnerRequestId);
-            await ApplyActivityAsync(
-                started.RunnerRequestId,
-                RunnerActivityEvidence.JobAssigned,
-                started.RunnerId,
-                started.RunnerName,
-                cancellationToken).ConfigureAwait(false);
-        }
-
-        foreach (JobCompletedMessage completed in message.JobCompletedMessages)
-        {
-            RecordJobCompleted(completed.RunnerRequestId);
-            await ApplyActivityAsync(
-                completed.RunnerRequestId,
-                RunnerActivityEvidence.JobCompleted,
-                completed.RunnerId,
-                completed.RunnerName,
-                cancellationToken).ConfigureAwait(false);
-        }
+        await HandleCapacityAwareAsync(message, cancellationToken).ConfigureAwait(false);
+        await ReconcileCompletedOperationsAsync(cancellationToken).ConfigureAwait(false);
     }
-
-    private async Task AcquireAndProvisionAsync(
-        IReadOnlyList<JobAvailableMessage> messages,
-        CancellationToken cancellationToken)
-    {
-        long[] offeredIds = messages
-            .Select(static message => message.RunnerRequestId)
-            .Where(static requestId => requestId > 0)
-            .Distinct()
-            .ToArray();
-        if (offeredIds.Length == 0)
-        {
-            return;
-        }
-
-        IReadOnlyList<long> acquiredIds = await _session.AcquireJobsAsync(offeredIds, cancellationToken).ConfigureAwait(false);
-        HashSet<long> acquired = (acquiredIds ?? Array.Empty<long>())
-            .Where(offeredIds.Contains)
-            .ToHashSet();
-        RecordAcquiredRequests(acquired);
-
-        foreach (long requestId in offeredIds)
-        {
-            if (acquired.Remove(requestId))
-            {
-                RunnerIdentity identity = RunnerRequestIdentityFactory.Create(_scope, requestId);
-                await _provisioner.ProvisionAsync(identity, cancellationToken).ConfigureAwait(false);
-            }
-        }
-    }
-
-    private async Task ApplyActivityAsync(
-        long runnerRequestId,
-        RunnerActivityEvidence evidence,
-        long? runnerId,
-        string? runnerName,
-        CancellationToken cancellationToken)
-    {
-        if (runnerRequestId <= 0 || (runnerId is <= 0) || (runnerName is not null && string.IsNullOrWhiteSpace(runnerName)))
-        {
-            return;
-        }
-
-        RunnerIdentity identity = RunnerRequestIdentityFactory.Create(_scope, runnerRequestId);
-        RunnerOperationState? operation = await _journal.FindAsync(identity.OperationId, cancellationToken).ConfigureAwait(false);
-        if (operation is null
-            || operation.Identity.Scope != _scope
-            || operation.Identity.OperationId != identity.OperationId
-            || !string.Equals(operation.Identity.RunnerName, identity.RunnerName, StringComparison.Ordinal))
-        {
-            return;
-        }
-
-        if ((runnerId is long expectedRunnerId && operation.Identity.GitHubRunnerId != expectedRunnerId)
-            || (runnerName is not null && !string.Equals(operation.Identity.RunnerName, runnerName, StringComparison.Ordinal)))
-        {
-            LogConflictingActivity(_logger, runnerRequestId, _scope.ScaleSetKey);
-            return;
-        }
-
-        if (operation.Stage is not (RunnerLifecycleStage.Starting or RunnerLifecycleStage.Idle
-            or RunnerLifecycleStage.Busy or RunnerLifecycleStage.Completed or RunnerLifecycleStage.Unknown))
-        {
-            return;
-        }
-
-        await _lifecycle.RecordActivityAsync(identity, evidence, cancellationToken).ConfigureAwait(false);
-    }
-
-    [LoggerMessage(
-        EventId = 1,
-        Level = LogLevel.Warning,
-        Message = "Ignored conflicting activity for runner request {RunnerRequestId} in scale set {ScaleSetKey}.")]
-    private static partial void LogConflictingActivity(ILogger logger, long runnerRequestId, string scaleSetKey);
 }
