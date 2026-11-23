@@ -29,6 +29,12 @@ public interface IScaleSetRuntimeClient : IDisposable
     /// <summary>Creates a scale set during a clean first start.</summary>
     Task<RunnerScaleSet> CreateScaleSetAsync(RunnerScaleSet scaleSet, CancellationToken cancellationToken);
 
+    /// <summary>Looks up the exact runner registration in the scale set's GitHub target.</summary>
+    Task<RunnerReference?> GetRunnerAsync(long runnerId, CancellationToken cancellationToken);
+
+    /// <summary>Removes a runner registration when the GitHub service permits it.</summary>
+    Task RemoveRunnerAsync(long runnerId, CancellationToken cancellationToken);
+
     /// <summary>Gets a short-lived runner configuration for the resolved scale set.</summary>
     Task<RunnerScaleSetJitRunnerConfig?> GenerateJitConfigAsync(
         long scaleSetId,
@@ -65,6 +71,14 @@ public sealed class ScaleSetRuntimeClientAdapter : IScaleSetRuntimeClient
     /// <inheritdoc />
     public Task<RunnerScaleSet> CreateScaleSetAsync(RunnerScaleSet scaleSet, CancellationToken cancellationToken) =>
         _client.CreateScaleSetAsync(scaleSet, cancellationToken);
+
+    /// <inheritdoc />
+    public Task<RunnerReference?> GetRunnerAsync(long runnerId, CancellationToken cancellationToken) =>
+        _client.GetRunnerAsync(runnerId, cancellationToken);
+
+    /// <inheritdoc />
+    public Task RemoveRunnerAsync(long runnerId, CancellationToken cancellationToken) =>
+        _client.RemoveRunnerAsync(runnerId, cancellationToken);
 
     /// <inheritdoc />
     public async Task<RunnerScaleSetJitRunnerConfig?> GenerateJitConfigAsync(
@@ -277,6 +291,7 @@ public sealed partial class ScaleSetRuntimeFactory : IScaleSetRuntimeFactory
         private readonly ScaleSetRuntimeTelemetry _metrics;
         private readonly object _sync = new();
         private readonly CancellationTokenSource _stopSignal = new();
+        private readonly CancellationTokenSource _stopReconciliation = new();
         private ScaleSetBootstrapLease? _bootstrapLease;
         private FileRunnerStateJournal? _journal;
         private RunnerLifecycleManager? _lifecycle;
@@ -511,10 +526,18 @@ public sealed partial class ScaleSetRuntimeFactory : IScaleSetRuntimeFactory
                 _handler = handler;
             }
 
-            await queue.RunAsync(
-                OpenSessionAsync,
-                CloseSessionAsync,
-                token => listener.RunAsync(handler, token),
+            ScaleSetReconciliationLoop reconciliation = new(
+                _timeProvider, _controllerOptions.ReconcileInterval, _scaleSetOptions.Lifecycle.CleanupTimeout,
+                _metrics, _logger, ScaleSetKey);
+            await reconciliation.RunAsync(
+                handler,
+                (serialized, token) => queue.RunAsync(
+                    OpenSessionAsync,
+                    CloseSessionAsync,
+                    listenerToken => listener.RunAsync(serialized, listenerToken),
+                    token),
+                ReconcileSteadyStateAsync,
+                _stopReconciliation.Token,
                 cancellationToken).ConfigureAwait(false);
         }
 
@@ -621,13 +644,54 @@ public sealed partial class ScaleSetRuntimeFactory : IScaleSetRuntimeFactory
         private async Task DrainCoreAsync(ScaleSetMessageHandler handler, CancellationToken cancellationToken)
         {
             using CancellationTokenSource linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _stopSignal.Token);
-            bool drained = await _metrics.MeasureAsync(
-                ScaleSetTelemetryOperation.Drain,
-                () => handler.WaitForDrainAsync(_scaleSetOptions.Lifecycle.ShutdownDrainTimeout, _timeProvider, linked.Token),
-                static completed => completed ? ScaleSetTelemetryOutcome.Success : ScaleSetTelemetryOutcome.Unknown).ConfigureAwait(false);
+            bool drained;
+            try
+            {
+                drained = await _metrics.MeasureAsync(
+                    ScaleSetTelemetryOperation.Drain,
+                    () => WaitForOwnedRunnerDrainAsync(handler, linked.Token),
+                    static completed => completed ? ScaleSetTelemetryOutcome.Success : ScaleSetTelemetryOutcome.Unknown).ConfigureAwait(false);
+            }
+            finally
+            {
+                await _stopReconciliation.CancelAsync().ConfigureAwait(false);
+            }
+
             if (!drained)
             {
                 RuntimeDrainDeadline(_logger, ScaleSetKey, _scaleSetOptions.Lifecycle.ShutdownDrainTimeout);
+            }
+        }
+
+        private async Task<bool> WaitForOwnedRunnerDrainAsync(ScaleSetMessageHandler handler, CancellationToken cancellationToken)
+        {
+            TimeSpan timeout = _scaleSetOptions.Lifecycle.ShutdownDrainTimeout;
+            long started = _timeProvider.GetTimestamp();
+            if (!await handler.WaitForDrainAsync(timeout, _timeProvider, cancellationToken).ConfigureAwait(false))
+            {
+                return false;
+            }
+
+            while (true)
+            {
+                var operations = await _journal!.ReadAllAsync(cancellationToken).ConfigureAwait(false);
+                if (!operations.Any(static operation => operation.ProviderResourceId is not null
+                    && operation.Stage is RunnerLifecycleStage.Starting or RunnerLifecycleStage.Busy or RunnerLifecycleStage.Unknown
+                        or RunnerLifecycleStage.Completed or RunnerLifecycleStage.Removing))
+                {
+                    return true;
+                }
+
+                // Starting and adopted runners may have received a job before
+                // its start message arrived. Keep polling while the deadline allows.
+                TimeSpan remaining = timeout - _timeProvider.GetElapsedTime(started);
+                if (remaining <= TimeSpan.Zero)
+                {
+                    return false;
+                }
+
+                TimeSpan delay = TimeSpan.FromMilliseconds(Math.Min(250, remaining.TotalMilliseconds));
+                await Task.Delay(delay, _timeProvider, cancellationToken).ConfigureAwait(false);
             }
         }
 
@@ -658,6 +722,7 @@ public sealed partial class ScaleSetRuntimeFactory : IScaleSetRuntimeFactory
             CaptureDisposalFailure(() => DisposeProvider(_provider), failures);
             CaptureDisposalFailure(_client.Dispose, failures);
             await CaptureAsyncDisposalFailure(_bootstrapLease, failures).ConfigureAwait(false);
+            CaptureDisposalFailure(_stopReconciliation.Dispose, failures);
             CaptureDisposalFailure(_stopSignal.Dispose, failures);
 
             if (failures.Count == 1)
@@ -727,34 +792,21 @@ public sealed partial class ScaleSetRuntimeFactory : IScaleSetRuntimeFactory
         {
             FileRunnerStateJournal journal = _journal ?? throw new InvalidOperationException("The runner journal is not open.");
             RunnerLifecycleManager lifecycle = _lifecycle ?? throw new InvalidOperationException("The lifecycle manager is not open.");
-            ImmutableArray<RunnerResource> discovered = await _provider.DiscoverAsync(scope, cancellationToken).ConfigureAwait(false);
+            Dictionary<Guid, RunnerResource> discovered = await ReadOwnedInventoryAsync(scope, cancellationToken).ConfigureAwait(false);
             ImmutableArray<RunnerOperationState> journalStates = await journal.ReadAllAsync(cancellationToken).ConfigureAwait(false);
             Dictionary<Guid, RunnerOperationState> statesById = journalStates.ToDictionary(static state => state.Identity.OperationId);
-            HashSet<Guid> reconciled = [];
             int adoptedCount = 0;
 
-            foreach (RunnerResource resource in discovered)
+            foreach (RunnerResource resource in discovered.Values)
             {
-                if (resource.Identity.Scope != scope)
+                if (statesById.TryGetValue(resource.Identity.OperationId, out RunnerOperationState? previous))
                 {
-                    throw new InvalidDataException("Provider discovery returned a resource outside the configured ownership scope.");
-                }
-
-                reconciled.Add(resource.Identity.OperationId);
-                if (resource.Status == RunnerResourceStatus.Missing)
-                {
-                    if (statesById.ContainsKey(resource.Identity.OperationId))
-                    {
-                        await lifecycle.ConfirmGoneAsync(resource.Identity, cancellationToken).ConfigureAwait(false);
-                    }
-
-                    continue;
+                    EnsureResourceMatchesJournal(resource, previous, scope);
                 }
 
                 if (statesById.TryGetValue(resource.Identity.OperationId, out RunnerOperationState? completedPrior)
                     && completedPrior.Stage is (RunnerLifecycleStage.Completed or RunnerLifecycleStage.Removing))
                 {
-                    EnsureResourceMatchesJournal(resource, completedPrior, scope);
                     if (_provisioner is not null
                         && await _provisioner.ReconcileCompletedAsync(completedPrior.Identity, cancellationToken).ConfigureAwait(false))
                     {
@@ -772,7 +824,6 @@ public sealed partial class ScaleSetRuntimeFactory : IScaleSetRuntimeFactory
                 if (statesById.TryGetValue(resource.Identity.OperationId, out RunnerOperationState? prior)
                     && IsStartingCreatedRecovery(prior, resource))
                 {
-                    EnsureResourceMatchesJournal(resource, prior, scope);
                     // Keep the durable Starting intent: the provisioner can
                     // safely retry StartAsync on this exact Created resource.
                     AdoptCapacity(
@@ -793,7 +844,7 @@ public sealed partial class ScaleSetRuntimeFactory : IScaleSetRuntimeFactory
 
             foreach (RunnerOperationState state in journalStates)
             {
-                if (reconciled.Contains(state.Identity.OperationId)
+                if (discovered.ContainsKey(state.Identity.OperationId)
                     || state.Stage is RunnerLifecycleStage.Gone or RunnerLifecycleStage.Failed)
                 {
                     continue;
@@ -801,27 +852,26 @@ public sealed partial class ScaleSetRuntimeFactory : IScaleSetRuntimeFactory
 
                 if (state.ProviderResourceId is not null)
                 {
-                    RunnerResource probe = new(
-                        state.ProviderResourceId,
-                        state.Identity,
-                        state.LastObservedProviderStatus ?? RunnerResourceStatus.Unknown);
-                    RunnerResource? inspected = await _provider.InspectAsync(probe, cancellationToken).ConfigureAwait(false);
-                    if (inspected is null || inspected.Status == RunnerResourceStatus.Missing)
+                    RunnerResource? inspected = await InspectOwnedResourceAsync(state, state.ProviderResourceId, cancellationToken).ConfigureAwait(false);
+                    if (inspected is null)
                     {
-                        await lifecycle.ConfirmGoneAsync(state.Identity, cancellationToken).ConfigureAwait(false);
-                        continue;
-                    }
+                        if (state.Stage == RunnerLifecycleStage.Completed
+                            || await ReadRegistrationAsync(state.Identity, cancellationToken).ConfigureAwait(false) == RegistrationState.Absent)
+                        {
+                            await lifecycle.ConfirmGoneAsync(state.Identity, cancellationToken).ConfigureAwait(false);
+                            continue;
+                        }
 
-                    if (!string.Equals(inspected.ProviderResourceId, state.ProviderResourceId, StringComparison.Ordinal)
-                        || inspected.Identity.Scope != scope
-                        || inspected.Identity.OperationId != state.Identity.OperationId)
-                    {
-                        throw new InvalidDataException("Provider inspection contradicted the journaled runner identity.");
+                        AdoptCapacity(
+                            state.Identity,
+                            state.Identity.CapacityResources ?? new CapacityResourceQuantities(null, null),
+                            CapacityOccupancyState.Unknown);
+                        adoptedCount++;
+                        continue;
                     }
 
                     if (IsStartingCreatedRecovery(state, inspected))
                     {
-                        EnsureResourceMatchesJournal(inspected, state, scope);
                         AdoptCapacity(
                             state.Identity,
                             GetObservedCapacityResources(inspected, state.Identity),
@@ -930,12 +980,13 @@ public sealed partial class ScaleSetRuntimeFactory : IScaleSetRuntimeFactory
             bool same = resource.Identity.Scope == scope
                 && resource.Identity.OperationId == state.Identity.OperationId
                 && string.Equals(resource.Identity.RunnerName, state.Identity.RunnerName, StringComparison.Ordinal)
+                && (state.ProviderResourceId is null || state.ProviderResourceId == resource.ProviderResourceId)
                 && (resource.Identity.GitHubRunnerId is null
                     || state.Identity.GitHubRunnerId is null
                     || resource.Identity.GitHubRunnerId == state.Identity.GitHubRunnerId);
             if (!same)
             {
-                throw new InvalidDataException("Provider discovery returned a Created resource that conflicts with the durable Starting operation.");
+                throw new InvalidDataException("Provider inventory conflicts with a durable runner operation.");
             }
         }
 

@@ -14,6 +14,8 @@ namespace ScaleSet.Hosting.Configuration;
 /// </remarks>
 public static class AutoscalerConfiguration
 {
+    private static readonly TimeSpan MaximumReconcileInterval = TimeSpan.FromMilliseconds(uint.MaxValue - 1L);
+
     /// <summary>Binds options from the product configuration root and validates the complete snapshot.</summary>
     /// <param name="configuration">Configuration rooted at Controller, HostCapacity, ScaleSets, and Credentials.</param>
     /// <returns>A validated options snapshot.</returns>
@@ -168,9 +170,10 @@ public static class AutoscalerConfiguration
             errors.Add("Controller.StateDirectory is required.");
         }
 
-        if (controller.ReconcileInterval <= TimeSpan.Zero)
+        if (controller.ReconcileInterval < TimeSpan.FromMilliseconds(1)
+            || controller.ReconcileInterval > MaximumReconcileInterval)
         {
-            errors.Add("Controller.ReconcileInterval must be greater than zero.");
+            errors.Add("Controller.ReconcileInterval must be between 1 millisecond and 4294967294 milliseconds.");
         }
 
         if (controller.ControlOperationTimeout <= TimeSpan.Zero)
@@ -439,9 +442,9 @@ public static class AutoscalerConfiguration
             errors.Add($"{path}.Scaling.MinRunners must not exceed MaxRunners.");
         }
 
-        if (scaling.IdleTimeout < TimeSpan.Zero)
+        if (scaling.IdleTimeout is { } idleTimeout && idleTimeout != TimeSpan.Zero)
         {
-            errors.Add($"{path}.Scaling.IdleTimeout must be zero or greater when configured.");
+            errors.Add($"{path}.Scaling.IdleTimeout must be unset or zero. Automatic retirement requires authoritative per-runner idle and assignment evidence.");
         }
     }
 

@@ -30,8 +30,7 @@ public sealed class ControllerOptions
     /// <summary>Gets or sets the directory used for durable controller state.</summary>
     public string? StateDirectory { get; set; }
 
-    /// <summary>Gets or sets the reserved interval for periodic inventory reconciliation.</summary>
-    /// <remarks>The autoscaler currently reconciles inventory at startup and performs completed-runner cleanup while processing messages.</remarks>
+    /// <summary>Gets or sets the interval between steady-state inventory reconciliations.</summary>
     public TimeSpan ReconcileInterval { get; set; } = TimeSpan.FromSeconds(30);
 
     /// <summary>Gets or sets the budget for control operations such as acknowledgments.</summary>
@@ -118,8 +117,8 @@ public sealed class ScalingOptions
     /// <summary>Gets or sets the maximum total runner count.</summary>
     public int MaxRunners { get; set; } = 10;
 
-    /// <summary>Gets or sets the reserved delay before retiring known idle runners.</summary>
-    /// <remarks>The autoscaler currently performs no idle-timeout retirement.</remarks>
+    /// <summary>Gets or sets the idle retirement setting. Null and zero disable automatic retirement.</summary>
+    /// <remarks>Positive timeouts require assignment-safe per-runner idle evidence, which the autoscaler cannot establish.</remarks>
     public TimeSpan? IdleTimeout { get; set; }
 }
 

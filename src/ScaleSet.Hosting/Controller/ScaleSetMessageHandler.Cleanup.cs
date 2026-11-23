@@ -18,49 +18,18 @@ public sealed partial class ScaleSetMessageHandler
                 continue;
             }
 
-            bool absent = await _provisioner.ReconcileCompletedAsync(operation.Identity, cancellationToken).ConfigureAwait(false);
-            if (absent)
-            {
-                ReleaseCapacityLease(_capacity, operation.Identity.OperationId);
-            }
-        }
-    }
-
-    private static void ReleaseCapacityLease(ScaleSetCapacityContext capacity, Guid operationId)
-    {
-        for (int attempt = 0; attempt < 3; attempt++)
-        {
-            CapacityReservationLease? lease = capacity.DemandRegistry.GetCapacityLease(operationId);
-            if (lease is null)
-            {
-                return;
-            }
-
-            CapacityReleaseStatus status = capacity.Coordinator.TryRelease(lease.Handle, lease.Revision);
-            if (status is CapacityReleaseStatus.Released or CapacityReleaseStatus.AlreadyReleased)
-            {
-                _ = capacity.DemandRegistry.RemoveCapacityLease(operationId, lease);
-                return;
-            }
-
-            if (status == CapacityReleaseStatus.StaleRevision)
+            CapacityReservationLease? lease = _capacity.DemandRegistry.GetCapacityLease(operation.Identity.OperationId);
+            if (operation.Stage == RunnerLifecycleStage.Gone && lease is null)
             {
                 continue;
             }
 
-            if (status == CapacityReleaseStatus.StaleHandle)
+            bool absent = await _provisioner.ReconcileCompletedAsync(operation.Identity, cancellationToken).ConfigureAwait(false);
+            if (absent && lease is not null
+                && _capacity.DemandRegistry.TryReleaseConfirmedAbsent(_capacity.Coordinator, lease) == CapacityReleaseStatus.VersionExhausted)
             {
-                CapacityReservationLease? refreshed = capacity.DemandRegistry.GetCapacityLease(operationId);
-                if (refreshed is not null && refreshed.Handle.Generation != lease.Handle.Generation)
-                {
-                    continue;
-                }
+                throw new InvalidOperationException("The capacity ledger cannot record the confirmed runner absence.");
             }
-
-            throw new InvalidOperationException(
-                $"Capacity for completed runner operation '{operationId}' could not be released: {status}.");
         }
-
-        throw new InvalidOperationException($"Capacity for completed runner operation '{operationId}' changed repeatedly during release.");
     }
 }

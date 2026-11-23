@@ -27,12 +27,12 @@ public sealed partial class ScaleSetRunnerProvisioner
         }
 
         EnsureSameStableIdentity(state.Identity, identity);
-        if (state.Stage == RunnerLifecycleStage.Gone)
+        if (state.Stage == RunnerLifecycleStage.Gone && state.ProviderResourceId is null)
         {
             return true;
         }
 
-        if (state.Stage is not (RunnerLifecycleStage.Completed or RunnerLifecycleStage.Removing)
+        if (state.Stage is not (RunnerLifecycleStage.Completed or RunnerLifecycleStage.Removing or RunnerLifecycleStage.Gone)
             || state.ProviderResourceId is null)
         {
             return false;
@@ -55,6 +55,11 @@ public sealed partial class ScaleSetRunnerProvisioner
         }
 
         ValidateProviderResource(inspected, state.Identity);
+        if (state.Stage == RunnerLifecycleStage.Gone)
+        {
+            throw new InvalidDataException("Provider inspection contradicts a durable runner absence.");
+        }
+
         if (inspected.Status is not (RunnerResourceStatus.Exited or RunnerResourceStatus.Dead))
         {
             // Job completion is not proof that the container process has exited.
