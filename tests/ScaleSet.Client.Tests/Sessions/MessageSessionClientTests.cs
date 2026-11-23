@@ -616,6 +616,74 @@ public sealed class MessageSessionClientTests
     }
 
     [Fact]
+    public async Task DeleteMessageSessionAsyncRetiresExactIdWithFreshAdministrationCredentials()
+    {
+        using ClientFixture fixture = new((request, _) => Task.FromResult(IsClose(request)
+            ? new HttpResponseMessage(HttpStatusCode.NoContent)
+            : NotFoundResponse()));
+
+        await fixture.Client.DeleteMessageSessionAsync(LargeScaleSetId, SessionId, TestContext.Current.CancellationToken);
+
+        RecordedRequest close = Assert.Single(fixture.Handler.Requests, IsClose);
+        Assert.Equal("actions.example.test", close.Uri.Host);
+        Assert.Equal($"/tenant/123/_apis/runtime/runnerscalesets/{LargeScaleSetId}/sessions/{SessionId:D}", close.Uri.AbsolutePath);
+        Assert.Equal("Bearer " + DiscoveryJwt, close.Authorization);
+        Assert.Empty(close.Body);
+        Assert.DoesNotContain(fixture.Handler.Requests, IsCreateSession);
+        Assert.DoesNotContain(fixture.Handler.Requests, request => request.Uri.Host == "queue.example.test");
+    }
+
+    [Fact]
+    public async Task DeleteMessageSessionAsyncValidatesIdentifiersBeforeAdministrationDiscovery()
+    {
+        using ClientFixture fixture = new((_, _) => Task.FromResult(NotFoundResponse()));
+        CancellationToken token = TestContext.Current.CancellationToken;
+
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(
+            () => fixture.Client.DeleteMessageSessionAsync(0, SessionId, token));
+        await Assert.ThrowsAsync<ArgumentException>(
+            () => fixture.Client.DeleteMessageSessionAsync(LargeScaleSetId, Guid.Empty, token));
+
+        Assert.Empty(fixture.Handler.Requests);
+    }
+
+    [Theory]
+    [InlineData(HttpStatusCode.BadRequest)]
+    [InlineData(HttpStatusCode.NotFound)]
+    public async Task DeleteMessageSessionAsyncKeepsClosedOrMissingResponsesAsFailures(HttpStatusCode status)
+    {
+        const string expired = """{"typeKey":"RunnerScaleSetSessionExpiredException"}""";
+        using ClientFixture fixture = new((_, _) => Task.FromResult(JsonResponse(status, expired)));
+
+        var error = await Assert.ThrowsAsync<ScaleSetApiException>(
+            () => fixture.Client.DeleteMessageSessionAsync(LargeScaleSetId, SessionId, TestContext.Current.CancellationToken));
+
+        Assert.Equal((int)status, error.StatusCode);
+        Assert.Contains("RunnerScaleSetSessionExpiredException", error.BodyPreview, StringComparison.Ordinal);
+        Assert.Single(fixture.Handler.Requests, IsClose);
+    }
+
+    [Fact]
+    public async Task DeleteMessageSessionAsyncDoesNotRepeatAnUncertainDeleteUnderRetryPolicy()
+    {
+        using ClientFixture fixture = new((_, _) => Task.FromException<HttpResponseMessage>(
+            new HttpRequestException("Simulated loss of the close response.")));
+        using IDisposable retry = ScaleSetRequestRetry.Configure(static options => options with
+        {
+            MaxRetries = 2,
+            WaitMin = TimeSpan.Zero,
+            ShouldRetry = static (_, _) => ValueTask.FromResult(true),
+        });
+
+        var error = await Assert.ThrowsAsync<ScaleSetApiException>(
+            () => fixture.Client.DeleteMessageSessionAsync(LargeScaleSetId, SessionId, TestContext.Current.CancellationToken));
+
+        Assert.Null(error.StatusCode);
+        Assert.True(error.IsTransientTransportFailure);
+        Assert.Single(fixture.Handler.Requests, IsClose);
+    }
+
+    [Fact]
     public async Task CloseAsyncUsesAdminCredentialIsIdempotentAndRejectsLaterOperations()
     {
         int closes = 0;

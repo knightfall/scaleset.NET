@@ -68,7 +68,7 @@ conflicts/not-found responses into success.
 | Acquire | `acquireJobs` | POST scale-set/{id}/acquirejobs; JSON int64 request-ID array; admin-service origin but queue bearer token; 200 `value` int64 array |
 | Refresh | `refreshMessageSession` | PATCH scale-set/{id}/sessions/{guid}; admin bearer token; 200 refreshed snapshot for the same session GUID |
 | Queue 401 | GetMessage/DeleteMessage/AcquireJobs | Refresh once and retry once on the same session GUID; compare session ID/token after locking to avoid duplicate concurrent refresh |
-| Close | `Close`, `deleteMessageSession` | DELETE sessions/{guid}; admin bearer token; 204; host owns bounded cleanup |
+| Close or retire | `Close`, `deleteMessageSession` | DELETE sessions/{guid}; admin bearer token; 204. Use `CloseAsync` to drain an owned client or `DeleteMessageSessionAsync` to retire an exact journaled session after process loss. |
 
 ## Serialization and errors
 

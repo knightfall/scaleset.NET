@@ -28,6 +28,13 @@ An explicit `CloseAsync` lets the owner choose a cleanup deadline and observe
 and retry a failed close. Consumers can depend on their own narrow interfaces
 for administration calls such as JIT generation or runner-group lookup.
 
+After a process loss, a supervisor with current ownership can use
+`ScaleSetClient.DeleteMessageSessionAsync` with the journaled scale-set ID
+and session GUID. Successful completion confirms retirement. A failed or
+lost response leaves the outcome uncertain. Require independent proof of
+retirement before starting a replacement in that case. Retain the old
+checkpoint and reconcile pending delivery effects independently.
+
 Use the Listener package for the message loop and Hosting for provisioning
 through a runner provider. See the [authenticated quickstart](https://github.com/knightfall/scaleset.NET/blob/main/docs/usage.md)
 and [client behavior](https://github.com/knightfall/scaleset.NET/blob/main/docs/implementation/CLIENT.md).
