@@ -5,7 +5,9 @@ scripted session, in-memory JSON checkpoint store, ownership signal, and
 reservation ledger model the application interfaces. They run in one process
 and provide no cross-process durability or distributed ownership.
 
-From the repository root, pack and run the app in an isolated directory. Its
+Inside the repository the project uses source references so repository-wide
+restore can discover it before publication. From the repository root, pack and
+run the app in an isolated directory to verify package consumption. Its
 NuGet configuration selects the candidate feed for the exact SDK versions and
 NuGet.org for external dependencies.
 
