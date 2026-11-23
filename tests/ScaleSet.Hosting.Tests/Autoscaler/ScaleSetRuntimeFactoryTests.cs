@@ -19,7 +19,7 @@ using ScaleSet.Hosting.Telemetry;
 
 namespace ScaleSet.Hosting.Tests.Autoscaler;
 
-public sealed class ScaleSetRuntimeFactoryTests
+public sealed partial class ScaleSetRuntimeFactoryTests
 {
     private const string CredentialSentinel = "synthetic-PAT-secret-6419";
 
@@ -788,6 +788,9 @@ public sealed class ScaleSetRuntimeFactoryTests
         public Func<RunnerScaleSet, CancellationToken, Task<RunnerScaleSet>>? OnCreate { get; init; }
         public Func<RunnerScaleSetJitRunnerSetting, RunnerScaleSetJitRunnerConfig>? OnGenerateJit { get; init; }
         public Func<int, CancellationToken, Task<IScaleSetRuntimeSession>>? OnOpen { get; init; }
+        public Func<long, CancellationToken, Task<RunnerReference?>>? OnGetRunner { get; init; }
+        public Func<long, CancellationToken, Task>? OnRemoveRunner { get; init; }
+        public RunnerScaleSet? ExistingScaleSet { get; init; }
 
         public FakeRuntimeSession? RuntimeSession { get; init; }
 
@@ -809,8 +812,14 @@ public sealed class ScaleSetRuntimeFactoryTests
             cancellationToken.ThrowIfCancellationRequested();
             Assert.Equal(44L, runnerGroupId);
             Assert.Equal("ci-linux", name);
-            return Task.FromResult<RunnerScaleSet?>(null);
+            return Task.FromResult(ExistingScaleSet);
         }
+
+        public Task<RunnerReference?> GetRunnerAsync(long runnerId, CancellationToken cancellationToken) =>
+            OnGetRunner?.Invoke(runnerId, cancellationToken) ?? Task.FromResult<RunnerReference?>(null);
+
+        public Task RemoveRunnerAsync(long runnerId, CancellationToken cancellationToken) =>
+            OnRemoveRunner?.Invoke(runnerId, cancellationToken) ?? throw new InvalidOperationException("This test did not configure runner removal.");
 
         public Task<RunnerScaleSet> CreateScaleSetAsync(RunnerScaleSet scaleSet, CancellationToken cancellationToken)
         {
@@ -848,6 +857,7 @@ public sealed class ScaleSetRuntimeFactoryTests
     {
         public required Func<CancellationToken, Task<RunnerScaleSetMessage?>> Poll { get; init; }
         public required Func<CancellationToken, Task> Close { get; init; }
+        public Func<IReadOnlyList<long>, CancellationToken, Task<IReadOnlyList<long>>>? Acquire { get; init; }
         public Func<long, CancellationToken, Task>? Acknowledge { get; init; }
         public int CloseCount { get; private set; }
 
@@ -864,7 +874,7 @@ public sealed class ScaleSetRuntimeFactoryTests
             Acknowledge?.Invoke(messageId, cancellationToken) ?? Task.CompletedTask;
 
         public Task<IReadOnlyList<long>> AcquireJobsAsync(IReadOnlyList<long> runnerRequestIds, CancellationToken cancellationToken) =>
-            Task.FromResult(runnerRequestIds);
+            Acquire?.Invoke(runnerRequestIds, cancellationToken) ?? Task.FromResult(runnerRequestIds);
 
         public Task CloseAsync(CancellationToken cancellationToken)
         {
@@ -891,7 +901,8 @@ public sealed class ScaleSetRuntimeFactoryTests
         public Task<ImmutableArray<RunnerResource>> DiscoverAsync(RunnerOwnershipScope scope, CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            return OnDiscover?.Invoke(cancellationToken) ?? Task.FromResult(Discovered);
+            return OnDiscover?.Invoke(cancellationToken)
+                ?? Task.FromResult(Current is { } current ? Discovered.Add(current) : Discovered);
         }
 
         public Task<RunnerResource> CreateAsync(RunnerCreateRequest request, CancellationToken cancellationToken = default)

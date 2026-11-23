@@ -102,6 +102,22 @@ public sealed class ScaleSetDemandRegistry
         }
     }
 
+    /// <summary>Releases the captured lease after the owner confirms cleanup. A stale lease cannot release a newer generation.</summary>
+    /// <param name="coordinator">Coordinator that issued the lease.</param>
+    /// <param name="lease">Lease captured before collecting the cleanup evidence.</param>
+    public CapacityReleaseStatus TryReleaseConfirmedAbsent(HostCapacityCoordinator coordinator, CapacityReservationLease lease)
+    {
+        ArgumentNullException.ThrowIfNull(coordinator);
+        ArgumentNullException.ThrowIfNull(lease);
+        CapacityReleaseStatus status = coordinator.TryRelease(lease.Handle, lease.Revision);
+        if (status is CapacityReleaseStatus.Released or CapacityReleaseStatus.AlreadyReleased)
+        {
+            _ = RemoveCapacityLease(lease.Handle.Identity.OperationId, lease);
+        }
+
+        return status;
+    }
+
     /// <summary>Gets the latest registered generation and revision for an operation.</summary>
     public CapacityReservationLease? GetCapacityLease(Guid operationId)
     {

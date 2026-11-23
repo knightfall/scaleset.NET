@@ -496,6 +496,51 @@ public sealed class AutoscalerConfigurationTests
         Assert.Contains(errors, error => error.StartsWith("ScaleSets[0].Lifecycle.CleanupTimeout", StringComparison.Ordinal));
     }
 
+    [Theory]
+    [InlineData(null, false)]
+    [InlineData(0, false)]
+    [InlineData(1, true)]
+    public void Validate_RejectsEnabledIdleRetirementWithoutAssignmentEvidence(int? idleMilliseconds, bool rejected)
+    {
+        AutoscalerOptions options = ValidOptions();
+        options.ScaleSets[0].Scaling.IdleTimeout = idleMilliseconds is { } milliseconds
+            ? TimeSpan.FromMilliseconds(milliseconds)
+            : null;
+
+        IReadOnlyList<string> errors = AutoscalerConfiguration.Validate(options);
+
+        if (rejected)
+        {
+            Assert.StartsWith("ScaleSets[0].Scaling.IdleTimeout", Assert.Single(errors), StringComparison.Ordinal);
+        }
+        else
+        {
+            Assert.Empty(errors);
+        }
+    }
+
+    [Theory]
+    [InlineData(1, true)]
+    [InlineData(TimeSpan.TicksPerMillisecond, false)]
+    [InlineData(4294967294L * TimeSpan.TicksPerMillisecond, false)]
+    [InlineData(4294967295L * TimeSpan.TicksPerMillisecond, true)]
+    public void Validate_UsesThePeriodicTimerIntervalLimits(long intervalTicks, bool rejected)
+    {
+        AutoscalerOptions options = ValidOptions();
+        options.Controller.ReconcileInterval = TimeSpan.FromTicks(intervalTicks);
+
+        IReadOnlyList<string> errors = AutoscalerConfiguration.Validate(options);
+
+        if (rejected)
+        {
+            Assert.StartsWith("Controller.ReconcileInterval", Assert.Single(errors), StringComparison.Ordinal);
+        }
+        else
+        {
+            Assert.Empty(errors);
+        }
+    }
+
     private static AutoscalerOptions ValidOptions()
     {
         return new AutoscalerOptions

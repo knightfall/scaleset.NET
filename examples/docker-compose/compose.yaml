@@ -11,6 +11,7 @@ services:
       - "${DOCKER_GID:?Set DOCKER_GID to the group ID that can access the Docker socket}"
     environment:
       SCALESET__Controller__Identity: "${SCALESET__Controller__Identity:-scaleset-controller}"
+      SCALESET__Controller__ReconcileInterval: "${SCALESET__Controller__ReconcileInterval:-00:00:30}"
       SCALESET__Controller__StateDirectory: /var/lib/scaleset
       SCALESET__Health__ListenUrl: http://0.0.0.0:8080
       SCALESET__ScaleSets__0__Key: "${SCALESET__ScaleSets__0__Key:-ci-linux}"
@@ -21,6 +22,7 @@ services:
       SCALESET__ScaleSets__0__Scaling__Policy: "${SCALESET__ScaleSets__0__Scaling__Policy:-SpareCapacity}"
       SCALESET__ScaleSets__0__Scaling__MinRunners: "${SCALESET__ScaleSets__0__Scaling__MinRunners:-0}"
       SCALESET__ScaleSets__0__Scaling__MaxRunners: "${SCALESET__ScaleSets__0__Scaling__MaxRunners:-10}"
+      SCALESET__ScaleSets__0__Lifecycle__ShutdownDrainTimeout: "${SCALESET__ScaleSets__0__Lifecycle__ShutdownDrainTimeout:-00:05:00}"
       SCALESET__ScaleSets__0__RunnerProfile__Image: "${SCALESET__ScaleSets__0__RunnerProfile__Image:?Set a pinned runner image}"
       SCALESET__ScaleSets__0__RunnerProfile__Architecture: "${SCALESET__ScaleSets__0__RunnerProfile__Architecture:-X64}"
       SCALESET__ScaleSets__0__RunnerProfile__Cpu: "${SCALESET__ScaleSets__0__RunnerProfile__Cpu:-1}"

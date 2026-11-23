@@ -357,12 +357,12 @@ adding any durable asynchronous job queue.
   service conflict behavior in local fixtures and live canary.
 - A healthy runner exits after one job. Startup discovery reconciles owned
   provider resources with journal state before polling. During runtime,
-  completion events drive cleanup of known terminal runners; periodic
-  reconciliation of unexpected exits and leaked partial resources is planned.
-- `IdleTimeout` is currently accepted and validated but is not applied by the
-  runtime. Idle-runner retirement is planned. Future scale-down must use known
-  idle state and a configured grace period; shrinking max capacity must never
-  terminate known busy/unknown runners just to force the count down.
+  completion events drive cleanup of known terminal runners. Periodic
+  reconciliation verifies scoped inventory and GitHub registration evidence
+  before releasing capacity for unexpected exits or partial resources.
+- `IdleTimeout` accepts null or zero. Retirement of live runners requires
+  authoritative per-runner idle evidence and protection against a concurrent
+  assignment. Busy and uncertain runners retain capacity.
   Configuration can explicitly select Docker builds or privileged mode; safe
   default is neither.
 - Confirmed shutdown policy (D12): drain and preserve. Stop new acquisitions
