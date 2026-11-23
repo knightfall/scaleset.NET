@@ -130,6 +130,21 @@ Logs use `ILogger` routed through Serilog to the configured OTLP endpoint.
 Traces and metrics are exported separately by the OpenTelemetry SDK. Compose
 runs the collector as a separate service.
 
+Capacity spans use the `ScaleSet.Hosting` activity source. The
+`ScaleSet.Hosting.Capacity` meter exports `scaleset.capacity.operations` and
+`scaleset.capacity.creation_lease.operations` with operation and outcome tags.
+The `ScaleSet.Hosting` meter exports `scaleset.operations` and
+`scaleset.operation.duration` for startup inventory reconciliation, job
+acquisition, runner provisioning, queue polls, acknowledgments, and drain.
+Empty poll responses and cancellations have distinct outcomes. A drain that
+reaches its deadline reports `unknown` because work may still be active.
+
+`scaleset.runners` reports current capacity occupancy by scale set, provider,
+and state. It includes reservations and uncertain runners that still hold
+capacity. A released reservation disappears from the next observation.
+Operation and state tags use fixed values. Scale-set tags use up to 64
+configured keys, with the remaining keys grouped under `other`.
+
 Live GitHub canaries and live Docker recovery tests require a dedicated test
 scope and are not part of ordinary image builds. The opt-in Docker integration
 tests require `SCALESET_DOCKER_INTEGRATION=1` and a Linux Docker daemon.

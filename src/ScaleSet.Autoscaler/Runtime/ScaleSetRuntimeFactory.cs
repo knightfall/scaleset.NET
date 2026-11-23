@@ -1,5 +1,6 @@
 using System.Collections.Immutable;
 using System.Globalization;
+using System.Runtime.ExceptionServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -10,6 +11,7 @@ using ScaleSet.Hosting.Configuration;
 using ScaleSet.Hosting.Controller;
 using ScaleSet.Hosting.Providers;
 using ScaleSet.Hosting.State;
+using ScaleSet.Hosting.Telemetry;
 using ScaleSet.Listener;
 using ScaleSet.Providers.Docker;
 
@@ -119,6 +121,7 @@ public sealed partial class ScaleSetRuntimeFactory : IScaleSetRuntimeFactory
         TimeProvider,
         IScaleSetRuntimeClient> _clientFactory;
     private readonly Func<ScaleSetOptions, ILogger<DockerRunnerProvider>, TimeProvider, IRunnerProvider> _providerFactory;
+    private readonly ScaleSetTelemetryMetrics? _telemetry;
 
     /// <summary>Creates a runtime factory; optional factories keep the runtime replaceable in tests.</summary>
     public ScaleSetRuntimeFactory(
@@ -126,7 +129,8 @@ public sealed partial class ScaleSetRuntimeFactory : IScaleSetRuntimeFactory
         ILoggerFactory loggerFactory,
         TimeProvider? timeProvider = null,
         Func<GitHubTarget, ScaleSetCredentials, ScaleSetClientOptions, ILogger<ScaleSetClient>, TimeProvider, IScaleSetRuntimeClient>? clientFactory = null,
-        Func<ScaleSetOptions, ILogger<DockerRunnerProvider>, TimeProvider, IRunnerProvider>? providerFactory = null)
+        Func<ScaleSetOptions, ILogger<DockerRunnerProvider>, TimeProvider, IRunnerProvider>? providerFactory = null,
+        ScaleSetTelemetryMetrics? telemetry = null)
     {
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(loggerFactory);
@@ -135,6 +139,7 @@ public sealed partial class ScaleSetRuntimeFactory : IScaleSetRuntimeFactory
         _timeProvider = timeProvider ?? TimeProvider.System;
         _clientFactory = clientFactory ?? CreateScaleSetClient;
         _providerFactory = providerFactory ?? CreateDockerProvider;
+        _telemetry = telemetry;
     }
 
     /// <inheritdoc />
@@ -183,13 +188,20 @@ public sealed partial class ScaleSetRuntimeFactory : IScaleSetRuntimeFactory
                 provider,
                 capacityCoordinator,
                 _loggerFactory,
-                _timeProvider);
+                _timeProvider,
+                _telemetry);
             return Task.FromResult(runtime);
         }
-        catch
+        catch (Exception exception)
         {
-            runtimeClient?.Dispose();
-            DisposeProvider(provider);
+            List<Exception> failures = [exception];
+            CaptureDisposalFailure(() => DisposeProvider(provider), failures);
+            CaptureDisposalFailure(() => runtimeClient?.Dispose(), failures);
+            if (failures.Count > 1)
+            {
+                throw new AggregateException("Runtime creation and cleanup failed.", failures);
+            }
+
             throw;
         }
     }
@@ -234,6 +246,18 @@ public sealed partial class ScaleSetRuntimeFactory : IScaleSetRuntimeFactory
         }
     }
 
+    private static void CaptureDisposalFailure(Action dispose, List<Exception> failures)
+    {
+        try
+        {
+            dispose();
+        }
+        catch (Exception exception)
+        {
+            failures.Add(exception);
+        }
+    }
+
     private sealed record ScaleSetIdentityMarker(
         int SchemaVersion,
         string Target,
@@ -254,19 +278,24 @@ public sealed partial class ScaleSetRuntimeFactory : IScaleSetRuntimeFactory
         private readonly ILoggerFactory _loggerFactory;
         private readonly ILogger<ScaleSetRuntime> _logger;
         private readonly TimeProvider _timeProvider;
+        private readonly ScaleSetRuntimeTelemetry _metrics;
         private readonly object _sync = new();
+        private readonly CancellationTokenSource _stopSignal = new();
         private ScaleSetBootstrapLease? _bootstrapLease;
         private FileRunnerStateJournal? _journal;
         private RunnerLifecycleManager? _lifecycle;
         private ScaleSetRunnerProvisioner? _provisioner;
         private IScaleSetRuntimeSession? _session;
-        private ScaleSetListener? _listener;
         private ScaleSetMessageHandler? _handler;
-        private CancellationTokenSource? _listenerCancellation;
+        private TaskCompletionSource? _activeOperation;
+        private Task? _drainTask;
+        private Task? _stopTask;
+        private Task? _disposeTask;
         private long _scaleSetId;
+        private bool _initializationStarted;
         private bool _initialized;
+        private bool _listenerStarted;
         private bool _stopRequested;
-        private bool _disposed;
 
         public ScaleSetRuntime(
             ControllerOptions controllerOptions,
@@ -275,7 +304,8 @@ public sealed partial class ScaleSetRuntimeFactory : IScaleSetRuntimeFactory
             IRunnerProvider provider,
             HostCapacityCoordinator capacityCoordinator,
             ILoggerFactory loggerFactory,
-            TimeProvider timeProvider)
+            TimeProvider timeProvider,
+            ScaleSetTelemetryMetrics? telemetry)
         {
             _controllerOptions = controllerOptions;
             _scaleSetOptions = scaleSetOptions;
@@ -285,17 +315,39 @@ public sealed partial class ScaleSetRuntimeFactory : IScaleSetRuntimeFactory
             _loggerFactory = loggerFactory;
             _logger = loggerFactory.CreateLogger<ScaleSetRuntime>();
             _timeProvider = timeProvider;
+            _metrics = new ScaleSetRuntimeTelemetry(telemetry, ScaleSetKey);
         }
 
         public string ScaleSetKey => _scaleSetOptions.Key!;
 
         public async Task InitializeAsync(CancellationToken cancellationToken)
         {
-            if (_initialized)
+            TaskCompletionSource operation;
+            lock (_sync)
             {
-                throw new InvalidOperationException("The scale-set runtime has already been initialized.");
+                ObjectDisposedException.ThrowIf(_disposeTask is not null, this);
+                if (_initializationStarted || _stopRequested)
+                {
+                    throw new InvalidOperationException("The scale-set runtime can initialize only once, before shutdown.");
+                }
+
+                _initializationStarted = true;
+                operation = _activeOperation = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             }
 
+            try
+            {
+                using CancellationTokenSource linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _stopSignal.Token);
+                await InitializeCoreAsync(linked.Token).ConfigureAwait(false);
+            }
+            finally
+            {
+                CompleteOperation(operation);
+            }
+        }
+
+        private async Task InitializeCoreAsync(CancellationToken cancellationToken)
+        {
             if (!_provider.Capabilities.SupportsOwnershipScopedDiscovery)
             {
                 throw new InvalidOperationException("The configured provider must support ownership-scoped discovery.");
@@ -379,33 +431,75 @@ public sealed partial class ScaleSetRuntimeFactory : IScaleSetRuntimeFactory
                 _provider,
                 _journal,
                 _loggerFactory.CreateLogger<ScaleSetRunnerProvisioner>(),
-                _timeProvider);
+                _timeProvider,
+                _metrics.Metrics,
+                ScaleSetTelemetryProvider.Docker);
 
-            await ReconcileInventoryAsync(scope, token).ConfigureAwait(false);
+            await _metrics.MeasureAsync(
+                ScaleSetTelemetryOperation.Reconcile,
+                () => ReconcileInventoryAsync(scope, token)).ConfigureAwait(false);
             _initialized = true;
             RuntimeInitialized(_logger, ScaleSetKey, _scaleSetId);
         }
 
         public async Task RunAsync(CancellationToken cancellationToken)
         {
-            if (!_initialized || _journal is null || _lifecycle is null || _provisioner is null)
-            {
-                throw new InvalidOperationException("The scale-set runtime must finish initialization before it runs.");
-            }
-
+            TaskCompletionSource operation;
             lock (_sync)
             {
-                if (_stopRequested || _disposed)
+                if (_stopRequested)
                 {
                     return;
                 }
+
+                if (!_initialized || _activeOperation is not null)
+                {
+                    throw new InvalidOperationException("The scale-set runtime must finish initialization before it runs.");
+                }
+
+                if (_listenerStarted)
+                {
+                    throw new InvalidOperationException("The scale-set runtime can start its listener only once.");
+                }
+
+                _listenerStarted = true;
+                operation = _activeOperation = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             }
 
+            try
+            {
+                using CancellationTokenSource polling = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _stopSignal.Token);
+                await RunListenerAsync(polling.Token).ConfigureAwait(false);
+            }
+            finally
+            {
+                CompleteOperation(operation);
+            }
+        }
+
+        private async Task RunListenerAsync(CancellationToken cancellationToken)
+        {
             cancellationToken.ThrowIfCancellationRequested();
             IScaleSetRuntimeSession session = await _client.CreateMessageSessionAsync(
                 _scaleSetId,
                 _controllerOptions.Identity,
                 cancellationToken).ConfigureAwait(false);
+            if (_metrics.Metrics is not null)
+            {
+                session = new ScaleSetRuntimeTelemetry.MeteredSession(session, _metrics);
+            }
+
+            lock (_sync)
+            {
+                // Record the session even if shutdown raced with its creation.
+                // Stop closes it after the listener operation has returned.
+                _session = session;
+                if (_stopRequested)
+                {
+                    return;
+                }
+            }
+
             ScaleSetListener listener = new(
                 session,
                 new ScaleSetListenerOptions
@@ -422,144 +516,163 @@ public sealed partial class ScaleSetRuntimeFactory : IScaleSetRuntimeFactory
                 _capacityCoordinator.DemandRegistry,
                 listener.SetMaxRunners);
             ScaleSetMessageHandler handler = new(
-                _journal.Scope,
+                _journal!.Scope,
                 session,
-                _provisioner,
-                _lifecycle,
+                _provisioner!,
+                _lifecycle!,
                 _journal,
                 capacityContext,
                 _loggerFactory.CreateLogger<ScaleSetMessageHandler>());
-            CancellationTokenSource poll = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
 
-            bool stopBeforeListen;
             lock (_sync)
             {
-                stopBeforeListen = _stopRequested || _disposed;
-                if (!stopBeforeListen)
+                if (_stopRequested)
                 {
-                    _session = session;
-                    _listener = listener;
-                    _handler = handler;
-                    _listenerCancellation = poll;
+                    return;
                 }
+
+                _handler = handler;
             }
 
-            if (stopBeforeListen)
+            await listener.RunAsync(handler, cancellationToken).ConfigureAwait(false);
+        }
+
+        private void CompleteOperation(TaskCompletionSource operation)
+        {
+            lock (_sync)
             {
-                poll.Cancel();
-                poll.Dispose();
-                using CancellationTokenSource cleanup = new(_scaleSetOptions.Lifecycle.CleanupTimeout, _timeProvider);
-                await session.CloseAsync(cleanup.Token).ConfigureAwait(false);
-                return;
+                _activeOperation = null;
+                operation.SetResult();
             }
+        }
 
+        public Task StopAsync(CancellationToken cancellationToken)
+        {
+            // Polling and active callbacks must settle before session closure.
+            // Closure gets a separate per-set cleanup budget.
+            _ = cancellationToken;
+            lock (_sync)
+            {
+                _stopRequested = true;
+                return _stopTask ??= StopCoreAsync(_activeOperation?.Task, _drainTask);
+            }
+        }
+
+        private async Task StopCoreAsync(Task? activeOperation, Task? activeDrain)
+        {
+            // The task is installed under the lifetime lock before running any cleanup.
+            await Task.CompletedTask.ConfigureAwait(ConfigureAwaitOptions.ForceYielding);
+            _handler?.BeginDrain();
             try
             {
-                await listener.RunAsync(handler, poll.Token).ConfigureAwait(false);
+                await _stopSignal.CancelAsync().ConfigureAwait(false);
             }
             finally
             {
-                lock (_sync)
+                if (activeOperation is not null)
                 {
-                    if (ReferenceEquals(_listenerCancellation, poll))
-                    {
-                        _listenerCancellation = null;
-                    }
+                    await activeOperation.ConfigureAwait(false);
                 }
 
-                poll.Dispose();
-            }
-        }
+                if (activeDrain is not null)
+                {
+                    // The caller of DrainAsync observes its own failure or cancellation.
+                    await activeDrain.ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
+                }
 
-        public async Task StopAsync(CancellationToken cancellationToken)
-        {
-            // Session closure has a separate per-set cleanup budget.
-            _ = cancellationToken;
-            IScaleSetRuntimeSession? session;
-            CancellationTokenSource? polling;
-            ScaleSetMessageHandler? handler;
-            lock (_sync)
-            {
-                _stopRequested = true;
-                _listener?.SetMaxRunners(0);
-                handler = _handler;
-                polling = _listenerCancellation;
-                session = _session;
+                IScaleSetRuntimeSession? session = _session;
                 _session = null;
+                if (session is not null)
+                {
+                    using CancellationTokenSource cleanup = new(_scaleSetOptions.Lifecycle.CleanupTimeout, _timeProvider);
+                    await session.CloseAsync(cleanup.Token).ConfigureAwait(false);
+                    RuntimeSessionClosed(_logger, ScaleSetKey);
+                }
             }
-
-            handler?.BeginDrain();
-            polling?.Cancel();
-            if (session is null)
-            {
-                return;
-            }
-
-            // The service performs the bounded drain before its BackgroundService token is canceled.
-            // Here the listener is stopped and the independent session-cleanup budget is applied.
-            using CancellationTokenSource cleanup = new(_scaleSetOptions.Lifecycle.CleanupTimeout, _timeProvider);
-            await session.CloseAsync(cleanup.Token).ConfigureAwait(false);
-            RuntimeSessionClosed(_logger, ScaleSetKey);
         }
 
-        public async Task DrainAsync(CancellationToken cancellationToken)
+        public Task DrainAsync(CancellationToken cancellationToken)
         {
-            ScaleSetMessageHandler? handler;
-            ScaleSetListener? listener;
             lock (_sync)
             {
                 _stopRequested = true;
-                handler = _handler;
-                listener = _listener;
-                handler?.BeginDrain();
-            }
+                if (_stopTask is not null || _disposeTask is not null || _handler is null)
+                {
+                    return Task.CompletedTask;
+                }
 
-            listener?.SetMaxRunners(0);
-            if (handler is null)
-            {
-                return;
+                _handler.BeginDrain();
+                return _drainTask ??= DrainCoreAsync(_handler, cancellationToken);
             }
+        }
 
-            bool drained = await handler.WaitForDrainAsync(
-                _scaleSetOptions.Lifecycle.ShutdownDrainTimeout,
-                _timeProvider,
-                cancellationToken).ConfigureAwait(false);
+        private async Task DrainCoreAsync(ScaleSetMessageHandler handler, CancellationToken cancellationToken)
+        {
+            using CancellationTokenSource linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _stopSignal.Token);
+            bool drained = await _metrics.MeasureAsync(
+                ScaleSetTelemetryOperation.Drain,
+                () => handler.WaitForDrainAsync(_scaleSetOptions.Lifecycle.ShutdownDrainTimeout, _timeProvider, linked.Token),
+                static completed => completed ? ScaleSetTelemetryOutcome.Success : ScaleSetTelemetryOutcome.Unknown).ConfigureAwait(false);
             if (!drained)
             {
                 RuntimeDrainDeadline(_logger, ScaleSetKey, _scaleSetOptions.Lifecycle.ShutdownDrainTimeout);
             }
         }
 
-        public async ValueTask DisposeAsync()
+        public ValueTask DisposeAsync()
         {
             lock (_sync)
             {
-                if (_disposed)
-                {
-                    return;
-                }
-
-                _disposed = true;
+                _stopRequested = true;
+                return new ValueTask(_disposeTask ??= DisposeCoreAsync());
             }
+        }
 
+        private async Task DisposeCoreAsync()
+        {
+            List<Exception> failures = [];
             try
             {
                 await StopAsync(CancellationToken.None).ConfigureAwait(false);
             }
-            finally
+            catch (Exception exception)
             {
-                _lifecycle?.Dispose();
-                if (_journal is not null)
-                {
-                    await _journal.DisposeAsync().ConfigureAwait(false);
-                }
+                failures.Add(exception);
+            }
 
-                DisposeProvider(_provider);
-                _client.Dispose();
-                if (_bootstrapLease is not null)
-                {
-                    await _bootstrapLease.DisposeAsync().ConfigureAwait(false);
-                }
+            CaptureDisposalFailure(() => _provisioner?.Dispose(), failures);
+            CaptureDisposalFailure(() => _lifecycle?.Dispose(), failures);
+            await CaptureAsyncDisposalFailure(_journal, failures).ConfigureAwait(false);
+            CaptureDisposalFailure(() => DisposeProvider(_provider), failures);
+            CaptureDisposalFailure(_client.Dispose, failures);
+            await CaptureAsyncDisposalFailure(_bootstrapLease, failures).ConfigureAwait(false);
+            CaptureDisposalFailure(_stopSignal.Dispose, failures);
+
+            if (failures.Count == 1)
+            {
+                ExceptionDispatchInfo.Throw(failures[0]);
+            }
+
+            if (failures.Count > 1)
+            {
+                throw new AggregateException("Multiple scale-set runtime resources failed to close.", failures);
+            }
+        }
+
+        private static async Task CaptureAsyncDisposalFailure(IAsyncDisposable? resource, List<Exception> failures)
+        {
+            if (resource is null)
+            {
+                return;
+            }
+
+            try
+            {
+                await resource.DisposeAsync().ConfigureAwait(false);
+            }
+            catch (Exception exception)
+            {
+                failures.Add(exception);
             }
         }
 

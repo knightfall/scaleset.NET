@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Diagnostics.Metrics;
 using System.Collections.Concurrent;
+using ScaleSet.Hosting.Capacity;
 
 namespace ScaleSet.Hosting.Telemetry;
 
@@ -9,6 +10,10 @@ public static class ScaleSetTelemetrySources
     public const string Autoscaler = "ScaleSet.Autoscaler";
     public const string Client = "ScaleSet.Client";
     public const string Hosting = "ScaleSet.Hosting";
+
+    /// <summary>Meter name for capacity counters. Capacity activities use <see cref="Hosting"/>.</summary>
+    public const string HostingCapacity = Hosting + ".Capacity";
+
     public const string Listener = "ScaleSet.Listener";
     public const string DockerProvider = "ScaleSet.Providers.Docker";
 
@@ -80,11 +85,29 @@ public sealed class ScaleSetTelemetryMetrics : IDisposable
     private readonly Counter<long> _droppedLogs;
     private readonly ConcurrentDictionary<RunnerMetricKey, long> _runnerCounts = new();
     private readonly HashSet<string> _configuredScaleSetKeys;
+    private readonly HostCapacityCoordinator? _capacityCoordinator;
+    private readonly ScaleSetTelemetryProvider _capacityProvider;
 
     public ScaleSetTelemetryMetrics(IMeterFactory meterFactory, IEnumerable<string>? configuredScaleSetKeys = null)
+        : this(meterFactory, configuredScaleSetKeys, null, ScaleSetTelemetryProvider.Other)
+    {
+    }
+
+    /// <summary>Creates a meter that can read runner counts directly from the host capacity ledger.</summary>
+    /// <param name="meterFactory">Factory that owns the metrics meter.</param>
+    /// <param name="configuredScaleSetKeys">Allow-list of scale-set dimensions.</param>
+    /// <param name="capacityCoordinator">Ledger to observe in place of manually reported runner counts.</param>
+    /// <param name="capacityProvider">Backend shared by the ledger's scale sets.</param>
+    public ScaleSetTelemetryMetrics(
+        IMeterFactory meterFactory,
+        IEnumerable<string>? configuredScaleSetKeys,
+        HostCapacityCoordinator? capacityCoordinator,
+        ScaleSetTelemetryProvider capacityProvider)
     {
         ArgumentNullException.ThrowIfNull(meterFactory);
 
+        _capacityCoordinator = capacityCoordinator;
+        _capacityProvider = Enum.IsDefined(capacityProvider) ? capacityProvider : ScaleSetTelemetryProvider.Other;
         var version = typeof(ScaleSetTelemetryMetrics).Assembly.GetName().Version?.ToString(3);
         _meter = meterFactory.Create(ScaleSetTelemetrySources.Hosting, version);
         _operations = _meter.CreateCounter<long>("scaleset.operations", "{operation}", "Completed autoscaler operations.");
@@ -112,12 +135,22 @@ public sealed class ScaleSetTelemetryMetrics : IDisposable
 
     public void RecordDroppedLog() => _droppedLogs.Add(1);
 
+    /// <summary>Reports a runner count for meters created without a capacity ledger.</summary>
+    /// <param name="scaleSetKey">Configured local scale-set key.</param>
+    /// <param name="provider">Runner backend.</param>
+    /// <param name="state">Runner lifecycle state.</param>
+    /// <param name="count">Current count, or zero to remove the series.</param>
     public void SetRunnerCount(
         string? scaleSetKey,
         ScaleSetTelemetryProvider provider,
         RunnerTelemetryState state,
         long count)
     {
+        if (_capacityCoordinator is not null)
+        {
+            return;
+        }
+
         // Keep both exported dimensions and the backing inventory bounded.
         provider = Enum.IsDefined(provider) ? provider : ScaleSetTelemetryProvider.Other;
         state = Enum.IsDefined(state) ? state : RunnerTelemetryState.Unknown;
@@ -135,7 +168,10 @@ public sealed class ScaleSetTelemetryMetrics : IDisposable
 
     private IEnumerable<Measurement<long>> ObserveRunners()
     {
-        foreach (var item in _runnerCounts)
+        IEnumerable<KeyValuePair<RunnerMetricKey, long>> counts = _capacityCoordinator is null
+            ? _runnerCounts
+            : ReadCapacityCounts(_capacityCoordinator);
+        foreach (var item in counts)
         {
             var tags = new TagList
             {
@@ -145,6 +181,38 @@ public sealed class ScaleSetTelemetryMetrics : IDisposable
             };
             yield return new Measurement<long>(item.Value, tags);
         }
+    }
+
+    private Dictionary<RunnerMetricKey, long> ReadCapacityCounts(HostCapacityCoordinator coordinator)
+    {
+        Dictionary<RunnerMetricKey, long> counts = new();
+        foreach (ScaleSetCapacityUsageSnapshot scaleSet in coordinator.ReadOccupancy().ScaleSets.Values)
+        {
+            string scaleSetKey = ResolveScaleSetKey(scaleSet.ScaleSetKey);
+            foreach ((CapacityOccupancyState state, long count) in scaleSet.Usage.StateCounts)
+            {
+                if (count <= 0)
+                {
+                    continue;
+                }
+
+                RunnerTelemetryState runnerState = state switch
+                {
+                    CapacityOccupancyState.Reserved => RunnerTelemetryState.Reserved,
+                    CapacityOccupancyState.JitIssued or CapacityOccupancyState.Creating => RunnerTelemetryState.Creating,
+                    CapacityOccupancyState.Starting => RunnerTelemetryState.Starting,
+                    CapacityOccupancyState.Idle => RunnerTelemetryState.Idle,
+                    CapacityOccupancyState.Busy => RunnerTelemetryState.Busy,
+                    CapacityOccupancyState.Removing => RunnerTelemetryState.Removing,
+                    CapacityOccupancyState.Failed => RunnerTelemetryState.Failed,
+                    _ => RunnerTelemetryState.Unknown,
+                };
+                var key = new RunnerMetricKey(scaleSetKey, _capacityProvider, runnerState);
+                counts[key] = counts.GetValueOrDefault(key) + count;
+            }
+        }
+
+        return counts;
     }
 
     private TagList CreateTags(string operation, string outcome, string? scaleSetKey, string provider) => new()
