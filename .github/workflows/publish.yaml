@@ -82,6 +82,25 @@ jobs:
           PY
           dotnet build "$worker/ScaleSet.CustomProvider.Example.csproj" --configuration Release --no-restore -p:RunAnalyzersDuringBuild=true
           dotnet run --project "$worker/ScaleSet.CustomProvider.Example.csproj" --configuration Release --no-build
+      - name: Run the checkpointed listener from candidate packages
+        run: |
+          consumer="$RUNNER_TEMP/scaleset-checkpointed-listener"
+          mkdir -p "$consumer/feed"
+          cp artifacts/packages/Knightfall.ScaleSet.Client.*.nupkg artifacts/packages/Knightfall.ScaleSet.Listener.*.nupkg "$consumer/feed/"
+          cp global.json Directory.Packages.props .editorconfig examples/checkpointed-listener/*.cs examples/checkpointed-listener/*.csproj examples/checkpointed-listener/NuGet.Local.Config "$consumer/"
+          dotnet restore "$consumer/ScaleSet.CheckpointedListener.Example.csproj" --configfile "$consumer/NuGet.Local.Config" --packages "$consumer/packages" --no-http-cache
+          python3 - "$consumer/obj/project.assets.json" <<'PYTHON'
+          import json
+          import sys
+          from pathlib import Path
+
+          libraries = json.loads(Path(sys.argv[1]).read_text())["libraries"]
+          allowed_prefixes = ("Knightfall.ScaleSet.Client/", "Knightfall.ScaleSet.Listener/", "Microsoft.Extensions.", "System.Diagnostics.DiagnosticSource/", "Roslynator.Analyzers/")
+          unexpected = [name for name in libraries if not name.startswith(allowed_prefixes)]
+          if unexpected:
+              raise SystemExit(f"Unexpected checkpointed listener dependencies: {unexpected}")
+          PYTHON
+          dotnet run --project "$consumer/ScaleSet.CheckpointedListener.Example.csproj" --configuration Release --no-restore
       - name: Prepare source-bound candidate and validated SPDX SBOM
         run: python3 .github/release/prepare.py --output "$RUNNER_TEMP/release" --cache "$RUNNER_TEMP/release-tools" --packages artifacts/packages
       - name: Check actual package layouts and manifest integrity
