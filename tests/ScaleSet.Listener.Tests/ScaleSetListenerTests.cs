@@ -297,6 +297,36 @@ public sealed class ScaleSetListenerTests
         Assert.Empty(client.Acknowledgments);
     }
 
+    [Fact]
+    public async Task RepeatedLegacyRunsDeliverInitialStatisticsAndResetTheirCursor()
+    {
+        var client = new MessageSource();
+        var listener = Create(client);
+        var handled = new List<long?>();
+        for (int run = 0; run < 2; run++)
+        {
+            using var stop = new CancellationTokenSource();
+            client.Messages.Enqueue(new RunnerScaleSetMessage { MessageId = 7000000001 });
+            client.Messages.Enqueue(null);
+            var handler = new MessageHandler((message, _) =>
+            {
+                handled.Add(message?.MessageId);
+                if (message is null)
+                {
+                    stop.Cancel();
+                }
+
+                return Task.CompletedTask;
+            });
+
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => listener.RunAsync(handler, stop.Token));
+        }
+
+        Assert.Equal([-1, 7000000001, null, -1, 7000000001, null], handled);
+        Assert.Equal([0, 7000000001, 0, 7000000001], client.Polls.Select(poll => poll.Cursor));
+        Assert.Equal([7000000001, 7000000001], client.Acknowledgments);
+    }
+
     private static ScaleSetListener Create(MessageSource client) => new(client, new ScaleSetListenerOptions { ScaleSetId = 1 });
 
     private sealed class MessageHandler(Func<RunnerScaleSetMessage?, CancellationToken, Task> handle) : IScaleSetMessageHandler
