@@ -117,6 +117,12 @@ internal sealed class OtlpHttpTestReceiver : IAsyncDisposable
             body.ToArray(),
             context.Request.Headers["Authorization"],
             context.Request.ContentType);
+
+        context.Response.StatusCode = (int)HttpStatusCode.OK;
+        context.Response.ContentType = "application/x-protobuf";
+        context.Response.ContentLength64 = 0;
+        context.Response.Close();
+
         _requests.Enqueue(request);
         _requestArrived.Release();
         _firstRequestByPath.GetOrAdd(
@@ -124,10 +130,6 @@ internal sealed class OtlpHttpTestReceiver : IAsyncDisposable
             static _ => new TaskCompletionSource<OtlpHttpRequest>(TaskCreationOptions.RunContinuationsAsynchronously))
             .TrySetResult(request);
 
-        context.Response.StatusCode = (int)HttpStatusCode.OK;
-        context.Response.ContentType = "application/x-protobuf";
-        context.Response.ContentLength64 = 0;
-        context.Response.Close();
     }
 }
 

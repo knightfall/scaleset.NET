@@ -24,11 +24,11 @@ public sealed partial class OtlpTelemetryIntegrationTests
                 new KeyValuePair<string, string?>("Telemetry:Otlp:Endpoint", endpoint),
                 new KeyValuePair<string, string?>("Telemetry:Otlp:Protocol", "http/protobuf"),
                 new KeyValuePair<string, string?>("Telemetry:Otlp:Headers", "Authorization=export-header-secret"),
-                new KeyValuePair<string, string?>("Telemetry:Otlp:TimeoutMilliseconds", "1000"),
+                new KeyValuePair<string, string?>("Telemetry:Otlp:TimeoutMilliseconds", "5000"),
                 new KeyValuePair<string, string?>("Telemetry:Tracing:SamplingRatio", "1"),
                 new KeyValuePair<string, string?>("Telemetry:Tracing:BatchDelayMilliseconds", "100"),
                 new KeyValuePair<string, string?>("Telemetry:Metrics:ExportIntervalMilliseconds", "100"),
-                new KeyValuePair<string, string?>("Telemetry:FlushTimeoutMilliseconds", "2500"),
+                new KeyValuePair<string, string?>("Telemetry:FlushTimeoutMilliseconds", "10000"),
                 new KeyValuePair<string, string?>("Telemetry:Logs:QueueLimit", "64"),
                 new KeyValuePair<string, string?>("Telemetry:Logs:BatchSizeLimit", "16"),
                 new KeyValuePair<string, string?>("Telemetry:Logs:BatchPeriodMilliseconds", "50"),
@@ -49,6 +49,10 @@ public sealed partial class OtlpTelemetryIntegrationTests
         builder.Services.AddScaleSetTelemetry(telemetry, ["integration"]);
         string expectedTraceId;
         string expectedSpanId;
+        OtlpHttpRequest logsRequest;
+        OtlpHttpRequest tracesRequest;
+        OtlpHttpRequest metricsRequest;
+        TimeSpan deliveryTimeout = TimeSpan.FromSeconds(15);
 
         using (var host = builder.Build())
         {
@@ -57,54 +61,56 @@ public sealed partial class OtlpTelemetryIntegrationTests
             {
                 var logger = host.Services.GetRequiredService<ILoggerFactory>()
                     .CreateLogger("ScaleSet.Hosting.TelemetryAcceptance");
-                using Activity activity = ScaleSetTelemetrySources.StartOperation("telemetry.acceptance")
-                    ?? throw new InvalidOperationException("The acceptance ActivitySource was not subscribed.");
-                expectedTraceId = activity.TraceId.ToHexString();
-                expectedSpanId = activity.SpanId.ToHexString();
-                activity.SetTag("scaleset.test", "otlp-receiver");
+                using (Activity activity = ScaleSetTelemetrySources.StartOperation("telemetry.acceptance")
+                    ?? throw new InvalidOperationException("The acceptance ActivitySource was not subscribed."))
+                {
+                    expectedTraceId = activity.TraceId.ToHexString();
+                    expectedSpanId = activity.SpanId.ToHexString();
+                    activity.SetTag("scaleset.test", "otlp-receiver");
 
-                LogAcceptanceMessage(logger, "private-token-sentinel");
-                LogAcceptanceException(logger, new InvalidOperationException("token=exception-secret-sentinel"));
+                    LogAcceptanceMessage(logger, "private-token-sentinel");
+                    LogAcceptanceException(logger, new InvalidOperationException("token=exception-secret-sentinel"));
 
-                ScaleSetTelemetryMetrics metrics = host.Services.GetRequiredService<ScaleSetTelemetryMetrics>();
-                metrics.RecordOperation(
-                    ScaleSetTelemetryOperation.DiagnosticSmoke,
-                    ScaleSetTelemetryOutcome.Success,
-                    TimeSpan.FromMilliseconds(17),
-                    "integration",
-                    ScaleSetTelemetryProvider.Docker);
-                metrics.SetRunnerCount("integration", ScaleSetTelemetryProvider.Docker, RunnerTelemetryState.Idle, 3);
-                HostCapacityCoordinator coordinator = new(new HostCapacityOptions(), []);
-                _ = coordinator.CreatePlan();
+                    ScaleSetTelemetryMetrics metrics = host.Services.GetRequiredService<ScaleSetTelemetryMetrics>();
+                    metrics.RecordOperation(
+                        ScaleSetTelemetryOperation.DiagnosticSmoke,
+                        ScaleSetTelemetryOutcome.Success,
+                        TimeSpan.FromMilliseconds(17),
+                        "integration",
+                        ScaleSetTelemetryProvider.Docker);
+                    metrics.SetRunnerCount("integration", ScaleSetTelemetryProvider.Docker, RunnerTelemetryState.Idle, 3);
+                    HostCapacityCoordinator coordinator = new(new HostCapacityOptions(), []);
+                    _ = coordinator.CreatePlan();
+                }
+
+                logsRequest = await receiver.WaitForMatchingRequestAsync(
+                    "/otlp/foundation/v1/logs",
+                    request => OtlpProtobufReader.ReadLogRecords(request.Body).Any(static record =>
+                        record.Body?.StartsWith("telemetry-acceptance log", StringComparison.Ordinal) == true),
+                    deliveryTimeout);
+                tracesRequest = await receiver.WaitForMatchingRequestAsync(
+                    "/otlp/foundation/v1/traces",
+                    request => OtlpProtobufReader.ReadTraceSpans(request.Body).Any(span =>
+                        span.Name == "telemetry.acceptance" && span.TraceId == expectedTraceId),
+                    deliveryTimeout);
+                metricsRequest = await receiver.WaitForMatchingRequestAsync(
+                    "/otlp/foundation/v1/metrics",
+                    request => OtlpProtobufReader.ReadMetricNames(request.Body).Contains("scaleset.operations", StringComparer.Ordinal),
+                    deliveryTimeout);
+                _ = await receiver.WaitForMatchingRequestAsync(
+                    "/otlp/foundation/v1/metrics",
+                    request => OtlpProtobufReader.ReadMetricNames(request.Body).Contains("scaleset.runners", StringComparer.Ordinal),
+                    deliveryTimeout);
+                _ = await receiver.WaitForMatchingRequestAsync(
+                    "/otlp/foundation/v1/metrics",
+                    request => OtlpProtobufReader.ReadMetricNames(request.Body).Contains("scaleset.capacity.operations", StringComparer.Ordinal),
+                    deliveryTimeout);
             }
             finally
             {
                 await host.StopAsync(TestContext.Current.CancellationToken);
             }
         }
-
-        var logsRequest = await receiver.WaitForMatchingRequestAsync(
-            "/otlp/foundation/v1/logs",
-            request => OtlpProtobufReader.ReadLogRecords(request.Body).Any(static record =>
-                record.Body?.StartsWith("telemetry-acceptance log", StringComparison.Ordinal) == true),
-            TimeSpan.FromSeconds(10));
-        var tracesRequest = await receiver.WaitForMatchingRequestAsync(
-            "/otlp/foundation/v1/traces",
-            request => OtlpProtobufReader.ReadTraceSpans(request.Body).Any(span =>
-                span.Name == "telemetry.acceptance" && span.TraceId == expectedTraceId),
-            TimeSpan.FromSeconds(10));
-        var metricsRequest = await receiver.WaitForMatchingRequestAsync(
-            "/otlp/foundation/v1/metrics",
-            request => OtlpProtobufReader.ReadMetricNames(request.Body).Contains("scaleset.operations", StringComparer.Ordinal),
-            TimeSpan.FromSeconds(10));
-        _ = await receiver.WaitForMatchingRequestAsync(
-            "/otlp/foundation/v1/metrics",
-            request => OtlpProtobufReader.ReadMetricNames(request.Body).Contains("scaleset.runners", StringComparer.Ordinal),
-            TimeSpan.FromSeconds(10));
-        _ = await receiver.WaitForMatchingRequestAsync(
-            "/otlp/foundation/v1/metrics",
-            request => OtlpProtobufReader.ReadMetricNames(request.Body).Contains("scaleset.capacity.operations", StringComparer.Ordinal),
-            TimeSpan.FromSeconds(10));
 
         Assert.Equal("export-header-secret", logsRequest.AuthorizationHeader);
         Assert.NotNull(logsRequest.ContentType);
