@@ -19,9 +19,35 @@ Hosting provides `ScaleSetMessageHandler` for that purpose. The application
 owns session creation, recovery after a listener failure, and closure when
 polling stops. See the [worker example](https://github.com/knightfall/scaleset.NET/tree/main/examples/dotnet-worker).
 
-Subscribe to `ScaleSetListener.ActivitySourceName` (`ScaleSet.Listener`) for
-`scaleset.message.poll` and `scaleset.message.process` spans. The listener
-emits no dedicated metrics. The autoscaler records queue operation metrics in
-its host meter.
+## Checkpointed execution
+
+Use `ScaleSetListenerPump.StepAsync` when your application owns durable
+delivery state, execution authorization, and when to resume processing.
+Supply an `IScaleSetListenerCheckpointStore`, an
+`IScaleSetListenerDeliveryHandler`, and an
+`IScaleSetListenerExecutionPolicy`. Bind the pump to a caller-owned session
+and one fixed ownership-loss token. Each step resolves pending work before
+polling. A successful real delivery costs four logical checkpoint writes.
+
+The checkpoint store atomically checks revision and ownership on every write.
+The handler recalculates admission after polling and journals replay-safe job
+effects before returning `Completed`. Deferral keeps the checkpoint available
+for a later step. A lost acknowledgement response leaves the delivery in
+`Acknowledging` and requires a supervisor decision before that session can
+poll again. Session replacement starts with fresh initial statistics and an
+absent cursor. The concrete Client requires an already-open client for resume
+on the same remote session.
+
+Run the [checkpointed package example](https://github.com/knightfall/scaleset.NET/tree/28eb8a95e4e4d3f84f8876c3436c95a7714dc088/examples/checkpointed-listener).
+The [usage guide](https://github.com/knightfall/scaleset.NET/blob/main/docs/usage.md)
+covers composition, callback ownership, shutdown, and recovery.
+
+## Tracing
+
+Subscribe to `ScaleSetListener.ActivitySourceName` (`ScaleSet.Listener`).
+The legacy loop emits `scaleset.message.poll` and `scaleset.message.process`.
+The pump emits `scaleset.listener.step` and `scaleset.listener.operation`
+with bounded operation and outcome tags. The autoscaler records queue
+operation metrics in its host meter.
 
 Licensed under [Apache-2.0](https://github.com/knightfall/scaleset.NET/blob/main/LICENSE).

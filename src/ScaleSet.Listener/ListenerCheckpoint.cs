@@ -136,6 +136,7 @@ public sealed record ScaleSetListenerDelivery
     public DateTimeOffset ObservedAt { get; }
 
     /// <summary>Gets the sanitized message for a real delivery.</summary>
+    /// <remarks>Job collections and labels are read-only snapshots. Acquire jobs using their request IDs.</remarks>
     public RunnerScaleSetMessage? Message { get; }
 
     /// <summary>Gets the statistics for a session initialization delivery.</summary>
@@ -156,7 +157,11 @@ public sealed record ScaleSetListenerPendingDelivery(
     ScaleSetListenerDelivery Delivery, ScaleSetListenerPendingPhase Phase);
 
 /// <summary>Contains the entire atomic Listener state for one session.</summary>
-/// <remarks>Preserve the transition ID, exact revision, and original snapshot on every round trip.</remarks>
+/// <remarks>
+/// Preserve the transition ID, exact revision, and original snapshot on every round trip.
+/// <see cref="CurrentSchemaVersion"/> identifies the durable logical format. The adapter owns
+/// encoding, encoded size limits, and explicit migrations before restoring records.
+/// </remarks>
 /// <param name="SessionKey">Key for the exact session.</param>
 /// <param name="SchemaVersion">Checkpoint schema version.</param>
 /// <param name="Revision">One-based revision incremented on each durable transition.</param>
@@ -215,12 +220,16 @@ public enum ScaleSetListenerCheckpointWriteResult
 public interface IScaleSetListenerCheckpointStore
 {
     /// <summary>Reads the latest committed checkpoint or returns null for an absent key.</summary>
+    /// <remarks>Return a consistent snapshot suitable for exact readback after a lost write response.</remarks>
     /// <param name="key">Exact session key.</param>
     /// <param name="cancellationToken">Bounded operation token.</param>
     Task<ScaleSetListenerCheckpoint?> ReadAsync(ScaleSetListenerSessionKey key, CancellationToken cancellationToken);
 
     /// <summary>Applies the checkpoint if the exact revision and ownership conditions hold.</summary>
-    /// <remarks>A null revision requires absence. Throw for an uncertain result and preserve the original failure type.</remarks>
+    /// <remarks>
+    /// A null revision requires absence. Commit the full checkpoint and condition the write on the
+    /// fixed ownership incarnation. Throw for an uncertain result and preserve the original failure type.
+    /// </remarks>
     /// <param name="key">Exact session key.</param>
     /// <param name="expectedRevision">Required revision or null to require absence.</param>
     /// <param name="checkpoint">Entire new checkpoint to commit.</param>
@@ -234,6 +243,10 @@ public interface IScaleSetListenerCheckpointStore
 public interface IScaleSetListenerDeliveryHandler
 {
     /// <summary>Processes the delivery and reports completion or explicit deferral.</summary>
+    /// <remarks>
+    /// Recalculate current admission before sending acquisitions. Use an application-owned fence and ledger
+    /// to make effects replay-safe. Pass the operation token through any calls started by the handler.
+    /// </remarks>
     /// <param name="delivery">Typed delivery with its original observation time.</param>
     /// <param name="cancellationToken">Bounded operation token.</param>
     Task<ScaleSetListenerDeliveryDisposition> HandleAsync(

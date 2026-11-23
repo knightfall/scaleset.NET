@@ -81,6 +81,7 @@ public sealed class ScaleSetListenerAuthorization
 public interface IScaleSetListenerExecutionPolicy
 {
     /// <summary>Returns an allowed permit or explicit deferral within the supplied operation budget.</summary>
+    /// <remarks>The allowed permit must carry the fixed ownership token configured for the pump.</remarks>
     /// <param name="context">Nonsecret identity and stage for the operation.</param>
     /// <param name="cancellationToken">Bounded policy evaluation token.</param>
     Task<ScaleSetListenerAuthorization> AuthorizeAsync(
