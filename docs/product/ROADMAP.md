@@ -520,7 +520,8 @@ The [Listener extensibility feature](LISTENER-EXTENSIBILITY.md) adds
 opt-in checkpointed, stepwise execution and external operation authorization.
 It preserves the existing listener API and leaves storage, ownership,
 credential rotation, and remote-session recovery policy with the consumer.
-LE1–LE5 are staged for review. Publication and AWS T09 integration have separate gates.
+The feature contract records LE1–LE5 verification. Publication and AWS T09
+integration have separate gates.
 
 | Milestone | Deliverables | Dependencies | Gate |
 |---|---|---|---|

@@ -1,16 +1,13 @@
 # Durable and externally controlled listener execution
 
-Status: **planned; not implemented**. Prepared 2026-11-24 (Australia/Sydney).
-Source baseline: `36831ad` in `scaleset.NET`. This proposal extends
-`Knightfall.ScaleSet.Listener` using the existing `ScaleSet.*` namespaces and
-`.NET 10` target. It does not authorize AWS deployment or change the existing
-Docker runtime's persistence model.
+Status: **implemented and verified in candidate builds**. Release publication
+follows the [publishing policy](../releases/PUBLISHING.md). The feature extends
+`Knightfall.ScaleSet.Listener` under the existing `ScaleSet.*` namespaces on
+.NET 10. The planning baseline was `36831ad`.
 
 Tracking: [#58 — Add checkpointed, stepwise listener execution with external
 operation authorization](https://github.com/knightfall/scaleset.NET/issues/58).
-Implementation issues are linked under LE1–LE5 below. The umbrella issue
-contains the planning baseline so development does not depend on this document
-being published first. [#46](https://github.com/knightfall/scaleset.NET/issues/46)
+Implementation issues are linked under LE1–LE5 below. [#46](https://github.com/knightfall/scaleset.NET/issues/46)
 is already closed and its session ownership, telemetry discovery, and Hosting
 recovery work is part of the baseline.
 
@@ -536,7 +533,7 @@ the separate deployment qualification gates in its own plan.
 
 | ID | Deliverable | Depends on | Completion gate |
 | --- | --- | --- | --- |
-| [LE1: Contract and feasibility (#59)](https://github.com/knightfall/scaleset.NET/issues/59) | Final public API/type inventory, checkpoint validation rules, state transitions, and a concrete-client session recovery walkthrough. Map each AWS T09 requirement to a supported seam or a named separate dependency. | This proposal | No unresolved claim that a checkpoint recreates a remote session; agree recovery handling for `Acknowledging` and demonstrate the intended consumer composition. |
+| [LE1: Contract and feasibility (#59)](https://github.com/knightfall/scaleset.NET/issues/59) | Final public API/type inventory, checkpoint validation rules, state transitions, and a concrete-client session recovery walkthrough. Map each AWS T09 requirement to a supported seam or a named separate dependency. | #58 | No unresolved claim that a checkpoint recreates a remote session; agree recovery handling for `Acknowledging` and demonstrate the intended consumer composition. |
 | [LE2: Checkpointed step engine (#60)](https://github.com/knightfall/scaleset.NET/issues/60) | Internal state-transition engine, immutable delivery snapshots, store contract, initial/empty/real processing, explicit deferral, receipt/process/ack transitions, and concurrency exclusion. Exercise the agreed policy contract through test collaborators while the public driver remains unexposed. | LE1 | Deterministic crash/write-conflict/duplicate/ack-ambiguity tests pass. Existing Hosting execution remains unchanged; no placeholder public driver is shipped. |
 | [LE3: Operation authorization (#61)](https://github.com/knightfall/scaleset.NET/issues/61) | Assemble the public advanced driver with per-stage permits, timeout/ownership/graceful-stop composition, post-poll processing boundary, and safe integration with existing Client refresh. | LE2 | Ownership-loss, shutdown, long-poll capacity changes, and concrete wire-count tests pass. The advanced API is exposed only with its authorization guarantees implemented. |
 | [LE4: Compatibility and consumer proof (#62)](https://github.com/knightfall/scaleset.NET/issues/62) | Existing API regression coverage, optional common internal helpers, packaged consumer example using a deterministic checkpoint store and fake ownership/cooldown coordinator. | LE3 | Listener, relevant Client and Hosting suites pass; example runs from candidate packages without provider dependencies. Mark the example's storage as demonstrative, not a production distributed store. |
@@ -545,8 +542,7 @@ the separate deployment qualification gates in its own plan.
 Use focused PRs for these increments, each with meaningful tests for the
 behavior it introduces and existing repository analyzer/build requirements.
 Do not merge placeholder API bodies or silently publish a partial advanced
-contract. No calendar estimate or package version is selected before LE1 and
-the current release policy are reviewed.
+contract. The verified candidate and release boundary are recorded below.
 
 ## 10. AWS T09 handoff
 
