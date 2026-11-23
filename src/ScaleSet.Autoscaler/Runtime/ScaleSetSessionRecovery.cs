@@ -139,7 +139,8 @@ internal sealed partial class ScaleSetSessionRecovery(
     {
         ScaleSetRateLimitException rateLimit => rateLimit.RetryAfter <= MaximumRetryDelay,
         ScaleSetMaxElapsedExceededException => true,
-        ScaleSetApiException api => api.StatusCode is 408 or 429 or 500 or 502 or 503 or 504
+        ScaleSetApiException api => api.IsTransientTransportFailure
+            || api.StatusCode is 408 or 429 or 500 or 502 or 503 or 504
             || (opening ? api.StatusCode == 409 : api.StatusCode is 404 or 410),
         HttpRequestException transport => transport.HttpRequestError is HttpRequestError.Unknown
             or HttpRequestError.NameResolutionError or HttpRequestError.ConnectionError

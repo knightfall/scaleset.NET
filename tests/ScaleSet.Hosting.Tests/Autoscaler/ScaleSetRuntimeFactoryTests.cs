@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Collections.Immutable;
 using System.Diagnostics.Metrics;
+using System.Net;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -649,6 +650,63 @@ public sealed class ScaleSetRuntimeFactoryTests
         Assert.Equal(2, session.CloseCount);
     }
 
+    [Theory]
+    [InlineData("connection", true)]
+    [InlineData("timeout", true)]
+    [InlineData("tls", false)]
+    public async Task RunAsync_UsesTheProductionClientTransportClassification(string failure, bool reconnects)
+    {
+        using TemporaryStateDirectory directory = new();
+        (AutoscalerOptions options, ScaleSetOptions scaleSet) = CreateRecoveryOptions(directory.Path);
+        CancellationToken token = TestContext.Current.CancellationToken;
+        using CancellationTokenSource deadline = CancellationTokenSource.CreateLinkedTokenSource(token);
+        deadline.CancelAfter(TimeSpan.FromSeconds(10));
+        BackoffClock clock = new();
+        using SessionTransport transport = new(failure, options.Controller.Identity);
+        using HttpClient httpClient = new(transport, disposeHandler: false);
+        using ScaleSetRuntimeClientAdapter adapter = new(new ScaleSetClient(
+            GitHubTarget.Parse(scaleSet.GithubUrl!),
+            ScaleSetCredentials.FromPersonalAccessToken(CredentialSentinel),
+            new ScaleSetClientOptions { Retry = ScaleSetRetryOptions.Disabled },
+            httpClient,
+            timeProvider: clock));
+        FakeScaleSetRuntimeClient client = new()
+        {
+            OnOpen = (_, cancellationToken) => adapter.CreateMessageSessionAsync(987, options.Controller.Identity, cancellationToken),
+        };
+        await using IScaleSetRuntime runtime = await CreateFactory(options, client, new FakeRunnerProvider(), timeProvider: clock)
+            .CreateAsync(scaleSet, new HostCapacityCoordinator(options.HostCapacity, options.ScaleSets), token);
+        await runtime.InitializeAsync(token);
+        Task run = runtime.RunAsync(deadline.Token);
+
+        if (reconnects)
+        {
+            await clock.ElapseNextDelayAsync(TimeSpan.FromSeconds(1), deadline.Token);
+            await transport.ReplacementPolled.WaitAsync(deadline.Token);
+            Assert.Equal([transport.FirstSessionId], transport.Closed);
+            Assert.Equal(2, client.SessionCreateCount);
+        }
+        else
+        {
+            ScaleSetApiException error = await Assert.ThrowsAsync<ScaleSetApiException>(() => run.WaitAsync(deadline.Token));
+            Assert.Null(error.StatusCode);
+            Assert.False(error.IsTransientTransportFailure);
+            Assert.DoesNotContain("synthetic transport detail", error.ToString(), StringComparison.Ordinal);
+            Assert.Equal(1, client.SessionCreateCount);
+        }
+
+        await runtime.StopAsync(token);
+        if (reconnects)
+        {
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => run);
+            Assert.Equal([transport.FirstSessionId, transport.ReplacementSessionId], transport.Closed);
+        }
+        else
+        {
+            Assert.Equal([transport.FirstSessionId], transport.Closed);
+        }
+    }
+
     private static ScaleSetRuntimeFactory CreateFactory(
         AutoscalerOptions options,
         FakeScaleSetRuntimeClient client,
@@ -918,6 +976,81 @@ public sealed class ScaleSetRuntimeFactoryTests
 
             public ValueTask DisposeAsync() => ValueTask.CompletedTask;
         }
+    }
+
+    private sealed class SessionTransport(string failure, string owner) : HttpMessageHandler
+    {
+        private const string DiscoveryJwt = "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJleHAiOjQxMDI0NDQ4MDB9.";
+        private readonly TaskCompletionSource _replacementPolled = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly ConcurrentQueue<Guid> _closed = new();
+        private int _opened;
+
+        public Guid FirstSessionId { get; } = Guid.NewGuid();
+
+        public Guid ReplacementSessionId { get; } = Guid.NewGuid();
+
+        public Task ReplacementPolled => _replacementPolled.Task;
+
+        public IReadOnlyList<Guid> Closed => _closed.ToArray();
+
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            string path = Assert.IsType<Uri>(request.RequestUri, exactMatch: false).AbsolutePath;
+            if (path.EndsWith("/runners/registration-token", StringComparison.Ordinal))
+            {
+                return Json(HttpStatusCode.Created, """{"token":"synthetic-registration","expires_at":"2099-01-01T00:00:00Z"}""");
+            }
+
+            if (path == "/actions/runner-registration")
+            {
+                return Json(HttpStatusCode.OK, $$"""{"url":"https://actions.example.test/tenant/123/","token":"{{DiscoveryJwt}}"}""");
+            }
+
+            if (request.Method == HttpMethod.Post && path.EndsWith("/sessions", StringComparison.Ordinal))
+            {
+                bool first = Interlocked.Increment(ref _opened) == 1;
+                if (!first)
+                {
+                    Assert.Equal([FirstSessionId], Closed);
+                }
+
+                return Json(HttpStatusCode.OK, ScaleSetJson.Serialize(new RunnerScaleSetSession
+                {
+                    SessionId = first ? FirstSessionId : ReplacementSessionId,
+                    OwnerName = owner,
+                    MessageQueueUrl = first ? "https://queue.example.test/first" : "https://queue.example.test/replacement",
+                    MessageQueueAccessToken = "synthetic-queue-token",
+                    Statistics = new RunnerScaleSetStatistic(),
+                }));
+            }
+
+            if (request.Method == HttpMethod.Delete && path.Contains("/sessions/", StringComparison.Ordinal))
+            {
+                _closed.Enqueue(Guid.Parse(path[(path.LastIndexOf('/') + 1)..]));
+                return new HttpResponseMessage(HttpStatusCode.NoContent);
+            }
+
+            if (path == "/first")
+            {
+                throw failure switch
+                {
+                    "connection" => new HttpRequestException(HttpRequestError.ConnectionError, "synthetic transport detail"),
+                    "timeout" => new OperationCanceledException("synthetic transport detail"),
+                    "tls" => new HttpRequestException(HttpRequestError.SecureConnectionError, "synthetic transport detail"),
+                    _ => throw new InvalidOperationException("Unexpected test failure classification."),
+                };
+            }
+
+            Assert.Equal("/replacement", path);
+            _replacementPolled.SetResult();
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken).ConfigureAwait(false);
+            return new HttpResponseMessage(HttpStatusCode.Accepted);
+        }
+
+        private static HttpResponseMessage Json(HttpStatusCode statusCode, string json) => new(statusCode)
+        {
+            Content = new StringContent(json, Encoding.UTF8, "application/json"),
+        };
     }
 
     private sealed class TemporaryStateDirectory : IDisposable
