@@ -1,6 +1,7 @@
 using System.Globalization;
 using Microsoft.Extensions.Configuration;
 using ScaleSet.Client;
+using ScaleSet.Hosting.Providers;
 using ScaleSet.Hosting.Scaling;
 
 namespace ScaleSet.Hosting.Configuration;
@@ -20,7 +21,12 @@ public static class AutoscalerConfiguration
     /// <param name="configuration">Configuration rooted at Controller, HostCapacity, ScaleSets, and Credentials.</param>
     /// <returns>A validated options snapshot.</returns>
     /// <exception cref="AutoscalerConfigurationException">A value cannot be bound or validation fails.</exception>
-    public static AutoscalerOptions Bind(IConfiguration configuration)
+    public static AutoscalerOptions Bind(IConfiguration configuration) => Bind(configuration, providerFactories: null);
+
+    /// <summary>Binds host configuration and validates the selected runner backends.</summary>
+    /// <param name="configuration">Product configuration rooted at Controller, HostCapacity, ScaleSets, and Credentials.</param>
+    /// <param name="providerFactories">Registered backends, or null for shared configuration checks alone.</param>
+    public static AutoscalerOptions Bind(IConfiguration configuration, IEnumerable<IRunnerProviderFactory>? providerFactories)
     {
         ArgumentNullException.ThrowIfNull(configuration);
 
@@ -33,7 +39,7 @@ public static class AutoscalerConfiguration
             Credentials = BindCredentials(configuration.GetSection(nameof(AutoscalerOptions.Credentials)), errors),
         };
 
-        errors.AddRange(Validate(options));
+        errors.AddRange(Validate(options, providerFactories));
         if (errors.Count > 0)
         {
             throw new AutoscalerConfigurationException(errors);
@@ -45,11 +51,29 @@ public static class AutoscalerConfiguration
     /// <summary>Validates an options snapshot and returns safe, field-keyed error messages.</summary>
     /// <param name="options">The options snapshot to validate.</param>
     /// <returns>Validation errors; an empty list means the snapshot is valid.</returns>
-    public static IReadOnlyList<string> Validate(AutoscalerOptions options)
+    public static IReadOnlyList<string> Validate(AutoscalerOptions options) => Validate(options, providerFactories: null);
+
+    /// <summary>Validates shared options and, when supplied, the registered runner backends.</summary>
+    /// <param name="options">The options snapshot to validate.</param>
+    /// <param name="providerFactories">Registered backends, or null for shared validation only.</param>
+    public static IReadOnlyList<string> Validate(AutoscalerOptions options, IEnumerable<IRunnerProviderFactory>? providerFactories)
     {
         ArgumentNullException.ThrowIfNull(options);
 
         List<string> errors = [];
+        Dictionary<string, IRunnerProviderFactory>? providers = null;
+        if (providerFactories is not null)
+        {
+            providers = new Dictionary<string, IRunnerProviderFactory>(StringComparer.OrdinalIgnoreCase);
+            foreach (IRunnerProviderFactory factory in providerFactories)
+            {
+                if (string.IsNullOrWhiteSpace(factory.Name) || !providers.TryAdd(factory.Name, factory))
+                {
+                    errors.Add("Registered runner provider names must be non-empty and unique.");
+                }
+            }
+        }
+
         ValidateController(options.Controller, errors);
         ValidateHostCapacity(options.HostCapacity, errors);
 
@@ -76,7 +100,7 @@ public static class AutoscalerConfiguration
                     continue;
                 }
 
-                ValidateScaleSet(scaleSet, path, options.HostCapacity, credentialLookup, scaleSetKeys, ownershipIdentities, minimumDemand, errors);
+                ValidateScaleSet(scaleSet, path, options.HostCapacity, credentialLookup, scaleSetKeys, ownershipIdentities, minimumDemand, providers, errors);
             }
         }
 
@@ -309,6 +333,7 @@ public static class AutoscalerConfiguration
         HashSet<string> scaleSetKeys,
         List<ScaleSetIdentity> ownershipIdentities,
         List<RunnerDemand> minimumDemand,
+        Dictionary<string, IRunnerProviderFactory>? providers,
         List<string> errors)
     {
         if (string.IsNullOrWhiteSpace(scaleSet.Key))
@@ -325,9 +350,14 @@ public static class AutoscalerConfiguration
             errors.Add($"{path}.Name is required.");
         }
 
-        if (!string.Equals(scaleSet.Provider, "Docker", StringComparison.OrdinalIgnoreCase))
+        IRunnerProviderFactory? provider = null;
+        if (string.IsNullOrWhiteSpace(scaleSet.Provider))
         {
-            errors.Add($"{path}.Provider must be Docker in phase one.");
+            errors.Add($"{path}.Provider is required.");
+        }
+        else if (providers is not null && !providers.TryGetValue(scaleSet.Provider, out provider))
+        {
+            errors.Add($"{path}.Provider must reference a registered runner backend.");
         }
 
         CredentialOptions? credential = null;
@@ -377,6 +407,10 @@ public static class AutoscalerConfiguration
         }
 
         ValidateRunnerProfile(runnerProfile, path, errors);
+        if (provider is not null)
+        {
+            errors.AddRange(provider.Validate(scaleSet, path));
+        }
         if (scaleSet.Scaling is not null
             && runnerProfile.Cpu > 0
             && runnerProfile.Memory > 0
@@ -475,12 +509,7 @@ public static class AutoscalerConfiguration
     private static void ValidateRunnerProfile(RunnerProfileOptions profile, string path, List<string> errors)
     {
         string profilePath = $"{path}.RunnerProfile";
-        if (!IsPinnedImage(profile.Image))
-        {
-            errors.Add($"{profilePath}.Image must be a pinned image tag or sha256 digest.");
-        }
-
-        if (profile.Architecture is null || !Enum.IsDefined(profile.Architecture.Value))
+        if (profile.Architecture is { } architecture && !Enum.IsDefined(architecture))
         {
             errors.Add($"{profilePath}.Architecture must be X64 or Arm64.");
         }
@@ -500,19 +529,6 @@ public static class AutoscalerConfiguration
             errors.Add($"{profilePath}.WorkFolder is required.");
         }
 
-        if (!Enum.IsDefined(profile.DockerBuildMode))
-        {
-            errors.Add($"{profilePath}.DockerBuildMode is not supported.");
-        }
-        else if (profile.DockerBuildMode == DockerBuildMode.DockerInDocker && !profile.Privileged)
-        {
-            errors.Add($"{profilePath}.Privileged must be true for DockerInDocker.");
-        }
-
-        if (profile.Network is not null && string.IsNullOrWhiteSpace(profile.Network))
-        {
-            errors.Add($"{profilePath}.Network must not be empty when configured.");
-        }
     }
 
     private static void ValidateProfileWithinBudget(
@@ -618,33 +634,6 @@ public static class AutoscalerConfiguration
         && string.Equals(left.Target.Repository, right.Target.Repository, StringComparison.OrdinalIgnoreCase)
         && string.Equals(left.RunnerGroup, right.RunnerGroup, StringComparison.OrdinalIgnoreCase)
         && string.Equals(left.Name, right.Name, StringComparison.OrdinalIgnoreCase);
-
-    private static bool IsPinnedImage(string? image)
-    {
-        if (string.IsNullOrWhiteSpace(image) || image.Any(char.IsWhiteSpace))
-        {
-            return false;
-        }
-
-        int digestSeparator = image.LastIndexOf("@sha256:", StringComparison.OrdinalIgnoreCase);
-        if (digestSeparator >= 0)
-        {
-            string digest = image[(digestSeparator + "@sha256:".Length)..];
-            return digestSeparator > 0 && digest.Length == 64 && digest.All(Uri.IsHexDigit);
-        }
-
-        int lastSlash = image.LastIndexOf('/');
-        int tagSeparator = image.LastIndexOf(':');
-        if (tagSeparator <= lastSlash + 1 || tagSeparator == image.Length - 1)
-        {
-            return false;
-        }
-
-        string tag = image[(tagSeparator + 1)..];
-        return !string.Equals(tag, "latest", StringComparison.OrdinalIgnoreCase)
-            && (char.IsLetterOrDigit(tag[0]) || tag[0] == '_')
-            && tag.All(static character => char.IsLetterOrDigit(character) || character is '.' or '_' or '-');
-    }
 
     private readonly record struct GitHubScope(string Host, GitHubTargetScope Scope, string Owner, string? Repository);
 

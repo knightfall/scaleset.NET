@@ -11,6 +11,7 @@ using ScaleSet.Autoscaler.Telemetry;
 using ScaleSet.Hosting.Capacity;
 using ScaleSet.Hosting.Configuration;
 using ScaleSet.Hosting.Telemetry;
+using ScaleSet.Providers.Docker;
 
 namespace ScaleSet.Autoscaler;
 
@@ -62,7 +63,7 @@ public static partial class AutoscalerCommandRunner
         try
         {
             IConfigurationRoot configuration = AutoscalerApplicationConfiguration.BuildFromEnvironment();
-            _ = AutoscalerConfiguration.Bind(configuration);
+            _ = AutoscalerConfiguration.Bind(configuration, [new DockerRunnerProviderFactory()]);
             _ = AutoscalerTelemetryConfiguration.Bind(configuration);
             _ = GetHealthListenUrl(configuration);
             output.WriteLine("Configuration is valid.");
@@ -143,7 +144,7 @@ public static partial class AutoscalerCommandRunner
         IScaleSetRuntimeFactory? runtimeFactory = null)
     {
         ArgumentNullException.ThrowIfNull(configuration);
-        AutoscalerOptions options = AutoscalerConfiguration.Bind(configuration);
+        AutoscalerOptions options = AutoscalerConfiguration.Bind(configuration, [new DockerRunnerProviderFactory()]);
         AutoscalerTelemetryConfiguration telemetry = AutoscalerTelemetryConfiguration.Bind(configuration);
         HostCapacityCoordinator capacityCoordinator = new(options.HostCapacity, options.ScaleSets);
         string healthListenUrl = GetHealthListenUrl(configuration);
