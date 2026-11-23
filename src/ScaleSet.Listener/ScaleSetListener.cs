@@ -9,6 +9,7 @@ namespace ScaleSet.Listener;
 /// <remarks>The caller owns session creation, closure and recovery after failure.</remarks>
 public sealed partial class ScaleSetListener
 {
+    /// <summary>Identifier of the synthetic message carrying the session's initial statistics.</summary>
     public const long InitialMessageId = -1;
 
     private static readonly ActivitySource ActivitySource = new("ScaleSet.Listener");
@@ -20,6 +21,12 @@ public sealed partial class ScaleSetListener
     private int _maxRunners;
     private int _running;
 
+    /// <summary>Creates a listener for an initialized message session.</summary>
+    /// <param name="client">Caller-owned session used to poll and acknowledge messages.</param>
+    /// <param name="options">Scale-set ID, initial capacity, and acknowledgment timeout.</param>
+    /// <param name="logger">Optional application logger.</param>
+    /// <param name="timeProvider">Optional clock for acknowledgment deadlines.</param>
+    /// <exception cref="ArgumentOutOfRangeException">The scale-set ID, initial capacity, or acknowledgment timeout is invalid.</exception>
     public ScaleSetListener(
         IMessageSessionClient client,
         ScaleSetListenerOptions options,
@@ -43,14 +50,22 @@ public sealed partial class ScaleSetListener
         _logger = logger ?? NullLogger<ScaleSetListener>.Instance;
     }
 
+    /// <summary>Gets the maximum runner capacity that the next poll advertises.</summary>
     public int MaxRunners => Volatile.Read(ref _maxRunners);
 
+    /// <summary>Updates the maximum runner capacity that the next poll advertises.</summary>
+    /// <param name="count">Non-negative runner capacity.</param>
     public void SetMaxRunners(int count)
     {
         ArgumentOutOfRangeException.ThrowIfNegative(count);
         Volatile.Write(ref _maxRunners, count);
     }
 
+    /// <summary>Processes messages serially until cancellation or failure.</summary>
+    /// <remarks>Each real message is acknowledged only after the handler completes successfully.</remarks>
+    /// <param name="handler">Callback for initial statistics, real messages, and empty polls.</param>
+    /// <param name="cancellationToken">Token used to stop polling and cancel the active callback.</param>
+    /// <exception cref="InvalidOperationException">A run is active, or the session is missing its identity or initial statistics.</exception>
     public async Task RunAsync(IScaleSetMessageHandler handler, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(handler);

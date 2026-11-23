@@ -32,7 +32,8 @@ class ReleaseVerificationTests(unittest.TestCase):
         (self.root / "_manifest/spdx_2.2/manifest.spdx.json").write_text("{}", encoding="utf-8")
         self.manifest()
 
-    def package(self, suffix, commit=None, include_locator=True, include_license=True, repo_url=None):
+    def package(self, suffix, commit=None, include_locator=True, include_license=True, repo_url=None,
+                readme_title="Knightfall.ScaleSet.Client", doc_assembly="ScaleSet.Client"):
         path = self.root / ("packages/Knightfall.ScaleSet.Client.0.1.0-alpha.1" + suffix)
         with zipfile.ZipFile(path, "w") as archive:
             if suffix == ".nupkg":
@@ -50,7 +51,15 @@ class ReleaseVerificationTests(unittest.TestCase):
                     )
                 if include_license:
                     archive.writestr("licenses/LICENSE", "Apache-2.0")
-                archive.writestr("README.md", "# scaleset.NET")
+                archive.writestr("README.md", "# " + readme_title)
+                archive.writestr("lib/net10.0/ScaleSet.Client.dll", b"library fixture")
+                if doc_assembly is not None:
+                    archive.writestr(
+                        "lib/net10.0/ScaleSet.Client.xml",
+                        f'<doc><assembly><name>{doc_assembly}</name></assembly><members>'
+                        '<member name="T:ScaleSet.Client.ScaleSetClient"><summary>Client.</summary></member>'
+                        '</members></doc>',
+                    )
                 archive.writestr("THIRD-PARTY-NOTICES.md", "MIT")
             if suffix == ".snupkg":
                 archive.writestr("lib/net10.0/ScaleSet.Client.pdb", b"symbol fixture")
@@ -61,7 +70,7 @@ class ReleaseVerificationTests(unittest.TestCase):
                 + self.policy["repository"]
                 + '" commit="'
                 + (commit or self.commit)
-                + '"/></metadata></package>',
+                + '"/><readme>README.md</readme></metadata></package>',
             )
 
     def manifest(self):
@@ -145,6 +154,20 @@ class ReleaseVerificationTests(unittest.TestCase):
         self.manifest()
         with self.assertRaisesRegex(ValueError, "package set differs"):
             self.verify()
+
+    def test_package_readme_for_other_project_is_rejected(self):
+        self.package(".nupkg", readme_title="Knightfall.ScaleSet.Listener")
+        self.manifest()
+        with self.assertRaisesRegex(ValueError, "README title differs"):
+            self.verify()
+
+    def test_package_missing_documentation_or_with_wrong_assembly_is_rejected(self):
+        for assembly, message in ((None, "XML documentation is missing"), ("Other", "wrong assembly")):
+            with self.subTest(assembly=assembly):
+                self.package(".nupkg", doc_assembly=assembly)
+                self.manifest()
+                with self.assertRaisesRegex(ValueError, message):
+                    self.verify()
 
     def test_publish_context_requires_canonical_main_manual_opt_in(self):
         good = {

@@ -64,6 +64,13 @@ acquires jobs and asks the Docker provider to create runners using JIT
 configuration. On Ctrl+C or Unix `SIGTERM`, the worker drains for up to 30
 seconds, cancels polling, and closes the session with a separate timeout.
 
+The handler's `ScaleSetCapacityContext` connects the host capacity coordinator
+and its demand registry to the listener's advertised maximum. A worker that
+runs multiple scale sets should share the coordinator and registry across
+their handlers so they observe the same host budget. The example sizes
+capacity for one scale set. The controller's `ReconcileInterval` and
+`IdleTimeout` settings are reserved and have no effect in this worker.
+
 The example starts with empty owned Docker inventory and a journal with no
 unfinished operations. Use the [autoscaler runtime](../../src/ScaleSet.Autoscaler/Runtime/ScaleSetRuntimeFactory.cs)
 as the reference for reconciling unfinished operations after a restart.

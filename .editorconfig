@@ -26,6 +26,12 @@ generated_code = true
 [*.AssemblyInfo.cs]
 generated_code = true
 
+[src/ScaleSet.Hosting/**/*.cs]
+# Existing Hosting comments describe behavior and ownership at the member level.
+# Suggest complete parameter and exception tags while these comments are expanded.
+dotnet_diagnostic.RCS1140.severity = suggestion
+dotnet_diagnostic.RCS1141.severity = suggestion
+
 [tests/**/*.cs]
 # Behavior-named tests use Method_Condition_Expected names; library API names remain checked.
 dotnet_diagnostic.CA1707.severity = none

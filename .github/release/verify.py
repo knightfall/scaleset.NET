@@ -21,6 +21,30 @@ def sha256(path):
     return digest.hexdigest()
 
 
+def verify_package_documentation(archive, fields, package_id):
+    entries = set(archive.namelist())
+    readme = fields.get("readme")
+    require(readme is not None and readme.text == "README.md", "Package README metadata differs: " + package_id)
+    require("README.md" in entries, "Package README is missing: " + package_id)
+    lines = archive.read("README.md").decode("utf-8-sig").splitlines()
+    require(lines and lines[0] == "# " + package_id, "Package README title differs: " + package_id)
+
+    assembly = package_id.removeprefix("Knightfall.")
+    libraries = [
+        path for path in map(PurePosixPath, entries)
+        if path.parent.parent == PurePosixPath("lib") and path.name == assembly + ".dll"
+    ]
+    require(libraries, "Package library assembly is missing: " + package_id)
+    for library in libraries:
+        documentation = library.with_suffix(".xml").as_posix()
+        require(documentation in entries, "Package XML documentation is missing: " + documentation)
+        root = ET.fromstring(archive.read(documentation))
+        require(
+            root.tag == "doc" and root.findtext("assembly/name") == assembly and root.find("members/member") is not None,
+            "Package XML documentation has the wrong assembly or no documented members: " + documentation,
+        )
+
+
 def verify_release(root, manifest_hash, commit, policy):
     root = Path(root).resolve(strict=True)
     require(sha256(root / "release.json") == manifest_hash, "Release manifest digest differs")
@@ -75,7 +99,7 @@ def verify_release(root, manifest_hash, commit, policy):
             if package.endswith(".nupkg"):
                 require("security/provenance.json" in archive.namelist(), "Package verification locator is missing")
                 require("licenses/LICENSE" in archive.namelist(), "Package license file is missing")
-                require("README.md" in archive.namelist(), "Package README is missing")
+                verify_package_documentation(archive, fields, package_id)
                 require("THIRD-PARTY-NOTICES.md" in archive.namelist(), "Package third-party notices are missing")
                 locator = json.loads(archive.read("security/provenance.json"))
                 require(

@@ -57,6 +57,7 @@ public sealed class ScaleSetResponseSnapshot
     public bool IsBodyTruncated { get; }
 
     /// <summary>Gets the first header value matching <paramref name="name"/> case-insensitively, or <see langword="null"/>.</summary>
+    /// <param name="name">Non-empty HTTP response header name.</param>
     public string? GetHeaderValue(string name)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(name);

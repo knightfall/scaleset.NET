@@ -43,6 +43,21 @@ public sealed class ScaleSetRateLimitException : ScaleSetApiException
     }
 
     /// <summary>Creates a rate-limit exception with classification, retry hint, and response metadata.</summary>
+    /// <param name="message">Human-readable error message.</param>
+    /// <param name="statusCode">HTTP status code, when a response was received.</param>
+    /// <param name="kind">Rate-limit classification.</param>
+    /// <param name="retryAfter">Server-suggested delay or zero when no usable hint was provided.</param>
+    /// <param name="reset">UTC quota reset time, when known.</param>
+    /// <param name="retries">Number of rate-limited retries already performed.</param>
+    /// <param name="domainError">Scale set service error classification, when known.</param>
+    /// <param name="innerException">Underlying exception, when available.</param>
+    /// <param name="method">HTTP method associated with the failure.</param>
+    /// <param name="safeUri">Redacted request URI.</param>
+    /// <param name="activityId">Actions activity correlation identifier.</param>
+    /// <param name="githubRequestId">GitHub request correlation identifier.</param>
+    /// <param name="bodyPreview">Bounded, redacted preview of the response body.</param>
+    /// <param name="response">Optional in-memory snapshot of the response.</param>
+    /// <exception cref="ArgumentOutOfRangeException">The rate-limit kind is undefined, or the delay or retry count is negative.</exception>
     public ScaleSetRateLimitException(
         string message,
         int? statusCode,

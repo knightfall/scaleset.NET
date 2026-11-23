@@ -11,6 +11,9 @@ using ScaleSet.Hosting.Telemetry;
 namespace ScaleSet.Hosting.Controller;
 
 /// <summary>The outcome of one durable runner provisioning operation.</summary>
+/// <param name="Resource">Provider resource associated with the operation.</param>
+/// <param name="Stage">Durable lifecycle stage after provisioning or adoption.</param>
+/// <param name="Recovered">Whether an existing provider resource was adopted.</param>
 public sealed record RunnerProvisioningResult(RunnerResource Resource, RunnerLifecycleStage Stage, bool Recovered);
 
 /// <summary>
@@ -37,6 +40,13 @@ public sealed partial class ScaleSetRunnerProvisioner : IDisposable
     private readonly TimeProvider _timeProvider;
 
     /// <summary>Creates a provisioner bound to one scale set, provider profile, and state journal.</summary>
+    /// <param name="scaleSetId">GitHub ID that matches the journal's scale set.</param>
+    /// <param name="workFolder">Runner work folder to include in the JIT request.</param>
+    /// <param name="jitConfigClient">Client used to issue JIT configurations for new runners.</param>
+    /// <param name="provider">Caller-owned runner provider with ownership-scoped discovery.</param>
+    /// <param name="journal">Caller-owned durable state for the scale set.</param>
+    /// <param name="logger">Optional application logger.</param>
+    /// <param name="timeProvider">Optional clock for lifecycle timestamps.</param>
     public ScaleSetRunnerProvisioner(
         long scaleSetId,
         string workFolder,
@@ -76,6 +86,9 @@ public sealed partial class ScaleSetRunnerProvisioner : IDisposable
     /// discovered before any JIT or create request is issued. JIT configuration
     /// is held only in memory and is never written to the journal or diagnostics.
     /// </summary>
+    /// <param name="identity">Stable identity for the runner operation, in the journal's ownership scope.</param>
+    /// <param name="cancellationToken">Token used to cancel provisioning.</param>
+    /// <exception cref="ArgumentException">The identity is outside the configured ownership scope.</exception>
     /// <exception cref="InvalidOperationException">The operation is ambiguous or already terminal and cannot safely be replayed.</exception>
     /// <exception cref="InvalidDataException">Provider discovery contradicts the journal or returns conflicting resources.</exception>
     public async Task<RunnerProvisioningResult> ProvisionAsync(
