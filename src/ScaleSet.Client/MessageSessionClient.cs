@@ -153,13 +153,7 @@ public sealed class MessageSessionClient : IMessageSession
         {
             await operationsDrained.WaitAsync(cancellationToken).ConfigureAwait(false);
             var session = Session;
-            await _client.SendActionsAsync(
-                HttpMethod.Delete,
-                $"{ScaleSetPath}/{_scaleSetId.ToString(CultureInfo.InvariantCulture)}/sessions/{session.SessionId:D}",
-                body: null,
-                query: null,
-                expectedStatus: 204,
-                cancellationToken).ConfigureAwait(false);
+            await _client.DeleteMessageSessionCoreAsync(_scaleSetId, session.SessionId, cancellationToken).ConfigureAwait(false);
 
             lock (_lifecycleSync)
             {

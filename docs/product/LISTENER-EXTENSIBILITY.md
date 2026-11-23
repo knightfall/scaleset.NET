@@ -311,14 +311,17 @@ bound to the exact session, including any internal retry. [Concrete Client basel
 | --- | --- |
 | The concrete session client is still open | Stop the previous pump and await its active step. Reconstruct with the same client and key. The new pump reloads the exact checkpoint and may resume `Received` or `Processed`. The existing session is still held in memory. |
 | The old session can be closed | Reconcile admissions and job effects against authoritative evidence. With the old client still available, await `IMessageSession.CloseAsync`, which drains its admitted operations before sending administrative DELETE for the exact GUID. A successful close retires the session, while unresolved delivery evidence remains in its checkpoint. Journal closure and creation in the supervisor. Give the new session its own key, initial statistics, and absent cursor. |
-| The process or session client is gone, or close is uncertain | Quarantine the old session and retain its checkpoint and reservations. The current public Client has no attach, recover, or close-by-journaled-ID operation. Gate replacement on service-supported retirement or handover evidence. Never infer retirement or ack outcome from a 404 or local elapsed time. [Client recovery qualification (#64)](https://github.com/knightfall/scaleset.NET/issues/64) tracks this separate T09 prerequisite. |
+| The process or session client is gone, or close is uncertain | Quarantine the old session and retain its checkpoint and reservations. After the old process stops and ownership is established, a supervisor can use `ScaleSetClient.DeleteMessageSessionAsync` from a fresh client with the journaled scale-set ID and session GUID. A successful retirement authorizes a replacement when the supervisor's other conditions hold. An ambiguous result, including an expired-session error after a lost response, still requires authoritative evidence. [Client recovery qualification (#64)](https://github.com/knightfall/scaleset.NET/issues/64) |
 
-The reference protocol's PATCH supports refresh within an already established
-client. Its observed source contract does not qualify reattachment after
-process loss. Keep the release scope to same-client continuation and safe
-replacement when independently authorized. Existing Hosting demonstrates
-close-before-reconnect with an existing client and keeps the old session
-owned when closure is ambiguous.
+Same-session continuation uses a still-open client. A fresh-client
+administrative DELETE for the exact journaled session returned HTTP 204 in
+a GitHub.com repository-scope canary after the original process was killed.
+A replacement received a new GUID and polled without the old cursor. After a
+successful close response was withheld, retrying the same GUID returned the
+same HTTP 400 `RunnerScaleSetSessionExpiredException` as a never-issued GUID.
+Keep the old delivery checkpoint and quarantine uncertainty when a close
+cannot be confirmed. Existing Hosting continues to own closure and recovery
+of its live session client.
 
 ## 5. Step sequencing and durable transitions
 
@@ -551,8 +554,9 @@ Use the matching candidate packages `Knightfall.ScaleSet.Client` and
 candidate for source commit
 `28eb8a95e4e4d3f84f8876c3436c95a7714dc088`. The release workflow reuses the
 prerelease version across candidate builds, so the source commit and candidate
-manifest identify the actual compatible binaries. Pin the selected candidate
-or a future published release confirmed to include this feature.
+manifest identify the actual compatible binaries. The pinned artifacts verify
+the Listener pump. Exact-session retirement after process loss requires a
+Client build that includes `DeleteMessageSessionAsync`.
 [Source commit](https://github.com/knightfall/scaleset.NET/commit/28eb8a95e4e4d3f84f8876c3436c95a7714dc088) ·
 [Candidate build and artifact](https://github.com/knightfall/scaleset.NET/actions/runs/45265772997)
 
@@ -566,7 +570,7 @@ The candidate manifest SHA-256 is
 
 | AWS planning requirement | API and candidate demonstration |
 | --- | --- |
-| Durable cursor and pending-delivery resume | `IScaleSetListenerCheckpointStore` uses the exact scope/set/session key. The example round-trips JSON, restores `Received` with its original time, and resumes `Processed` directly at acknowledgement. T09 still needs [#64](https://github.com/knightfall/scaleset.NET/issues/64) for cross-process session reattachment or authoritative retirement. |
+| Durable cursor and pending-delivery resume | `IScaleSetListenerCheckpointStore` uses the exact scope/set/session key. The example round-trips JSON, restores `Received` with its original time, and resumes `Processed` directly at acknowledgement. T09 can use confirmed exact-session retirement with a Client build that includes the [#64](https://github.com/knightfall/scaleset.NET/issues/64) API. A lost response still requires authoritative evidence before replacement. |
 | Pre/post-poll ownership and acknowledgement bounds | `IScaleSetListenerExecutionPolicy` runs before each effect. `ScaleSetListenerPumpOptions.OwnershipLost` cancels the in-flight operation. The example revokes ownership during a poll. AWS must condition store and ledger mutations on the same ownership incarnation. |
 | Capacity refresh after the long poll | `HandleDelivery` authorization and `IScaleSetListenerDeliveryHandler` run after the poll. The example drops capacity to zero while the poll is blocked, then resumes with a new allowance. T09 computes `OutsideAssigned` and fences reservations in its admission ledger. |
 | Persist-before-handle and yield | `PersistReceived` precedes handling. `Deferred` retains its phase and `RecoveryRequired` stops uncertain acknowledgement. The example checks both outcomes and verifies the absence of an unauthorized DELETE or next poll. |
@@ -593,7 +597,9 @@ adapter and deployment qualification.
   [Pre-feature package baseline](https://github.com/knightfall/scaleset.NET/actions/runs/45262031116)
 - The Client wire fixtures verify same-GUID refresh and cancellation, guard
   against retry to a replacement GUID, and preserve acknowledgement
-  uncertainty. Target service recovery after process loss remains a separate
-  qualification in [#64](https://github.com/knightfall/scaleset.NET/issues/64).
+  uncertainty. Separate Client transport tests verify exact-session retirement,
+  including administrative authentication and no automatic retry. The
+  repository-scope canary and remaining service evidence are tracked in
+  [#64](https://github.com/knightfall/scaleset.NET/issues/64).
 - The [publishing policy](../releases/PUBLISHING.md) governs release and registry
   verification. Candidate packaging and local execution precede publication.
