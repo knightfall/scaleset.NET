@@ -162,7 +162,8 @@ public sealed class ScaleSetMessageHandlerTests
         await using Fixture fixture = await Fixture.CreateAsync(directory.Path, scope);
         fixture.Session.Acquire = (offered, _) =>
         {
-            Assert.Equal([101L, 102L, 103L], offered);
+            IReadOnlyList<long> expected = fixture.Session.AcquireCount == 1 ? [101L, 102L, 103L] : [101L, 103L];
+            Assert.Equal(expected, offered);
             return Task.FromResult<IReadOnlyList<long>>([102, 999, 102]);
         };
         CancellationToken cancellationToken = TestContext.Current.CancellationToken;

@@ -24,6 +24,9 @@ manages registration and queue tokens, HTTP timeouts, and retry policy.
 Use `IMessageSession` for code that owns closure and `IMessageSessionClient`
 for code that only processes the queue. Close sessions before disposing the
 client. If you supplied an `HttpClient`, its lifetime remains yours.
+An explicit `CloseAsync` lets the owner choose a cleanup deadline and observe
+and retry a failed close. Consumers can depend on their own narrow interfaces
+for administration calls such as JIT generation or runner-group lookup.
 
 Use the Listener package for the message loop and Hosting for provisioning
 through a runner provider. See the [authenticated quickstart](https://github.com/knightfall/scaleset.NET/blob/main/docs/usage.md)
