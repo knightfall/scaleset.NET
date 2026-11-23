@@ -15,17 +15,11 @@ public sealed partial class ScaleSetMessageHandler
         RunnerScaleSetMessage? message,
         CancellationToken cancellationToken)
     {
-        ScaleSetCapacityContext capacity = _capacity!;
+        ScaleSetCapacityContext capacity = _capacity;
         bool admitted = TryEnterAdmission(out IDisposable? admissionLease);
         using (admissionLease)
         {
             RunnerScaleSetStatistic? statistics = message?.Statistics;
-            if (statistics is not null
-                && (statistics.TotalAssignedJobs < 0 || statistics.TotalIdleRunners < 0))
-            {
-                throw new InvalidDataException("Scale-set statistics contained a negative runner or job count.");
-            }
-
             int offeredJobCount = statistics is null || message is null
                 ? 0
                 : message.JobAvailableMessages
@@ -385,7 +379,7 @@ public sealed partial class ScaleSetMessageHandler
             RunnerLifecycleStage.Unknown => CapacityOccupancyState.Unknown,
             _ => CapacityOccupancyState.Unknown,
         };
-        CapacityReservationLease? capacityLease = _capacity!.DemandRegistry.GetCapacityLease(operation.Identity.OperationId);
+        CapacityReservationLease? capacityLease = _capacity.DemandRegistry.GetCapacityLease(operation.Identity.OperationId);
         if (capacityLease is not null)
         {
             SetCapacityLeaseState(_capacity, capacityLease, capacityState);

@@ -19,7 +19,7 @@ public sealed partial class ScaleSetMessageHandler
             }
 
             bool absent = await _provisioner.ReconcileCompletedAsync(operation.Identity, cancellationToken).ConfigureAwait(false);
-            if (absent && _capacity is not null)
+            if (absent)
             {
                 ReleaseCapacityLease(_capacity, operation.Identity.OperationId);
             }

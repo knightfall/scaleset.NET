@@ -427,8 +427,8 @@ public sealed partial class ScaleSetRuntimeFactory : IScaleSetRuntimeFactory
                 _provisioner,
                 _lifecycle,
                 _journal,
-                _loggerFactory.CreateLogger<ScaleSetMessageHandler>(),
-                capacityContext);
+                capacityContext,
+                _loggerFactory.CreateLogger<ScaleSetMessageHandler>());
             CancellationTokenSource poll = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
 
             bool stopBeforeListen;

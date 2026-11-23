@@ -88,7 +88,7 @@ try
             logs.CreateLogger<ScaleSetListener>());
         var capacity = new ScaleSetCapacityContext(settings, coordinator, coordinator.DemandRegistry, listener.SetMaxRunners);
         var handler = new ScaleSetMessageHandler(scope, session, provisioner, lifecycle, journal,
-            logs.CreateLogger<ScaleSetMessageHandler>(), capacity);
+            capacity, logs.CreateLogger<ScaleSetMessageHandler>());
         Console.WriteLine("Listening for jobs. Press Ctrl+C to drain and close the session.");
         await ListenAsync(listener, handler, shutdown.Token);
     }

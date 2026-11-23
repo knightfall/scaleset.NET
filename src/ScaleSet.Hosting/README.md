@@ -10,7 +10,14 @@ dotnet add package Knightfall.ScaleSet.Hosting --version 0.1.0-alpha.1
 
 `ScaleSetMessageHandler` processes job offers and lifecycle events.
 `HostCapacityCoordinator` plans and reserves count, CPU, and memory capacity
-using GitHub's assigned-job statistics. `ScaleSetRunnerProvisioner` records
+using GitHub's assigned-job statistics. Construct the handler with a required
+`ScaleSetCapacityContext` before the optional logger. Share one coordinator
+and its demand registry across the host's scale sets, and pass each listener's
+`SetMaxRunners` to its context. GitHub started and completed events correlate
+by the scoped runner ID and name. A completed runner continues to use
+capacity until provider inspection confirms its absence.
+
+`ScaleSetRunnerProvisioner` records
 intent before requesting a JIT configuration and creating a runner.
 `RunnerLifecycleManager` and `FileRunnerStateJournal` record evidence about
 each operation for reconciliation after restart.
