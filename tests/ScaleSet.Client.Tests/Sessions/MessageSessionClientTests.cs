@@ -344,6 +344,37 @@ public sealed class MessageSessionClientTests
         Assert.Equal(1, Volatile.Read(ref refreshRequests));
     }
 
+    [Theory]
+    [InlineData("poll")]
+    [InlineData("ack")]
+    [InlineData("acquire")]
+    public async Task RefreshWithDifferentGuidNeverPublishesOrRetries(string operation)
+    {
+        using ClientFixture fixture = new((request, _) =>
+        {
+            if (IsCreateSession(request))
+            {
+                return Task.FromResult(JsonResponse(HttpStatusCode.OK, SessionJson(QueueToken)));
+            }
+
+            if (IsRefresh(request))
+            {
+                var original = ScaleSetJson.Deserialize<RunnerScaleSetSession>(SessionJson(RefreshedQueueToken))!;
+                return Task.FromResult(JsonResponse(HttpStatusCode.OK,
+                    ScaleSetJson.Serialize(original with { SessionId = Guid.NewGuid() })));
+            }
+
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.Unauthorized));
+        });
+        var session = await fixture.Client.CreateMessageSessionAsync(LargeScaleSetId, "runner-host", TestContext.Current.CancellationToken);
+        var originalSession = session.Session;
+
+        await Assert.ThrowsAsync<InvalidDataException>(() => InvokeSessionOperationAsync(operation, session));
+        Assert.Same(originalSession, session.Session);
+        Assert.Single(fixture.Handler.Requests, IsRefresh);
+        Assert.Single(fixture.Handler.Requests, request => IsSessionOperation(request, operation));
+    }
+
     [Fact]
     public async Task ConcurrentUnauthorizedPollsCoalesceWhenRefreshKeepsSameIdAndToken()
     {

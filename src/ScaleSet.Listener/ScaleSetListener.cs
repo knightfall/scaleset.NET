@@ -16,6 +16,8 @@ public sealed partial class ScaleSetListener
     public const long InitialMessageId = -1;
 
     private static readonly ActivitySource ActivitySource = new(ActivitySourceName);
+
+    internal static ActivitySource ListenerActivitySource => ActivitySource;
     private readonly IMessageSessionClient _client;
     private readonly long _scaleSetId;
     private readonly TimeSpan _acknowledgmentTimeout;

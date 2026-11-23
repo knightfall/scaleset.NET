@@ -6,7 +6,7 @@ namespace ScaleSet.Listener;
 /// <param name="Scope">Stable nonsecret identifier for the GitHub host and target.</param>
 /// <param name="ScaleSetId">Positive runner scale-set identifier.</param>
 /// <param name="SessionId">Exact remote session GUID.</param>
-internal sealed record ScaleSetListenerSessionKey(string Scope, long ScaleSetId, Guid SessionId)
+public sealed record ScaleSetListenerSessionKey(string Scope, long ScaleSetId, Guid SessionId)
 {
     internal void Validate()
     {
@@ -24,7 +24,7 @@ internal sealed record ScaleSetListenerSessionKey(string Scope, long ScaleSetId,
 /// <summary>Sets the session, fixed ownership signal, and operation budgets for a pump.</summary>
 /// <param name="SessionKey">Key for the exact session.</param>
 /// <param name="OwnershipLost">Fixed cancellation signal for this ownership incarnation.</param>
-internal sealed record ScaleSetListenerPumpOptions(ScaleSetListenerSessionKey SessionKey, CancellationToken OwnershipLost)
+public sealed record ScaleSetListenerPumpOptions(ScaleSetListenerSessionKey SessionKey, CancellationToken OwnershipLost)
 {
     /// <summary>Gets the total poll budget, including authorization.</summary>
     public TimeSpan PollTimeout { get; init; } = TimeSpan.FromMinutes(2);
@@ -58,7 +58,7 @@ internal sealed record ScaleSetListenerPumpOptions(ScaleSetListenerSessionKey Se
 }
 
 /// <summary>Identifies the origin of a delivery.</summary>
-internal enum ScaleSetListenerDeliveryKind
+public enum ScaleSetListenerDeliveryKind
 {
     /// <summary>Initial statistics from the session snapshot.</summary>
     InitialStatistics = 0,
@@ -69,7 +69,7 @@ internal enum ScaleSetListenerDeliveryKind
 }
 
 /// <summary>Describes whether the handler has safely completed processing.</summary>
-internal enum ScaleSetListenerDeliveryDisposition
+public enum ScaleSetListenerDeliveryDisposition
 {
     /// <summary>Business effects are durable or safely recoverable by the consumer.</summary>
     Completed = 0,
@@ -78,7 +78,7 @@ internal enum ScaleSetListenerDeliveryDisposition
 }
 
 /// <summary>Identifies the durable phase of one pending delivery.</summary>
-internal enum ScaleSetListenerPendingPhase
+public enum ScaleSetListenerPendingPhase
 {
     /// <summary>The snapshot is saved and processing can be resumed.</summary>
     Received = 0,
@@ -89,7 +89,7 @@ internal enum ScaleSetListenerPendingPhase
 }
 
 /// <summary>Holds an immutable, sanitized delivery and its original observation time.</summary>
-internal sealed record ScaleSetListenerDelivery
+public sealed record ScaleSetListenerDelivery
 {
     /// <summary>Creates a normalized snapshot from typed delivery data.</summary>
     /// <param name="sessionKey">Key for the exact session.</param>
@@ -152,7 +152,7 @@ internal sealed record ScaleSetListenerDelivery
 /// <summary>Identifies the immutable snapshot and durable phase of a pending delivery.</summary>
 /// <param name="Delivery">Durable delivery snapshot.</param>
 /// <param name="Phase">Durable execution phase.</param>
-internal sealed record ScaleSetListenerPendingDelivery(
+public sealed record ScaleSetListenerPendingDelivery(
     ScaleSetListenerDelivery Delivery, ScaleSetListenerPendingPhase Phase);
 
 /// <summary>Contains the entire atomic Listener state for one session.</summary>
@@ -164,7 +164,7 @@ internal sealed record ScaleSetListenerPendingDelivery(
 /// <param name="InitialStatisticsCompleted">Whether initial statistics handling has been recorded.</param>
 /// <param name="LastAcknowledgedMessageId">Highest confirmed real message ID, or null.</param>
 /// <param name="Pending">The unresolved durable delivery, if present.</param>
-internal sealed record ScaleSetListenerCheckpoint(
+public sealed record ScaleSetListenerCheckpoint(
     ScaleSetListenerSessionKey SessionKey, int SchemaVersion, long Revision,
     Guid TransitionId, bool InitialStatisticsCompleted,
     long? LastAcknowledgedMessageId, ScaleSetListenerPendingDelivery? Pending)
@@ -203,7 +203,7 @@ internal sealed record ScaleSetListenerCheckpoint(
 }
 
 /// <summary>Reports a conclusive conditional write outcome.</summary>
-internal enum ScaleSetListenerCheckpointWriteResult
+public enum ScaleSetListenerCheckpointWriteResult
 {
     /// <summary>The entire checkpoint was committed.</summary>
     Committed = 0,
@@ -212,7 +212,7 @@ internal enum ScaleSetListenerCheckpointWriteResult
 }
 
 /// <summary>Provides consistent reads and atomic, ownership-fenced checkpoint mutations.</summary>
-internal interface IScaleSetListenerCheckpointStore
+public interface IScaleSetListenerCheckpointStore
 {
     /// <summary>Reads the latest committed checkpoint or returns null for an absent key.</summary>
     /// <param name="key">Exact session key.</param>
@@ -231,7 +231,7 @@ internal interface IScaleSetListenerCheckpointStore
 }
 
 /// <summary>Processes a typed delivery with consumer-owned admission and replay safety.</summary>
-internal interface IScaleSetListenerDeliveryHandler
+public interface IScaleSetListenerDeliveryHandler
 {
     /// <summary>Processes the delivery and reports completion or explicit deferral.</summary>
     /// <param name="delivery">Typed delivery with its original observation time.</param>
