@@ -6,6 +6,8 @@ using ScaleSet.Hosting.Providers;
 namespace ScaleSet.Providers.Docker;
 
 /// <summary>Registers Docker runner settings and creates a provider for an individual scale set.</summary>
+/// <param name="loggerFactory">Optional factory for the provider logger.</param>
+/// <param name="timeProvider">Optional clock for provider requests.</param>
 public sealed class DockerRunnerProviderFactory(ILoggerFactory? loggerFactory = null, TimeProvider? timeProvider = null) : IRunnerProviderFactory
 {
     /// <inheritdoc />

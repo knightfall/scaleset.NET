@@ -6,10 +6,11 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using ScaleSet.Autoscaler.Configuration;
-using ScaleSet.Autoscaler.Runtime;
 using ScaleSet.Autoscaler.Telemetry;
-using ScaleSet.Hosting.Capacity;
+using ScaleSet.Hosting;
 using ScaleSet.Hosting.Configuration;
+using ScaleSet.Hosting.Providers;
+using ScaleSet.Hosting.Runtime;
 using ScaleSet.Hosting.Telemetry;
 using ScaleSet.Providers.Docker;
 
@@ -146,7 +147,6 @@ public static partial class AutoscalerCommandRunner
         ArgumentNullException.ThrowIfNull(configuration);
         AutoscalerOptions options = AutoscalerConfiguration.Bind(configuration, [new DockerRunnerProviderFactory()]);
         AutoscalerTelemetryConfiguration telemetry = AutoscalerTelemetryConfiguration.Bind(configuration);
-        HostCapacityCoordinator capacityCoordinator = new(options.HostCapacity, options.ScaleSets);
         string healthListenUrl = GetHealthListenUrl(configuration);
         WebApplicationBuilder builder = WebApplication.CreateBuilder(new WebApplicationOptions
         {
@@ -157,23 +157,19 @@ public static partial class AutoscalerCommandRunner
         builder.Configuration.AddConfiguration(configuration);
         builder.Logging.ClearProviders();
         builder.WebHost.UseUrls(healthListenUrl);
-        builder.Services.Configure<HostOptions>(hostOptions =>
-            hostOptions.ShutdownTimeout = CalculateShutdownTimeout(options, telemetry.FlushTimeoutMilliseconds));
-        builder.Services.AddSingleton(options);
-        builder.Services.AddSingleton(capacityCoordinator);
-        builder.Services.AddSingleton<AutoscalerHealthState>();
-        builder.Services.AddSingleton<TimeProvider>(TimeProvider.System);
         builder.Services.AddScaleSetTelemetry(telemetry, options.ScaleSets.Select(static scaleSet => scaleSet.Key!));
-        if (runtimeFactory is null)
+        builder.Services.AddSingleton<IRunnerProviderFactory, DockerRunnerProviderFactory>();
+        if (runtimeFactory is not null)
         {
-            builder.Services.AddSingleton<IScaleSetRuntimeFactory, ScaleSetRuntimeFactory>();
-        }
-        else
-        {
-            builder.Services.AddSingleton<IScaleSetRuntimeFactory>(runtimeFactory);
+            builder.Services.AddSingleton(runtimeFactory);
         }
 
-        builder.Services.AddHostedService<ScaleSetAutoscalerService>();
+        builder.Services.AddScaleSetHosting(options);
+        builder.Services.PostConfigure<HostOptions>(host =>
+        {
+            long flushTicks = TimeSpan.FromMilliseconds(telemetry.FlushTimeoutMilliseconds).Ticks;
+            host.ShutdownTimeout = TimeSpan.FromTicks(Math.Min(host.ShutdownTimeout.Ticks, long.MaxValue - flushTicks) + flushTicks);
+        });
         WebApplication app = builder.Build();
         app.MapGet("/health/live", static (AutoscalerHealthState healthState) =>
             healthState.IsLive
@@ -202,31 +198,6 @@ public static partial class AutoscalerCommandRunner
 
         return uri.GetLeftPart(UriPartial.Authority);
     }
-
-    internal static TimeSpan CalculateShutdownTimeout(AutoscalerOptions options, int telemetryFlushTimeoutMilliseconds)
-    {
-        ArgumentNullException.ThrowIfNull(options);
-        ArgumentOutOfRangeException.ThrowIfNegative(telemetryFlushTimeoutMilliseconds);
-
-        long drainTicks = options.ScaleSets.Count == 0
-            ? 0
-            : options.ScaleSets.Max(static scaleSet => scaleSet.Lifecycle.ShutdownDrainTimeout.Ticks);
-        long cleanupTicks = 0;
-        foreach (ScaleSetOptions scaleSet in options.ScaleSets)
-        {
-            cleanupTicks = SaturatingAdd(cleanupTicks, scaleSet.Lifecycle.CleanupTimeout.Ticks);
-        }
-
-        long ticks = TimeSpan.FromSeconds(5).Ticks;
-        ticks = SaturatingAdd(ticks, drainTicks);
-        ticks = SaturatingAdd(ticks, cleanupTicks);
-        ticks = SaturatingAdd(ticks, options.Controller.ControlOperationTimeout.Ticks);
-        ticks = SaturatingAdd(ticks, TimeSpan.FromMilliseconds(telemetryFlushTimeoutMilliseconds).Ticks);
-        return TimeSpan.FromTicks(ticks);
-    }
-
-    private static long SaturatingAdd(long left, long right) =>
-        right > 0 && left > long.MaxValue - right ? long.MaxValue : left + right;
 
     private static async Task<int> RunAutoscalerAsync(TextWriter error)
     {

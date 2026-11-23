@@ -26,7 +26,8 @@ Docker autoscaler with a provider selected through dependency injection.
   order.
 - Keep ASP.NET health endpoints, Serilog, OpenTelemetry exporters, Docker
   registration, and application configuration sources in the executable's
-  composition root. The Hosting package uses .NET hosting and DI abstractions.
+  composition root. The Hosting package uses Microsoft.Extensions.Hosting to
+  ensure the Generic Host shutdown budget covers controller drain and cleanup.
 
 ## Configuration and state
 

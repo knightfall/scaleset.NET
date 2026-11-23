@@ -73,5 +73,5 @@ The autoscaler also runs periodic inventory reconciliation at
 `Controller.ReconcileInterval`. Idle retirement is disabled.
 
 The example starts with empty owned Docker inventory and a journal with no
-unfinished operations. Use the [autoscaler runtime](../../src/ScaleSet.Autoscaler/Runtime/ScaleSetRuntimeFactory.cs)
+unfinished operations. Use the [autoscaler runtime](../../src/ScaleSet.Hosting/Runtime/ScaleSetRuntimeFactory.cs)
 as the reference for reconciling unfinished operations after a restart.

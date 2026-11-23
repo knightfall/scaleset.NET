@@ -1,4 +1,4 @@
-namespace ScaleSet.Autoscaler.Runtime;
+namespace ScaleSet.Hosting.Runtime;
 
 /// <summary>Tracks whether startup ownership and provider reconciliation have completed.</summary>
 public sealed class AutoscalerHealthState

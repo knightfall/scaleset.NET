@@ -1,8 +1,8 @@
-using System.Collections.Concurrent;
 using Microsoft.Extensions.Logging.Abstractions;
-using ScaleSet.Autoscaler.Runtime;
 using ScaleSet.Hosting.Capacity;
 using ScaleSet.Hosting.Configuration;
+using ScaleSet.Hosting.Runtime;
+using System.Collections.Concurrent;
 
 namespace ScaleSet.Hosting.Tests.Autoscaler;
 

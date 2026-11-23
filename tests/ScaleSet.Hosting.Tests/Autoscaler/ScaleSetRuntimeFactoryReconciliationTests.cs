@@ -1,15 +1,15 @@
-using System.Collections.Immutable;
-using System.Diagnostics.Metrics;
-using System.Threading.Channels;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
-using ScaleSet.Autoscaler.Runtime;
 using ScaleSet.Client;
 using ScaleSet.Hosting.Capacity;
 using ScaleSet.Hosting.Configuration;
 using ScaleSet.Hosting.Providers;
+using ScaleSet.Hosting.Runtime;
 using ScaleSet.Hosting.State;
 using ScaleSet.Hosting.Telemetry;
+using System.Collections.Immutable;
+using System.Diagnostics.Metrics;
+using System.Threading.Channels;
 
 namespace ScaleSet.Hosting.Tests.Autoscaler;
 

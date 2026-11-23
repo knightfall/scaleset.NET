@@ -3,7 +3,7 @@ using ScaleSet.Hosting.Capacity;
 using ScaleSet.Hosting.Providers;
 using ScaleSet.Hosting.State;
 
-namespace ScaleSet.Autoscaler.Runtime;
+namespace ScaleSet.Hosting.Runtime;
 
 public sealed partial class ScaleSetRuntimeFactory
 {

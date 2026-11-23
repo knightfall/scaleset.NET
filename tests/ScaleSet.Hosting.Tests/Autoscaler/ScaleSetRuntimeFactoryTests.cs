@@ -7,12 +7,14 @@ using System.Text;
 using System.Text.Json;
 using System.Threading.Channels;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging.Abstractions;
-using ScaleSet.Autoscaler.Runtime;
+using Microsoft.Extensions.Options;
 using ScaleSet.Client;
 using ScaleSet.Hosting.Capacity;
 using ScaleSet.Hosting.Configuration;
 using ScaleSet.Hosting.Providers;
+using ScaleSet.Hosting.Runtime;
 using ScaleSet.Hosting.Scaling;
 using ScaleSet.Hosting.State;
 using ScaleSet.Hosting.Telemetry;
@@ -22,6 +24,53 @@ namespace ScaleSet.Hosting.Tests.Autoscaler;
 public sealed partial class ScaleSetRuntimeFactoryTests
 {
     private const string CredentialSentinel = "synthetic-PAT-secret-6419";
+
+    [Fact]
+    public async Task AddScaleSetHosting_RejectsAnUnregisteredProviderBeforeStartingAnyRuntime()
+    {
+        using TemporaryStateDirectory directory = new();
+        (AutoscalerOptions options, ScaleSetOptions first) = CreateOptions(directory.Path);
+        options.ScaleSets.Add(new ScaleSetOptions
+        {
+            Key = "second",
+            Name = "another-set",
+            GithubUrl = first.GithubUrl,
+            CredentialsRef = first.CredentialsRef,
+            RunnerProfile = first.RunnerProfile,
+            Provider = "Unregistered",
+        });
+        FakeScaleSetRuntimeClient client = new();
+        HostApplicationBuilder builder = Host.CreateApplicationBuilder();
+        builder.Services.AddSingleton<IScaleSetRuntimeClientFactory>(new TestRuntimeClientFactory(client));
+        builder.Services.AddSingleton<IRunnerProviderFactory>(new TestRunnerProviderFactory(new FakeRunnerProvider()));
+        builder.Services.AddScaleSetHosting(options);
+        using IHost host = builder.Build();
+
+        AutoscalerConfigurationException error = await Assert.ThrowsAsync<AutoscalerConfigurationException>(
+            () => host.StartAsync(TestContext.Current.CancellationToken));
+
+        Assert.Contains("ScaleSets[1].Provider", error.Message, StringComparison.Ordinal);
+        Assert.Equal(0, client.CreateCount);
+        Assert.Equal(0, client.SessionCreateCount);
+        Assert.False(host.Services.GetRequiredService<AutoscalerHealthState>().IsReady);
+    }
+
+    [Theory]
+    [InlineData(1, 14)]
+    [InlineData(20, 20)]
+    public void AddScaleSetHosting_PreservesEnoughHostShutdownTime(int configuredSeconds, int expectedSeconds)
+    {
+        using TemporaryStateDirectory directory = new();
+        (AutoscalerOptions options, ScaleSetOptions scaleSet) = CreateOptions(directory.Path);
+        scaleSet.Lifecycle.ShutdownDrainTimeout = TimeSpan.FromSeconds(5);
+        HostApplicationBuilder builder = Host.CreateApplicationBuilder();
+        builder.Services.Configure<HostOptions>(host => host.ShutdownTimeout = TimeSpan.FromSeconds(configuredSeconds));
+        builder.Services.AddSingleton<IRunnerProviderFactory>(new TestRunnerProviderFactory(new FakeRunnerProvider()));
+        builder.Services.AddScaleSetHosting(options);
+        using IHost host = builder.Build();
+
+        Assert.Equal(TimeSpan.FromSeconds(expectedSeconds), host.Services.GetRequiredService<IOptions<HostOptions>>().Value.ShutdownTimeout);
+    }
 
     [Fact]
     public async Task InitializeAsync_CleanBootstrapCreatesOnceAndPersistsFinalNonSecretIdentity()
@@ -519,12 +568,12 @@ public sealed partial class ScaleSetRuntimeFactoryTests
             {
                 if (attempt == 1)
                 {
-                    return Task.FromResult<IScaleSetRuntimeSession>(first);
+                    return Task.FromResult<IMessageSession>(first);
                 }
 
                 Assert.Equal(2, attempt);
                 Assert.Equal(1, first.CloseCount);
-                return Task.FromResult<IScaleSetRuntimeSession>(replacement);
+                return Task.FromResult<IMessageSession>(replacement);
             },
             OnGenerateJit = setting =>
             {
@@ -717,9 +766,23 @@ public sealed partial class ScaleSetRuntimeFactoryTests
             options,
             NullLoggerFactory.Instance,
             timeProvider ?? TimeProvider.System,
-            (_, _, _, _, _) => client,
-            (_, _, _) => provider,
+            new TestRuntimeClientFactory(client),
+            [new TestRunnerProviderFactory(provider)],
             telemetry);
+
+    private sealed class TestRuntimeClientFactory(IScaleSetRuntimeClient client) : IScaleSetRuntimeClientFactory
+    {
+        public IScaleSetRuntimeClient Create(GitHubTarget target, ScaleSetCredentials credentials, ScaleSetClientOptions options) => client;
+    }
+
+    private sealed class TestRunnerProviderFactory(IRunnerProvider provider) : IRunnerProviderFactory
+    {
+        public string Name => "Docker";
+
+        public IReadOnlyList<string> Validate(ScaleSetOptions scaleSet, string configurationPath) => [];
+
+        public IRunnerProvider Create(ScaleSetOptions scaleSet) => provider;
+    }
 
     private static (AutoscalerOptions Options, ScaleSetOptions ScaleSet) CreateRecoveryOptions(string stateDirectory)
     {
@@ -787,7 +850,7 @@ public sealed partial class ScaleSetRuntimeFactoryTests
 
         public Func<RunnerScaleSet, CancellationToken, Task<RunnerScaleSet>>? OnCreate { get; init; }
         public Func<RunnerScaleSetJitRunnerSetting, RunnerScaleSetJitRunnerConfig>? OnGenerateJit { get; init; }
-        public Func<int, CancellationToken, Task<IScaleSetRuntimeSession>>? OnOpen { get; init; }
+        public Func<int, CancellationToken, Task<IMessageSession>>? OnOpen { get; init; }
         public Func<long, CancellationToken, Task<RunnerReference?>>? OnGetRunner { get; init; }
         public Func<long, CancellationToken, Task>? OnRemoveRunner { get; init; }
         public RunnerScaleSet? ExistingScaleSet { get; init; }
@@ -843,17 +906,17 @@ public sealed partial class ScaleSetRuntimeFactoryTests
             Task.FromResult<RunnerScaleSetJitRunnerConfig?>(OnGenerateJit?.Invoke(runnerSetting)
                 ?? throw new InvalidOperationException("This test did not configure JIT generation."));
 
-        public Task<IScaleSetRuntimeSession> CreateMessageSessionAsync(long scaleSetId, string ownerName, CancellationToken cancellationToken)
+        public Task<IMessageSession> CreateMessageSessionAsync(long scaleSetId, string ownerName, CancellationToken cancellationToken)
         {
             int attempt = Interlocked.Increment(ref _sessionCreateCount);
-            return OnOpen?.Invoke(attempt, cancellationToken) ?? Task.FromResult<IScaleSetRuntimeSession>(RuntimeSession
+            return OnOpen?.Invoke(attempt, cancellationToken) ?? Task.FromResult<IMessageSession>(RuntimeSession
                 ?? throw new InvalidOperationException("This test did not configure a session."));
         }
 
         public void Dispose() => DisposeCount++;
     }
 
-    private sealed class FakeRuntimeSession : IScaleSetRuntimeSession
+    private sealed class FakeRuntimeSession : IMessageSession
     {
         public required Func<CancellationToken, Task<RunnerScaleSetMessage?>> Poll { get; init; }
         public required Func<CancellationToken, Task> Close { get; init; }

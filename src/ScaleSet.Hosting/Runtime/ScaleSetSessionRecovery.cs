@@ -3,7 +3,7 @@ using Microsoft.Extensions.Logging;
 using ScaleSet.Client;
 using ScaleSet.Hosting.Telemetry;
 
-namespace ScaleSet.Autoscaler.Runtime;
+namespace ScaleSet.Hosting.Runtime;
 
 internal sealed partial class ScaleSetSessionRecovery(
     TimeProvider timeProvider,
@@ -13,17 +13,17 @@ internal sealed partial class ScaleSetSessionRecovery(
 {
     private const int MaximumConsecutiveRetries = 3;
     private static readonly TimeSpan MaximumRetryDelay = TimeSpan.FromSeconds(30);
-    private IScaleSetRuntimeSession? _current;
+    private IMessageSession? _current;
     private CancellationToken _runToken;
     private bool _madeProgress;
 
     public RunnerScaleSetSession Session => Current.Session;
 
-    private IScaleSetRuntimeSession Current => _current ?? throw new InvalidOperationException("No GitHub session is open.");
+    private IMessageSession Current => _current ?? throw new InvalidOperationException("No GitHub session is open.");
 
     public async Task RunAsync(
-        Func<CancellationToken, Task<IScaleSetRuntimeSession>> connect,
-        Func<IScaleSetRuntimeSession, CancellationToken, Task> close,
+        Func<CancellationToken, Task<IMessageSession>> connect,
+        Func<IMessageSession, CancellationToken, Task> close,
         Func<CancellationToken, Task> listen,
         CancellationToken cancellationToken)
     {
@@ -77,10 +77,10 @@ internal sealed partial class ScaleSetSessionRecovery(
         }
     }
 
-    private async Task<IScaleSetRuntimeSession> ReconnectAsync(
+    private async Task<IMessageSession> ReconnectAsync(
         RetryAttempt retry,
-        Func<CancellationToken, Task<IScaleSetRuntimeSession>> connect,
-        Func<IScaleSetRuntimeSession, CancellationToken, Task> close,
+        Func<CancellationToken, Task<IMessageSession>> connect,
+        Func<IMessageSession, CancellationToken, Task> close,
         CancellationToken cancellationToken)
     {
         if (_current is not null)
@@ -122,7 +122,7 @@ internal sealed partial class ScaleSetSessionRecovery(
     public Task<IReadOnlyList<long>> AcquireJobsAsync(IReadOnlyList<long> runnerRequestIds, CancellationToken cancellationToken) =>
         InvokeQueueAsync(session => session.AcquireJobsAsync(runnerRequestIds, cancellationToken));
 
-    private async Task<T> InvokeQueueAsync<T>(Func<IScaleSetRuntimeSession, Task<T>> operation)
+    private async Task<T> InvokeQueueAsync<T>(Func<IMessageSession, Task<T>> operation)
     {
         try
         {

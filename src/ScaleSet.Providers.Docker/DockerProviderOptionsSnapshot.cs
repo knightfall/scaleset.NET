@@ -140,13 +140,7 @@ internal sealed record DockerRunnerProfileSnapshot(
     {
         ArgumentNullException.ThrowIfNull(profile);
 
-        string? image = profile.Image;
-        if (!IsPinnedImage(image))
-        {
-            throw new ArgumentException("RunnerProfile.Image must be a pinned image tag or sha256 digest.", nameof(image));
-        }
-
-
+        string image = ValidateImage(profile.Image);
         if (profile.Architecture is not RunnerArchitecture architecture || !Enum.IsDefined(architecture))
         {
             throw new ArgumentException("RunnerProfile.Architecture must be X64 or Arm64.", nameof(profile));
@@ -205,7 +199,7 @@ internal sealed record DockerRunnerProfileSnapshot(
         }
 
         return new DockerRunnerProfileSnapshot(
-            image!,
+            image,
             architecture,
             decimal.ToInt64(nanoCpus),
             memoryBytes,
@@ -213,6 +207,16 @@ internal sealed record DockerRunnerProfileSnapshot(
             network,
             profile.DockerBuildMode,
             profile.Privileged);
+    }
+
+    private static string ValidateImage(string? image)
+    {
+        if (!IsPinnedImage(image))
+        {
+            throw new ArgumentException("RunnerProfile.Image must be a pinned image tag or sha256 digest.", nameof(image));
+        }
+
+        return image!;
     }
 
     internal static bool IsPinnedImage(string? image)
