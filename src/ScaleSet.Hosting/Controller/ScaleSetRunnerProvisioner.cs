@@ -38,6 +38,8 @@ public sealed partial class ScaleSetRunnerProvisioner : IDisposable
     private readonly RunnerLifecycleManager _lifecycle;
     private readonly ILogger<ScaleSetRunnerProvisioner> _logger;
     private readonly TimeProvider _timeProvider;
+    private readonly ScaleSetTelemetryMetrics? _telemetry;
+    private readonly ScaleSetTelemetryProvider _telemetryProvider;
 
     /// <summary>Creates a provisioner bound to one scale set, provider profile, and state journal.</summary>
     /// <param name="scaleSetId">GitHub ID that matches the journal's scale set.</param>
@@ -55,6 +57,30 @@ public sealed partial class ScaleSetRunnerProvisioner : IDisposable
         IRunnerStateJournal journal,
         ILogger<ScaleSetRunnerProvisioner>? logger = null,
         TimeProvider? timeProvider = null)
+        : this(scaleSetId, workFolder, jitConfigClient, provider, journal, logger, timeProvider, null, ScaleSetTelemetryProvider.Other)
+    {
+    }
+
+    /// <summary>Creates a provisioner that records completed provisioning attempts in the host meter.</summary>
+    /// <param name="scaleSetId">GitHub ID that matches the journal's scale set.</param>
+    /// <param name="workFolder">Runner work folder to include in the JIT request.</param>
+    /// <param name="jitConfigClient">Client used to issue JIT configurations for new runners.</param>
+    /// <param name="provider">Caller-owned runner provider with ownership-scoped discovery.</param>
+    /// <param name="journal">Caller-owned durable state for the scale set.</param>
+    /// <param name="logger">Optional application logger.</param>
+    /// <param name="timeProvider">Optional clock for lifecycle timestamps.</param>
+    /// <param name="telemetry">Optional host-owned operation meter.</param>
+    /// <param name="telemetryProvider">Finite metric dimension for the configured runner backend.</param>
+    public ScaleSetRunnerProvisioner(
+        long scaleSetId,
+        string workFolder,
+        IRunnerJitConfigClient jitConfigClient,
+        IRunnerProvider provider,
+        IRunnerStateJournal journal,
+        ILogger<ScaleSetRunnerProvisioner>? logger,
+        TimeProvider? timeProvider,
+        ScaleSetTelemetryMetrics? telemetry,
+        ScaleSetTelemetryProvider telemetryProvider)
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(scaleSetId);
         ArgumentException.ThrowIfNullOrWhiteSpace(workFolder);
@@ -78,6 +104,8 @@ public sealed partial class ScaleSetRunnerProvisioner : IDisposable
         _journal = journal;
         _logger = logger ?? NullLogger<ScaleSetRunnerProvisioner>.Instance;
         _timeProvider = timeProvider ?? TimeProvider.System;
+        _telemetry = telemetry;
+        _telemetryProvider = telemetryProvider;
         _lifecycle = new RunnerLifecycleManager(journal, _timeProvider, NullLogger<RunnerLifecycleManager>.Instance);
     }
 
@@ -113,9 +141,29 @@ public sealed partial class ScaleSetRunnerProvisioner : IDisposable
             return completed;
         }
 
-        RunnerProvisioningResult result = await ProvisionCoreAsync(identity, cancellationToken).ConfigureAwait(false);
-        operationLease.Publish(result);
-        return result;
+        long startedAt = Stopwatch.GetTimestamp();
+        ScaleSetTelemetryOutcome outcome = ScaleSetTelemetryOutcome.Failure;
+        try
+        {
+            RunnerProvisioningResult result = await ProvisionCoreAsync(identity, cancellationToken).ConfigureAwait(false);
+            operationLease.Publish(result);
+            outcome = ScaleSetTelemetryOutcome.Success;
+            return result;
+        }
+        catch (OperationCanceledException)
+        {
+            outcome = ScaleSetTelemetryOutcome.Cancelled;
+            throw;
+        }
+        finally
+        {
+            _telemetry?.RecordOperation(
+                ScaleSetTelemetryOperation.Provision,
+                outcome,
+                Stopwatch.GetElapsedTime(startedAt),
+                identity.Scope.ScaleSetKey,
+                _telemetryProvider);
+        }
     }
 
     private async Task<RunnerProvisioningResult> ProvisionCoreAsync(

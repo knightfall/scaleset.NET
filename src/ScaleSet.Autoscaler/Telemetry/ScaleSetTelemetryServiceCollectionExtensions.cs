@@ -14,6 +14,7 @@ using Serilog.Configuration;
 using Serilog.Core;
 using Serilog.Events;
 using Serilog.Sinks.OpenTelemetry;
+using ScaleSet.Hosting.Capacity;
 using ScaleSet.Hosting.Telemetry;
 
 namespace ScaleSet.Autoscaler.Telemetry;
@@ -51,7 +52,9 @@ public static partial class ScaleSetTelemetryServiceCollectionExtensions
         services.AddMetrics();
         services.AddSingleton(serviceProvider => new ScaleSetTelemetryMetrics(
             serviceProvider.GetRequiredService<IMeterFactory>(),
-            configuredScaleSetKeys));
+            configuredScaleSetKeys,
+            serviceProvider.GetService<HostCapacityCoordinator>(),
+            ScaleSetTelemetryProvider.Docker));
         services.AddOpenTelemetry()
             .ConfigureResource(resource =>
             {
@@ -77,6 +80,7 @@ public static partial class ScaleSetTelemetryServiceCollectionExtensions
             .WithMetrics(metrics =>
             {
                 metrics.AddMeter(SourceAndMeterNames)
+                    .AddMeter(ScaleSetTelemetrySources.HostingCapacity)
                     .AddHttpClientInstrumentation()
                     .AddRuntimeInstrumentation()
                     .AddOtlpExporter((options, readerOptions) =>

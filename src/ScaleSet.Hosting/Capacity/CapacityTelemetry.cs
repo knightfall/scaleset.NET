@@ -7,7 +7,7 @@ namespace ScaleSet.Hosting.Capacity;
 internal static class CapacityTelemetry
 {
     private static readonly Meter Meter = new(
-        $"{ScaleSetTelemetrySources.Hosting}.Capacity",
+        ScaleSetTelemetrySources.HostingCapacity,
         typeof(CapacityTelemetry).Assembly.GetName().Version?.ToString(3));
 
     private static readonly Counter<long> CapacityOperations = Meter.CreateCounter<long>(

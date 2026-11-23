@@ -1,7 +1,11 @@
+using System.Collections.Concurrent;
 using System.Collections.Immutable;
+using System.Diagnostics.Metrics;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Threading.Channels;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 using ScaleSet.Autoscaler.Runtime;
 using ScaleSet.Client;
@@ -10,6 +14,7 @@ using ScaleSet.Hosting.Configuration;
 using ScaleSet.Hosting.Providers;
 using ScaleSet.Hosting.Scaling;
 using ScaleSet.Hosting.State;
+using ScaleSet.Hosting.Telemetry;
 
 namespace ScaleSet.Hosting.Tests.Autoscaler;
 
@@ -214,16 +219,257 @@ public sealed class ScaleSetRuntimeFactoryTests
         Assert.Equal(new CapacityResourceQuantities(1m, 1024), persisted.Identity.CapacityResources);
     }
 
+    [Fact]
+    public async Task DisposeAsync_StopsActivePollingBeforeClosureAndDisposesAllResourcesAfterFailures()
+    {
+        using TemporaryStateDirectory directory = new();
+        (AutoscalerOptions options, ScaleSetOptions scaleSet) = CreateOptions(directory.Path);
+        CancellationToken token = TestContext.Current.CancellationToken;
+        TaskCompletionSource polling = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        TaskCompletionSource pollStopped = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        InvalidOperationException closeFailure = new("synthetic session close failure");
+        InvalidOperationException providerFailure = new("synthetic provider disposal failure");
+        FakeRuntimeSession session = new()
+        {
+            Poll = async cancellationToken =>
+            {
+                polling.SetResult();
+                try
+                {
+                    await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken).ConfigureAwait(false);
+                    return null;
+                }
+                finally
+                {
+                    pollStopped.SetResult();
+                }
+            },
+            Close = _ =>
+            {
+                Assert.True(pollStopped.Task.IsCompletedSuccessfully);
+                throw closeFailure;
+            },
+        };
+        FakeScaleSetRuntimeClient client = new() { RuntimeSession = session };
+        FakeRunnerProvider provider = new()
+        {
+            OnDispose = () =>
+            {
+                Assert.Equal(1, session.CloseCount);
+                throw providerFailure;
+            },
+        };
+        IScaleSetRuntime runtime = await CreateFactory(options, client, provider).CreateAsync(
+            scaleSet, new HostCapacityCoordinator(options.HostCapacity, options.ScaleSets), token);
+        await runtime.InitializeAsync(token);
+        Task listener = runtime.RunAsync(token);
+        await polling.Task.WaitAsync(TimeSpan.FromSeconds(5), token);
+
+        Task disposal = runtime.DisposeAsync().AsTask();
+        Assert.Same(disposal, runtime.DisposeAsync().AsTask());
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => listener);
+        AggregateException failures = await Assert.ThrowsAsync<AggregateException>(() => disposal);
+        Assert.Equal([closeFailure, providerFailure], failures.InnerExceptions);
+        Assert.Equal(1, client.DisposeCount);
+        Assert.Equal(1, provider.DisposeCount);
+        Assert.Equal(1, session.CloseCount);
+
+        RunnerOwnershipScope scope = new(options.Controller.Identity, scaleSet.Key!, 987);
+        await using FileRunnerStateJournal journal = await FileRunnerStateJournal.OpenAsync(
+            GetSetStateDirectory(directory.Path, scaleSet.Key!), scope, token);
+        Assert.Empty(await journal.ReadAllAsync(token));
+    }
+
+    [Fact]
+    public async Task DisposeAsync_CancelsPartialInitializationBeforeDisposingItsDependencies()
+    {
+        using TemporaryStateDirectory directory = new();
+        (AutoscalerOptions options, ScaleSetOptions scaleSet) = CreateOptions(directory.Path);
+        CancellationToken token = TestContext.Current.CancellationToken;
+        TaskCompletionSource discovering = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        TaskCompletionSource discoveryStopped = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        FakeRunnerProvider provider = new()
+        {
+            OnDiscover = async cancellationToken =>
+            {
+                discovering.SetResult();
+                try
+                {
+                    await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken).ConfigureAwait(false);
+                    return [];
+                }
+                finally
+                {
+                    discoveryStopped.SetResult();
+                }
+            },
+            OnDispose = () => Assert.True(discoveryStopped.Task.IsCompletedSuccessfully),
+        };
+        FakeScaleSetRuntimeClient client = new();
+        IScaleSetRuntime runtime = await CreateFactory(options, client, provider).CreateAsync(
+            scaleSet, new HostCapacityCoordinator(options.HostCapacity, options.ScaleSets), token);
+        Task initializer = runtime.InitializeAsync(token);
+        await discovering.Task.WaitAsync(TimeSpan.FromSeconds(5), token);
+
+        await runtime.DisposeAsync();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => initializer);
+        Assert.Equal(1, client.DisposeCount);
+        Assert.Equal(1, provider.DisposeCount);
+        Assert.Equal(0, client.SessionCreateCount);
+
+        string stateDirectory = GetSetStateDirectory(directory.Path, scaleSet.Key!);
+        await using FileStream bootstrap = File.Open(Path.Combine(stateDirectory, ".scale-set-bootstrap.lease"),
+            FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+        await using FileRunnerStateJournal journal = await FileRunnerStateJournal.OpenAsync(
+            stateDirectory, new RunnerOwnershipScope(options.Controller.Identity, scaleSet.Key!, 987), token);
+        Assert.Empty(await journal.ReadAllAsync(token));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task RunAsync_RecordsRealOperationsAndStopsReportingReleasedRunnerCapacity(bool failFinalAcknowledgment)
+    {
+        using TemporaryStateDirectory directory = new();
+        (AutoscalerOptions options, ScaleSetOptions scaleSet) = CreateOptions(directory.Path);
+        CancellationToken token = TestContext.Current.CancellationToken;
+        using CancellationTokenSource deadline = CancellationTokenSource.CreateLinkedTokenSource(token);
+        deadline.CancelAfter(TimeSpan.FromSeconds(10));
+        HostCapacityCoordinator capacity = new(options.HostCapacity, options.ScaleSets);
+        await using var services = new ServiceCollection().AddMetrics().BuildServiceProvider();
+        var meterFactory = services.GetRequiredService<IMeterFactory>();
+        using var metrics = new ScaleSetTelemetryMetrics(meterFactory, [scaleSet.Key!], capacity, ScaleSetTelemetryProvider.Docker);
+        ConcurrentQueue<(string Name, long Value, KeyValuePair<string, object?>[] Tags)> measurements = new();
+        using MeterListener meterListener = new()
+        {
+            InstrumentPublished = (instrument, owner) =>
+            {
+                if (ReferenceEquals(instrument.Meter.Scope, meterFactory))
+                {
+                    owner.EnableMeasurementEvents(instrument);
+                }
+            },
+        };
+        meterListener.SetMeasurementEventCallback<long>((instrument, value, tags, _) =>
+            measurements.Enqueue((instrument.Name, value, tags.ToArray())));
+        meterListener.Start();
+
+        Channel<RunnerScaleSetMessage?> messages = Channel.CreateUnbounded<RunnerScaleSetMessage?>();
+        Channel<long> acknowledgmentAttempts = Channel.CreateUnbounded<long>();
+        TaskCompletionSource waitingForAnotherMessage = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        IOException acknowledgmentFailure = new("synthetic acknowledgment failure");
+        int polls = 0;
+        FakeRuntimeSession session = new()
+        {
+            Poll = cancellationToken =>
+            {
+                if (++polls == 4)
+                {
+                    waitingForAnotherMessage.SetResult();
+                }
+
+                return messages.Reader.ReadAsync(cancellationToken).AsTask();
+            },
+            Acknowledge = async (messageId, cancellationToken) =>
+            {
+                await acknowledgmentAttempts.Writer.WriteAsync(messageId, cancellationToken).ConfigureAwait(false);
+                if (messageId == 11 && failFinalAcknowledgment)
+                {
+                    throw acknowledgmentFailure;
+                }
+            },
+            Close = _ => Task.CompletedTask,
+        };
+        FakeScaleSetRuntimeClient client = new()
+        {
+            RuntimeSession = session,
+            OnGenerateJit = setting => new RunnerScaleSetJitRunnerConfig
+            {
+                Runner = new RunnerReference { Id = 915, Name = setting.Name },
+                EncodedJitConfig = "synthetic-jit",
+            },
+        };
+        FakeRunnerProvider provider = new() { AllowProvisioning = true };
+        await using IScaleSetRuntime runtime = await CreateFactory(options, client, provider, metrics).CreateAsync(scaleSet, capacity, token);
+        await runtime.InitializeAsync(token);
+        Task run = runtime.RunAsync(deadline.Token);
+        await messages.Writer.WriteAsync(null, token);
+        await messages.Writer.WriteAsync(new RunnerScaleSetMessage
+        {
+            MessageId = 10,
+            Statistics = new RunnerScaleSetStatistic { TotalAssignedJobs = 1 },
+            JobAvailableMessages = [new JobAvailableMessage { RunnerRequestId = 800 }],
+        }, token);
+        Assert.Equal(10, await acknowledgmentAttempts.Reader.ReadAsync(deadline.Token));
+
+        meterListener.RecordObservableInstruments();
+        var active = Assert.Single(measurements, item => item.Name == "scaleset.runners");
+        Assert.Equal(1, active.Value);
+        Assert.Equal(new Dictionary<string, object?> { ["scale_set"] = scaleSet.Key, ["provider"] = "docker", ["state"] = "starting" }, active.Tags.ToDictionary());
+        RunnerResource runner = Assert.IsType<RunnerResource>(provider.Current);
+        provider.Current = new RunnerResource(runner.ProviderResourceId, runner.Identity, RunnerResourceStatus.Exited, exitCode: 0);
+        await messages.Writer.WriteAsync(new RunnerScaleSetMessage
+        {
+            MessageId = 11,
+            Statistics = new RunnerScaleSetStatistic(),
+            JobCompletedMessages =
+            [
+                new JobCompletedMessage { RunnerRequestId = 800, RunnerId = 915, RunnerName = runner.Identity.RunnerName },
+            ],
+        }, token);
+        Assert.Equal(11, await acknowledgmentAttempts.Reader.ReadAsync(deadline.Token));
+        if (failFinalAcknowledgment)
+        {
+            Assert.Same(acknowledgmentFailure, await Assert.ThrowsAsync<IOException>(() => run));
+        }
+        else
+        {
+            await waitingForAnotherMessage.Task.WaitAsync(deadline.Token);
+        }
+
+        await runtime.DrainAsync(token);
+        await runtime.StopAsync(token);
+        if (!failFinalAcknowledgment)
+        {
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => run);
+        }
+
+        Assert.Null(provider.Current);
+        meterListener.RecordObservableInstruments();
+        Assert.Single(measurements, item => item.Name == "scaleset.runners");
+        var operations = measurements.Where(item => item.Name == "scaleset.operations")
+            .Select(item =>
+            {
+                Assert.Equal(1, item.Value);
+                var tags = item.Tags.ToDictionary();
+                Assert.Equal(4, tags.Count);
+                Assert.Equal(scaleSet.Key, tags["scale_set"]);
+                Assert.Equal("docker", tags["provider"]);
+                return (Operation: Assert.IsType<string>(tags["operation"]), Outcome: Assert.IsType<string>(tags["outcome"]));
+            }).ToArray();
+        Assert.Equal(1, operations.Count(item => item == ("reconcile", "success")));
+        Assert.Equal(1, operations.Count(item => item == ("job_acquire", "success")));
+        Assert.Equal(1, operations.Count(item => item == ("provision", "success")));
+        Assert.Equal(failFinalAcknowledgment ? 1 : 2, operations.Count(item => item == ("acknowledge", "success")));
+        Assert.Equal(failFinalAcknowledgment ? 1 : 0, operations.Count(item => item == ("acknowledge", "failure")));
+        Assert.Equal(2, operations.Count(item => item == ("queue_poll", "success")));
+        Assert.Equal(1, operations.Count(item => item == ("queue_poll", "empty")));
+        Assert.Equal(failFinalAcknowledgment ? 0 : 1, operations.Count(item => item == ("queue_poll", "cancelled")));
+        Assert.Equal(1, operations.Count(item => item == ("drain", "success")));
+    }
+
     private static ScaleSetRuntimeFactory CreateFactory(
         AutoscalerOptions options,
         FakeScaleSetRuntimeClient client,
-        FakeRunnerProvider provider) =>
+        FakeRunnerProvider provider,
+        ScaleSetTelemetryMetrics? telemetry = null) =>
         new(
             options,
             NullLoggerFactory.Instance,
             TimeProvider.System,
             (_, _, _, _, _) => client,
-            (_, _, _) => provider);
+            (_, _, _) => provider,
+            telemetry);
 
     private static (AutoscalerOptions Options, ScaleSetOptions ScaleSet) CreateOptions(string stateDirectory)
     {
@@ -280,6 +526,11 @@ public sealed class ScaleSetRuntimeFactoryTests
         private int _sessionCreateCount;
 
         public Func<RunnerScaleSet, CancellationToken, Task<RunnerScaleSet>>? OnCreate { get; init; }
+        public Func<RunnerScaleSetJitRunnerSetting, RunnerScaleSetJitRunnerConfig>? OnGenerateJit { get; init; }
+
+        public FakeRuntimeSession? RuntimeSession { get; init; }
+
+        public int DisposeCount { get; private set; }
 
         public int CreateCount => Volatile.Read(ref _createCount);
 
@@ -319,20 +570,49 @@ public sealed class ScaleSetRuntimeFactoryTests
             long scaleSetId,
             RunnerScaleSetJitRunnerSetting runnerSetting,
             CancellationToken cancellationToken) =>
-            throw new NotSupportedException();
+            Task.FromResult<RunnerScaleSetJitRunnerConfig?>(OnGenerateJit?.Invoke(runnerSetting)
+                ?? throw new InvalidOperationException("This test did not configure JIT generation."));
 
         public Task<IScaleSetRuntimeSession> CreateMessageSessionAsync(long scaleSetId, string ownerName, CancellationToken cancellationToken)
         {
             Interlocked.Increment(ref _sessionCreateCount);
-            throw new Xunit.Sdk.XunitException("Initialization must reconcile before creating a session.");
+            return Task.FromResult<IScaleSetRuntimeSession>(RuntimeSession
+                ?? throw new InvalidOperationException("This test did not configure a session."));
         }
 
-        public void Dispose()
+        public void Dispose() => DisposeCount++;
+    }
+
+    private sealed class FakeRuntimeSession : IScaleSetRuntimeSession
+    {
+        public required Func<CancellationToken, Task<RunnerScaleSetMessage?>> Poll { get; init; }
+        public required Func<CancellationToken, Task> Close { get; init; }
+        public Func<long, CancellationToken, Task>? Acknowledge { get; init; }
+        public int CloseCount { get; private set; }
+
+        public RunnerScaleSetSession Session { get; } = new()
         {
+            SessionId = Guid.NewGuid(),
+            Statistics = new RunnerScaleSetStatistic(),
+        };
+
+        public Task<RunnerScaleSetMessage?> GetMessageAsync(long lastMessageId, int maxCapacity, CancellationToken cancellationToken) =>
+            Poll(cancellationToken);
+
+        public Task DeleteMessageAsync(long messageId, CancellationToken cancellationToken) =>
+            Acknowledge?.Invoke(messageId, cancellationToken) ?? Task.CompletedTask;
+
+        public Task<IReadOnlyList<long>> AcquireJobsAsync(IReadOnlyList<long> runnerRequestIds, CancellationToken cancellationToken) =>
+            Task.FromResult(runnerRequestIds);
+
+        public Task CloseAsync(CancellationToken cancellationToken)
+        {
+            CloseCount++;
+            return Close(cancellationToken);
         }
     }
 
-    private sealed class FakeRunnerProvider : IRunnerProvider
+    private sealed class FakeRunnerProvider : IRunnerProvider, IDisposable
     {
         public RunnerProviderCapabilities Capabilities { get; } = new(
             "fake",
@@ -341,24 +621,49 @@ public sealed class ScaleSetRuntimeFactoryTests
             providesTerminalStateEvidence: true);
 
         public ImmutableArray<RunnerResource> Discovered { get; init; } = ImmutableArray<RunnerResource>.Empty;
+        public Func<CancellationToken, Task<ImmutableArray<RunnerResource>>>? OnDiscover { get; init; }
+        public Action? OnDispose { get; init; }
+        public bool AllowProvisioning { get; init; }
+        public RunnerResource? Current { get; set; }
+        public int DisposeCount { get; private set; }
 
         public Task<ImmutableArray<RunnerResource>> DiscoverAsync(RunnerOwnershipScope scope, CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            return Task.FromResult(Discovered);
+            return OnDiscover?.Invoke(cancellationToken) ?? Task.FromResult(Discovered);
         }
 
-        public Task<RunnerResource> CreateAsync(RunnerCreateRequest request, CancellationToken cancellationToken = default) =>
-            throw new NotSupportedException();
+        public Task<RunnerResource> CreateAsync(RunnerCreateRequest request, CancellationToken cancellationToken = default)
+        {
+            Assert.True(AllowProvisioning);
+            Assert.Null(Current);
+            Current = new RunnerResource("fake-container", request.Identity, RunnerResourceStatus.Created);
+            return Task.FromResult(Current);
+        }
 
-        public Task<RunnerResource> StartAsync(RunnerResource resource, CancellationToken cancellationToken = default) =>
-            throw new NotSupportedException();
+        public Task<RunnerResource> StartAsync(RunnerResource resource, CancellationToken cancellationToken = default)
+        {
+            Assert.Equal(Current, resource);
+            Current = new RunnerResource(resource.ProviderResourceId, resource.Identity, RunnerResourceStatus.Running);
+            return Task.FromResult(Current);
+        }
 
         public Task<RunnerResource?> InspectAsync(RunnerResource resource, CancellationToken cancellationToken = default) =>
-            throw new NotSupportedException();
+            Task.FromResult(Current?.ProviderResourceId == resource.ProviderResourceId ? Current : null);
 
-        public Task RemoveAsync(RunnerResource resource, bool force, CancellationToken cancellationToken = default) =>
-            throw new NotSupportedException();
+        public Task RemoveAsync(RunnerResource resource, bool force, CancellationToken cancellationToken = default)
+        {
+            Assert.False(force);
+            Assert.Equal(Current, resource);
+            Current = null;
+            return Task.CompletedTask;
+        }
+
+        public void Dispose()
+        {
+            DisposeCount++;
+            OnDispose?.Invoke();
+        }
     }
 
     private sealed class TemporaryStateDirectory : IDisposable

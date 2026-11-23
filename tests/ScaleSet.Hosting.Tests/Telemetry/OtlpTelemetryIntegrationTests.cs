@@ -5,6 +5,8 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using ScaleSet.Autoscaler.Telemetry;
+using ScaleSet.Hosting.Capacity;
+using ScaleSet.Hosting.Configuration;
 using ScaleSet.Hosting.Telemetry;
 
 namespace ScaleSet.Hosting.Tests.Telemetry;
@@ -72,6 +74,8 @@ public sealed partial class OtlpTelemetryIntegrationTests
                     "integration",
                     ScaleSetTelemetryProvider.Docker);
                 metrics.SetRunnerCount("integration", ScaleSetTelemetryProvider.Docker, RunnerTelemetryState.Idle, 3);
+                HostCapacityCoordinator coordinator = new(new HostCapacityOptions(), []);
+                _ = coordinator.CreatePlan();
             }
             finally
             {
@@ -97,6 +101,10 @@ public sealed partial class OtlpTelemetryIntegrationTests
             "/otlp/foundation/v1/metrics",
             request => OtlpProtobufReader.ReadMetricNames(request.Body).Contains("scaleset.runners", StringComparer.Ordinal),
             TimeSpan.FromSeconds(10));
+        _ = await receiver.WaitForMatchingRequestAsync(
+            "/otlp/foundation/v1/metrics",
+            request => OtlpProtobufReader.ReadMetricNames(request.Body).Contains("scaleset.capacity.operations", StringComparer.Ordinal),
+            TimeSpan.FromSeconds(10));
 
         Assert.Equal("export-header-secret", logsRequest.AuthorizationHeader);
         Assert.NotNull(logsRequest.ContentType);
@@ -119,6 +127,10 @@ public sealed partial class OtlpTelemetryIntegrationTests
         Assert.Equal(expectedSpanId, applicationLog.SpanId);
         Assert.Contains("scaleset.operations", metricNames);
         Assert.Contains("scaleset.runners", metricNames);
+        Assert.Contains("scaleset.capacity.operations", metricNames);
+        Assert.Contains(receiver.Requests.Where(static request => request.Path == "/otlp/foundation/v1/traces")
+            .SelectMany(static request => OtlpProtobufReader.ReadTraceSpans(request.Body)),
+            span => span.Name == "scaleset.capacity.plan" && span.TraceId == expectedTraceId);
         IReadOnlyDictionary<string, string> expectedResource = new Dictionary<string, string>
         {
             ["service.name"] = "scaleset-telemetry-test",

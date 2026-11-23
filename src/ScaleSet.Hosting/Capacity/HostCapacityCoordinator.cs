@@ -138,6 +138,11 @@ public sealed class HostCapacityCoordinator
     public HostCapacitySnapshot CaptureSnapshot()
     {
         using Activity? activity = CapacityTelemetry.StartActivity("snapshot");
+        return ReadOccupancy();
+    }
+
+    internal HostCapacitySnapshot ReadOccupancy()
+    {
         lock (_sync)
         {
             return CreateSnapshotLocked();
