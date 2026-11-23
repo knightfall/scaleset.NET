@@ -12,8 +12,23 @@ public sealed partial class ScaleSetRuntimeFactory
         private async Task ReconcileSteadyStateAsync(CancellationToken cancellationToken)
         {
             FileRunnerStateJournal journal = _journal!;
-            Dictionary<Guid, RunnerResource> inventory = await ReadOwnedInventoryAsync(journal.Scope, cancellationToken).ConfigureAwait(false);
             var operations = await journal.ReadAllAsync(cancellationToken).ConfigureAwait(false);
+            if (_handler?.IsDraining == true)
+            {
+                foreach (RunnerOperationState operation in operations)
+                {
+                    if (operation.Stage is RunnerLifecycleStage.Completed or RunnerLifecycleStage.Removing)
+                    {
+                        CapacityReservationLease? lease = _capacityCoordinator.DemandRegistry.GetCapacityLease(operation.Identity.OperationId);
+                        bool gone = await _provisioner!.ReconcileCompletedAsync(operation.Identity, cancellationToken).ConfigureAwait(false);
+                        ReleaseConfirmedCapacity(gone, lease);
+                    }
+                }
+
+                return;
+            }
+
+            Dictionary<Guid, RunnerResource> inventory = await ReadOwnedInventoryAsync(journal.Scope, cancellationToken).ConfigureAwait(false);
             Dictionary<Guid, RunnerOperationState> byOperation = operations.ToDictionary(static operation => operation.Identity.OperationId);
             foreach (RunnerResource resource in inventory.Values)
             {
@@ -60,11 +75,16 @@ public sealed partial class ScaleSetRuntimeFactory
                     _ => await ReconcileInactiveRunnerAsync(operation, resource, cancellationToken).ConfigureAwait(false),
                 };
 
-                if (gone && lease is not null
-                    && _capacityCoordinator.DemandRegistry.TryReleaseConfirmedAbsent(_capacityCoordinator, lease) == CapacityReleaseStatus.VersionExhausted)
-                {
-                    throw new InvalidOperationException("The capacity ledger cannot record the confirmed runner absence.");
-                }
+                ReleaseConfirmedCapacity(gone, lease);
+            }
+        }
+
+        private void ReleaseConfirmedCapacity(bool gone, CapacityReservationLease? lease)
+        {
+            if (gone && lease is not null
+                && _capacityCoordinator.DemandRegistry.TryReleaseConfirmedAbsent(_capacityCoordinator, lease) == CapacityReleaseStatus.VersionExhausted)
+            {
+                throw new InvalidOperationException("The capacity ledger cannot record the confirmed runner absence.");
             }
         }
 

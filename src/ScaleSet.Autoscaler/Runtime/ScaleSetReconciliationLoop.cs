@@ -30,8 +30,8 @@ internal sealed partial class ScaleSetReconciliationLoop(
         Task completed = await Task.WhenAny(listener, reconciliation).ConfigureAwait(false);
         if (completed == reconciliation && reconciliation.IsCanceled && stopReconciliation.IsCancellationRequested)
         {
-            // Draining stops periodic inventory work while the listener continues
-            // accepting activity and completion messages for work already admitted.
+            // Drain finished its bounded inventory work. Keep polling until
+            // the runtime receives its separate stop request.
             await listener.ConfigureAwait(false);
             return;
         }

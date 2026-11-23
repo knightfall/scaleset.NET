@@ -309,6 +309,74 @@ public sealed partial class ScaleSetRuntimeFactoryTests
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => listener);
     }
 
+    [Fact]
+    public async Task DrainAsync_WaitsForAStartingRunnerAndRechecksCompletionAfterProviderExit()
+    {
+        using TemporaryStateDirectory directory = new();
+        (AutoscalerOptions options, ScaleSetOptions scaleSet) = CreateOptions(directory.Path);
+        scaleSet.Lifecycle.ShutdownDrainTimeout = TimeSpan.FromSeconds(8);
+        CancellationToken token = TestContext.Current.CancellationToken;
+        using CancellationTokenSource deadline = CancellationTokenSource.CreateLinkedTokenSource(token);
+        deadline.CancelAfter(TimeSpan.FromSeconds(10));
+        PeriodicReconciliationClock clock = new();
+        Channel<RunnerScaleSetMessage?> messages = Channel.CreateUnbounded<RunnerScaleSetMessage?>();
+        Channel<long> acknowledgments = Channel.CreateUnbounded<long>();
+        FakeRuntimeSession session = new()
+        {
+            Poll = cancellationToken => messages.Reader.ReadAsync(cancellationToken).AsTask(),
+            Acknowledge = (id, cancellationToken) => acknowledgments.Writer.WriteAsync(id, cancellationToken).AsTask(),
+            Close = _ => Task.CompletedTask,
+        };
+        FakeScaleSetRuntimeClient client = new()
+        {
+            RuntimeSession = session,
+            OnGenerateJit = setting => new RunnerScaleSetJitRunnerConfig
+            {
+                Runner = new RunnerReference { Id = 915, Name = setting.Name },
+                EncodedJitConfig = "synthetic-jit",
+            },
+        };
+        FakeRunnerProvider provider = new() { AllowProvisioning = true };
+        HostCapacityCoordinator capacity = new(options.HostCapacity, options.ScaleSets);
+        await using IScaleSetRuntime runtime = await CreateFactory(options, client, provider, timeProvider: clock)
+            .CreateAsync(scaleSet, capacity, token);
+        await runtime.InitializeAsync(token);
+        Task listener = runtime.RunAsync(deadline.Token);
+        PeriodicReconciliationClock.ManualTimer timer = await clock.Timer.WaitAsync(deadline.Token);
+        await messages.Writer.WriteAsync(new RunnerScaleSetMessage
+        {
+            MessageId = 80,
+            Statistics = new RunnerScaleSetStatistic { TotalAssignedJobs = 1 },
+        }, token);
+        Assert.Equal(80, await acknowledgments.Reader.ReadAsync(deadline.Token));
+        RunnerResource running = Assert.IsType<RunnerResource>(provider.Current);
+
+        Task drain = runtime.DrainAsync(deadline.Token);
+        await messages.Writer.WriteAsync(new RunnerScaleSetMessage
+        {
+            MessageId = 81,
+            Statistics = new RunnerScaleSetStatistic(),
+            JobCompletedMessages =
+            [
+                new JobCompletedMessage { RunnerRequestId = 82, RunnerId = 915, RunnerName = running.Identity.RunnerName },
+            ],
+        }, token);
+        Assert.Equal(81, await acknowledgments.Reader.ReadAsync(deadline.Token));
+        Assert.False(drain.IsCompleted);
+        Assert.Equal(1, capacity.CaptureSnapshot().Usage.RunnerCount);
+        Assert.Same(running, provider.Current);
+
+        provider.Current = new RunnerResource(running.ProviderResourceId, running.Identity, RunnerResourceStatus.Exited, exitCode: 0);
+        timer.Fire();
+        await drain.WaitAsync(deadline.Token);
+        Assert.Null(provider.Current);
+        Assert.Equal(0, capacity.CaptureSnapshot().Usage.RunnerCount);
+        Assert.False(listener.IsCompleted);
+        await runtime.StopAsync(token);
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => listener);
+        Assert.Equal(1, session.CloseCount);
+    }
+
     private static FakeRuntimeSession CreateQuietSession() => new()
     {
         Poll = async token =>

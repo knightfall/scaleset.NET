@@ -643,15 +643,55 @@ public sealed partial class ScaleSetRuntimeFactory : IScaleSetRuntimeFactory
 
         private async Task DrainCoreAsync(ScaleSetMessageHandler handler, CancellationToken cancellationToken)
         {
-            await _stopReconciliation.CancelAsync().ConfigureAwait(false);
             using CancellationTokenSource linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _stopSignal.Token);
-            bool drained = await _metrics.MeasureAsync(
-                ScaleSetTelemetryOperation.Drain,
-                () => handler.WaitForDrainAsync(_scaleSetOptions.Lifecycle.ShutdownDrainTimeout, _timeProvider, linked.Token),
-                static completed => completed ? ScaleSetTelemetryOutcome.Success : ScaleSetTelemetryOutcome.Unknown).ConfigureAwait(false);
+            bool drained;
+            try
+            {
+                drained = await _metrics.MeasureAsync(
+                    ScaleSetTelemetryOperation.Drain,
+                    () => WaitForOwnedRunnerDrainAsync(handler, linked.Token),
+                    static completed => completed ? ScaleSetTelemetryOutcome.Success : ScaleSetTelemetryOutcome.Unknown).ConfigureAwait(false);
+            }
+            finally
+            {
+                await _stopReconciliation.CancelAsync().ConfigureAwait(false);
+            }
+
             if (!drained)
             {
                 RuntimeDrainDeadline(_logger, ScaleSetKey, _scaleSetOptions.Lifecycle.ShutdownDrainTimeout);
+            }
+        }
+
+        private async Task<bool> WaitForOwnedRunnerDrainAsync(ScaleSetMessageHandler handler, CancellationToken cancellationToken)
+        {
+            TimeSpan timeout = _scaleSetOptions.Lifecycle.ShutdownDrainTimeout;
+            long started = _timeProvider.GetTimestamp();
+            if (!await handler.WaitForDrainAsync(timeout, _timeProvider, cancellationToken).ConfigureAwait(false))
+            {
+                return false;
+            }
+
+            while (true)
+            {
+                var operations = await _journal!.ReadAllAsync(cancellationToken).ConfigureAwait(false);
+                if (!operations.Any(static operation => operation.ProviderResourceId is not null
+                    && operation.Stage is RunnerLifecycleStage.Starting or RunnerLifecycleStage.Busy or RunnerLifecycleStage.Unknown
+                        or RunnerLifecycleStage.Completed or RunnerLifecycleStage.Removing))
+                {
+                    return true;
+                }
+
+                // Starting and adopted runners may have received a job before
+                // its start message arrived. Keep polling while the deadline allows.
+                TimeSpan remaining = timeout - _timeProvider.GetElapsedTime(started);
+                if (remaining <= TimeSpan.Zero)
+                {
+                    return false;
+                }
+
+                TimeSpan delay = TimeSpan.FromMilliseconds(Math.Min(250, remaining.TotalMilliseconds));
+                await Task.Delay(delay, _timeProvider, cancellationToken).ConfigureAwait(false);
             }
         }
 

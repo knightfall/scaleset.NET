@@ -116,8 +116,9 @@ execution remain disabled unless explicitly enabled in the runner profile.
 The controller reconciles owned inventory at startup and every
 `SCALESET__Controller__ReconcileInterval` while listening. The default interval
 is 30 seconds. The periodic pass shares a per-set gate with message processing
-and provisioning. It uses the set's cleanup timeout as a budget and stops on
-drain. Temporary failures preserve occupied capacity and retry at the next
+and provisioning. It uses the set's cleanup timeout as a budget. During
+drain, periodic passes finish known completions while the listener keeps
+processing activity. Temporary failures preserve occupied capacity and retry at the next
 tick. Contradictory ownership or identity evidence stops the worker under the
 autoscaler's supervision.
 
@@ -129,7 +130,9 @@ verifiable ownership, keeps its slot. Provider removals use non-forced
 deletion, and cleanup releases only the capacity lease captured before the
 checks. A later pass rechecks provider absence before releasing a newer lease.
 A never-started container with durable start intent can reuse its existing
-registration and container.
+registration and container. Drain waits for starting or uncertain resources
+that may have accepted work before arrival of a job-start event. The drain
+deadline bounds that wait.
 
 Set `Scaling.IdleTimeout` to zero or leave it unset. GitHub's idle count is
 aggregate, and runner lookups expose identity without a per-runner idle or
