@@ -30,7 +30,8 @@ public sealed class ControllerOptions
     /// <summary>Gets or sets the directory used for durable controller state.</summary>
     public string? StateDirectory { get; set; }
 
-    /// <summary>Gets or sets how often inventory is reconciled.</summary>
+    /// <summary>Gets or sets the reserved interval for periodic inventory reconciliation.</summary>
+    /// <remarks>The autoscaler currently reconciles inventory at startup and performs completed-runner cleanup while processing messages.</remarks>
     public TimeSpan ReconcileInterval { get; set; } = TimeSpan.FromSeconds(30);
 
     /// <summary>Gets or sets the budget for control operations such as acknowledgments.</summary>
@@ -60,7 +61,7 @@ public sealed class ScaleSetOptions
     public string? Key { get; set; }
 
     /// <summary>
-    /// Gets or sets a GitHub.com organization URL or repository URL.
+    /// Gets or sets the GitHub.com or GitHub Enterprise Cloud URL for a repository, organization, or enterprise.
     /// </summary>
     public string? GithubUrl { get; set; }
 
@@ -117,7 +118,8 @@ public sealed class ScalingOptions
     /// <summary>Gets or sets the maximum total runner count.</summary>
     public int MaxRunners { get; set; } = 10;
 
-    /// <summary>Gets or sets an optional delay before removing a known idle runner.</summary>
+    /// <summary>Gets or sets the reserved delay before retiring known idle runners.</summary>
+    /// <remarks>The autoscaler currently performs no idle-timeout retirement.</remarks>
     public TimeSpan? IdleTimeout { get; set; }
 }
 

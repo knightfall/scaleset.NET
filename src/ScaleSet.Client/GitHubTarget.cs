@@ -53,6 +53,7 @@ public sealed record GitHubTarget
     public GitHubTargetScope Scope { get; }
 
     /// <summary>REST path used to create the scoped runner registration token.</summary>
+    /// <exception cref="InvalidOperationException">The target scope is unsupported.</exception>
     public string RegistrationTokenPath => Scope switch
     {
         GitHubTargetScope.Enterprise => $"/enterprises/{EscapePathSegment(Enterprise!)}/actions/runners/registration-token",

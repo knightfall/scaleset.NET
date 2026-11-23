@@ -515,6 +515,8 @@ public static class ScaleSetJson
     };
 
     /// <summary>Serializes a ScaleSet wire model with its exact field and omission rules.</summary>
+    /// <typeparam name="T">A wire type in the generated ScaleSet contract.</typeparam>
+    /// <param name="value">The wire model to serialize.</param>
     public static string Serialize<T>(T value)
     {
         var jsonTypeInfo = Options.GetTypeInfo(typeof(T));
@@ -522,6 +524,8 @@ public static class ScaleSetJson
     }
 
     /// <summary>Deserializes a ScaleSet wire model with its generated metadata.</summary>
+    /// <typeparam name="T">A wire type in the generated ScaleSet contract.</typeparam>
+    /// <param name="json">JSON containing the wire model.</param>
     public static T? Deserialize<T>(string json)
     {
         ArgumentNullException.ThrowIfNull(json);

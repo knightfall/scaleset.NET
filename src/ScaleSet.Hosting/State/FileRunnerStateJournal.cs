@@ -45,6 +45,9 @@ public sealed class FileRunnerStateJournal : IRunnerStateJournal
     /// Opens a journal for one ownership scope and takes the exclusive lease for
     /// its directory. Use a stable per-scale-set directory below the mounted state root.
     /// </summary>
+    /// <param name="stateDirectory">Directory for the journal and its exclusive writer lease.</param>
+    /// <param name="scope">Controller and scale-set identity recorded by the journal.</param>
+    /// <param name="cancellationToken">Token used to cancel opening or loading the journal.</param>
     public static async Task<FileRunnerStateJournal> OpenAsync(
         string stateDirectory,
         RunnerOwnershipScope scope,

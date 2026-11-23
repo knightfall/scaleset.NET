@@ -26,6 +26,7 @@ public readonly record struct ScaleSetRateLimitDecision(bool ShouldRetry, TimeSp
     public static ScaleSetRateLimitDecision RetryWithBackoff => new(true, TimeSpan.Zero);
 
     /// <summary>Retry after waiting the supplied <paramref name="delay"/>.</summary>
+    /// <param name="delay">Non-negative time to wait before retrying.</param>
     public static ScaleSetRateLimitDecision RetryAfter(TimeSpan delay)
     {
         ArgumentOutOfRangeException.ThrowIfNegative(delay.Ticks, nameof(delay));
@@ -34,6 +35,11 @@ public readonly record struct ScaleSetRateLimitDecision(bool ShouldRetry, TimeSp
 }
 
 /// <summary>Input supplied to a custom <see cref="ScaleSetRetryOptions.ShouldRetry"/> delegate.</summary>
+/// <param name="Method">HTTP method of the request.</param>
+/// <param name="SafeUri">Redacted request URI.</param>
+/// <param name="Attempt">Current retry attempt number.</param>
+/// <param name="Response">HTTP response snapshot, when received.</param>
+/// <param name="Exception">Transport failure, when one occurred.</param>
 public sealed record ScaleSetRetryContext(
     HttpMethod Method,
     string SafeUri,
@@ -42,6 +48,11 @@ public sealed record ScaleSetRetryContext(
     Exception? Exception);
 
 /// <summary>Input supplied to a custom <see cref="ScaleSetRetryOptions.Backoff"/> delegate.</summary>
+/// <param name="WaitMin">Configured base backoff delay.</param>
+/// <param name="WaitMax">Configured maximum backoff delay.</param>
+/// <param name="Attempt">Current retry attempt number.</param>
+/// <param name="Response">HTTP response snapshot, when received.</param>
+/// <param name="RetryAfter">The server's retry delay hint, when valid.</param>
 public sealed record ScaleSetBackoffContext(
     TimeSpan WaitMin,
     TimeSpan WaitMax,
@@ -50,6 +61,10 @@ public sealed record ScaleSetBackoffContext(
     TimeSpan? RetryAfter);
 
 /// <summary>Input supplied to a <see cref="ScaleSetRetryOptions.OnRateLimit"/> delegate.</summary>
+/// <param name="RateLimit">The server's rate-limit details.</param>
+/// <param name="Attempt">Current retry attempt number.</param>
+/// <param name="Method">HTTP method of the request.</param>
+/// <param name="SafeUri">Redacted request URI.</param>
 public sealed record ScaleSetRateLimitDecisionContext(
     ScaleSetRateLimitException RateLimit,
     int Attempt,
@@ -156,6 +171,8 @@ public static class ScaleSetRateLimitPolicies
     /// Builds an <see cref="ScaleSetRetryOptions.OnRateLimit"/> hook applying <paramref name="primary"/> to
     /// spent primary quotas and <paramref name="secondary"/> to secondary rate limits.
     /// </summary>
+    /// <param name="primary">Retry limits for spent primary quotas.</param>
+    /// <param name="secondary">Retry limits for secondary and unattributed limits.</param>
     public static Func<ScaleSetRateLimitDecisionContext, CancellationToken, ValueTask<ScaleSetRateLimitDecision>> Create(
         ScaleSetRateLimitRule primary,
         ScaleSetRateLimitRule secondary)
@@ -196,6 +213,7 @@ public static class ScaleSetRequestRetry
     /// Applies <paramref name="adjust"/> to the current async call's retry options until the returned handle is disposed.
     /// Nested scopes apply outer-first.
     /// </summary>
+    /// <param name="adjust">Function that derives retry options from the current options.</param>
     public static IDisposable Configure(Func<ScaleSetRetryOptions, ScaleSetRetryOptions> adjust)
     {
         ArgumentNullException.ThrowIfNull(adjust);

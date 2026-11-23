@@ -27,3 +27,5 @@ or start a runner, inspect its status, and remove it safely. The Docker package
 implements this contract. Your worker owns startup reconciliation, message
 session lifetime, and shutdown. See the [worker example](https://github.com/knightfall/scaleset.NET/tree/main/examples/dotnet-worker)
 and [provider implementation](https://github.com/knightfall/scaleset.NET/blob/main/docs/implementation/DOCKER-PROVIDER.md).
+
+Licensed under [Apache-2.0](https://github.com/knightfall/scaleset.NET/blob/main/LICENSE).

@@ -29,6 +29,7 @@ public abstract class ScaleSetCredentials
     /// <summary>Creates credentials using a personal access token.</summary>
     /// <param name="token">GitHub personal access token.</param>
     /// <returns>PAT credentials.</returns>
+    /// <exception cref="ArgumentException">The token is empty or contains characters unsafe in an HTTP authentication header.</exception>
     public static ScaleSetCredentials FromPersonalAccessToken(string token)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(token);

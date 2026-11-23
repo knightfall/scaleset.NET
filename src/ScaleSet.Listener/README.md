@@ -18,3 +18,5 @@ The handler decides whether to acquire offered jobs through the session.
 Hosting provides `ScaleSetMessageHandler` for that purpose. The application
 owns session creation, recovery after a listener failure, and closure when
 polling stops. See the [worker example](https://github.com/knightfall/scaleset.NET/tree/main/examples/dotnet-worker).
+
+Licensed under [Apache-2.0](https://github.com/knightfall/scaleset.NET/blob/main/LICENSE).

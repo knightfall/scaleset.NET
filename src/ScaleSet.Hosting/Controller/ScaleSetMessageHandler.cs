@@ -13,6 +13,10 @@ namespace ScaleSet.Hosting.Controller;
 public sealed class ScaleSetCapacityContext
 {
     /// <summary>Creates the capacity context for one configured scale set.</summary>
+    /// <param name="scaleSet">Configuration for the set, including its scaling limits and runner resource profile.</param>
+    /// <param name="coordinator">Shared ledger that enforces the host's capacity limits.</param>
+    /// <param name="demandRegistry">Coordinator's registry of demand and capacity leases.</param>
+    /// <param name="setListenerMaximum">Callback that updates the listener's advertised maximum.</param>
     public ScaleSetCapacityContext(
         ScaleSetOptions scaleSet,
         HostCapacityCoordinator coordinator,

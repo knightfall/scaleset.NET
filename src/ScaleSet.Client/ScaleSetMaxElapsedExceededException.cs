@@ -34,6 +34,16 @@ public sealed class ScaleSetMaxElapsedExceededException : ScaleSetApiException
     }
 
     /// <summary>Creates a max-elapsed exception with budget and response metadata.</summary>
+    /// <param name="message">Human-readable error message.</param>
+    /// <param name="maxElapsed">Elapsed-time budget for the request.</param>
+    /// <param name="statusCode">HTTP status code, when a response was received.</param>
+    /// <param name="method">HTTP method associated with the failure.</param>
+    /// <param name="safeUri">Redacted request URI.</param>
+    /// <param name="activityId">Actions activity correlation identifier.</param>
+    /// <param name="githubRequestId">GitHub request correlation identifier.</param>
+    /// <param name="bodyPreview">Bounded, redacted preview of the response body.</param>
+    /// <param name="response">Optional in-memory snapshot of the response.</param>
+    /// <param name="innerException">Underlying exception, when available.</param>
     public ScaleSetMaxElapsedExceededException(
         string message,
         TimeSpan maxElapsed,

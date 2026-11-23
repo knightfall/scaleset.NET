@@ -1,6 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <PackageId>Knightfall.ScaleSet.Client</PackageId>
     <AssemblyName>ScaleSet.Client</AssemblyName>
     <Description>GitHub Actions Runner Scale Set API and message-session client library for .NET 10.</Description>
