@@ -162,7 +162,7 @@ public sealed class ScaleSetListenerAuthorization
     public DateTimeOffset? RetryAt { get; }
 
     public static ScaleSetListenerAuthorization Allow(
-        DateTimeOffset validUntil, CancellationToken ownershipLost, int? maxCapacity = null);
+        DateTimeOffset validUntil, int? maxCapacity = null, CancellationToken ownershipLost = default);
     public static ScaleSetListenerAuthorization Defer(DateTimeOffset? retryAt = null);
 }
 
