@@ -17,6 +17,7 @@ public static class ScaleSetHostingServiceCollectionExtensions
     /// <param name="services">The host's service collection.</param>
     /// <param name="options">Fixed settings for this host. Treat the options as immutable after registration.</param>
     /// <returns>The service collection for chaining.</returns>
+    /// <exception cref="AutoscalerConfigurationException">Shared configuration is invalid.</exception>
     /// <remarks>
     /// Register an <see cref="IRunnerProviderFactory"/> for each selected backend.
     /// The controller validates the configuration before it starts any workers.
@@ -25,21 +26,18 @@ public static class ScaleSetHostingServiceCollectionExtensions
     {
         ArgumentNullException.ThrowIfNull(services);
         ArgumentNullException.ThrowIfNull(options);
+        IReadOnlyList<string> errors = AutoscalerConfiguration.Validate(options);
+        if (errors.Count > 0)
+        {
+            throw new AutoscalerConfigurationException(errors);
+        }
+
+        services.TryAddSingleton(options);
         services.TryAddSingleton<TimeProvider>(TimeProvider.System);
         services.TryAddSingleton<ILoggerFactory>(NullLoggerFactory.Instance);
         services.TryAddSingleton<IScaleSetRuntimeClientFactory, DefaultScaleSetRuntimeClientFactory>();
         services.TryAddSingleton<IScaleSetRuntimeFactory, ScaleSetRuntimeFactory>();
         services.TryAddSingleton<AutoscalerHealthState>();
-        services.TryAddSingleton(serviceProvider =>
-        {
-            IReadOnlyList<string> errors = AutoscalerConfiguration.Validate(options, serviceProvider.GetServices<IRunnerProviderFactory>());
-            if (errors.Count > 0)
-            {
-                throw new AutoscalerConfigurationException(errors);
-            }
-
-            return options;
-        });
         services.TryAddSingleton(serviceProvider =>
         {
             AutoscalerOptions validated = serviceProvider.GetRequiredService<AutoscalerOptions>();
@@ -53,7 +51,19 @@ public static class ScaleSetHostingServiceCollectionExtensions
                 host.ShutdownTimeout = minimum;
             }
         });
-        services.AddHostedService<ScaleSetAutoscalerService>();
+        services.AddHostedService<ScaleSetAutoscalerService>(serviceProvider =>
+        {
+            // Provider factories can depend on host logging and exporter services.
+            // Resolve them here, after those services can read options and capacity.
+            AutoscalerOptions configured = serviceProvider.GetRequiredService<AutoscalerOptions>();
+            IReadOnlyList<string> providerErrors = AutoscalerConfiguration.Validate(configured, serviceProvider.GetServices<IRunnerProviderFactory>());
+            if (providerErrors.Count > 0)
+            {
+                throw new AutoscalerConfigurationException(providerErrors);
+            }
+
+            return ActivatorUtilities.CreateInstance<ScaleSetAutoscalerService>(serviceProvider);
+        });
         return services;
     }
 
