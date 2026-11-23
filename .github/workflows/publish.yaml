@@ -63,6 +63,25 @@ jobs:
           cp Directory.Packages.props .editorconfig examples/dotnet-worker/*.cs examples/dotnet-worker/*.csproj examples/dotnet-worker/NuGet.Local.Config "$worker/"
           dotnet restore "$worker/ScaleSet.Worker.Example.csproj" --configfile "$worker/NuGet.Local.Config" --packages "$worker/packages"
           dotnet build "$worker/ScaleSet.Worker.Example.csproj" --configuration Release --no-restore -p:RunAnalyzersDuringBuild=true
+      - name: Run the package-based custom provider with Roslynator
+        run: |
+          worker="$RUNNER_TEMP/scaleset-custom-provider"
+          mkdir -p "$worker/feed"
+          cp artifacts/packages/*.nupkg "$worker/feed/"
+          cp Directory.Packages.props .editorconfig examples/custom-provider-worker/*.cs examples/custom-provider-worker/*.csproj examples/custom-provider-worker/NuGet.Local.Config "$worker/"
+          dotnet restore "$worker/ScaleSet.CustomProvider.Example.csproj" --configfile "$worker/NuGet.Local.Config" --packages "$worker/packages"
+          python3 - "$worker/obj/project.assets.json" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          libraries = json.loads(Path(sys.argv[1]).read_text())["libraries"]
+          unexpected = [name for name in libraries if name.startswith(("Knightfall.ScaleSet.Providers.Docker/", "OpenTelemetry.", "Serilog."))]
+          if unexpected:
+              raise SystemExit(f"Unexpected provider or telemetry dependencies: {unexpected}")
+          PY
+          dotnet build "$worker/ScaleSet.CustomProvider.Example.csproj" --configuration Release --no-restore -p:RunAnalyzersDuringBuild=true
+          dotnet run --project "$worker/ScaleSet.CustomProvider.Example.csproj" --configuration Release --no-build
       - name: Prepare source-bound candidate and validated SPDX SBOM
         run: python3 .github/release/prepare.py --output "$RUNNER_TEMP/release" --cache "$RUNNER_TEMP/release-tools" --packages artifacts/packages
       - name: Check actual package layouts and manifest integrity

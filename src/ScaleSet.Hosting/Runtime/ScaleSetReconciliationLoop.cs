@@ -1,11 +1,9 @@
-using System.Net;
 using Microsoft.Extensions.Logging;
 using ScaleSet.Client;
 using ScaleSet.Hosting.Telemetry;
 using ScaleSet.Listener;
-using ScaleSet.Providers.Docker;
 
-namespace ScaleSet.Autoscaler.Runtime;
+namespace ScaleSet.Hosting.Runtime;
 
 internal sealed partial class ScaleSetReconciliationLoop(
     TimeProvider timeProvider,
@@ -13,7 +11,8 @@ internal sealed partial class ScaleSetReconciliationLoop(
     TimeSpan passTimeout,
     ScaleSetRuntimeTelemetry telemetry,
     ILogger logger,
-    string scaleSetKey)
+    string scaleSetKey,
+    Func<Exception, bool> isProviderTransientFailure)
 {
     public async Task RunAsync(
         IScaleSetMessageHandler handler,
@@ -75,19 +74,11 @@ internal sealed partial class ScaleSetReconciliationLoop(
         }
     }
 
-    private static bool IsTemporaryFailure(Exception exception) =>
+    private bool IsTemporaryFailure(Exception exception) =>
         exception is HttpRequestException or TimeoutException or IOException
         || exception is ScaleSetApiException { IsTransientTransportFailure: true }
         || exception is ScaleSetApiException { StatusCode: 408 or 429 or 500 or 502 or 503 or 504 }
-        || exception is DockerProviderException
-        {
-            FailureCode: "request-timeout" or "engine-unavailable" or "engine-response-read-failed",
-        }
-        || exception is DockerProviderException
-        {
-            StatusCode: HttpStatusCode.RequestTimeout or HttpStatusCode.TooManyRequests or HttpStatusCode.InternalServerError
-                or HttpStatusCode.BadGateway or HttpStatusCode.ServiceUnavailable or HttpStatusCode.GatewayTimeout,
-        };
+        || isProviderTransientFailure(exception);
 
     private sealed class SerializedHandler(IScaleSetMessageHandler handler, SemaphoreSlim gate) : IScaleSetMessageHandler
     {

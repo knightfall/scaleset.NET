@@ -13,147 +13,48 @@ using ScaleSet.Hosting.Providers;
 using ScaleSet.Hosting.State;
 using ScaleSet.Hosting.Telemetry;
 using ScaleSet.Listener;
-using ScaleSet.Providers.Docker;
 
-namespace ScaleSet.Autoscaler.Runtime;
-
-/// <summary>Control-plane calls the autoscaler runtime needs from one GitHub target.</summary>
-public interface IScaleSetRuntimeClient : IDisposable
-{
-    /// <summary>Finds the configured runner group.</summary>
-    Task<RunnerGroup> GetRunnerGroupByNameAsync(string name, CancellationToken cancellationToken);
-
-    /// <summary>Finds a named scale set in a runner group.</summary>
-    Task<RunnerScaleSet?> FindScaleSetAsync(long runnerGroupId, string name, CancellationToken cancellationToken);
-
-    /// <summary>Creates a scale set during a clean first start.</summary>
-    Task<RunnerScaleSet> CreateScaleSetAsync(RunnerScaleSet scaleSet, CancellationToken cancellationToken);
-
-    /// <summary>Looks up the exact runner registration in the scale set's GitHub target.</summary>
-    Task<RunnerReference?> GetRunnerAsync(long runnerId, CancellationToken cancellationToken);
-
-    /// <summary>Removes a runner registration when the GitHub service permits it.</summary>
-    Task RemoveRunnerAsync(long runnerId, CancellationToken cancellationToken);
-
-    /// <summary>Gets a short-lived runner configuration for the resolved scale set.</summary>
-    Task<RunnerScaleSetJitRunnerConfig?> GenerateJitConfigAsync(
-        long scaleSetId,
-        RunnerScaleSetJitRunnerSetting runnerSetting,
-        CancellationToken cancellationToken);
-
-    /// <summary>Opens a message session for the resolved scale-set identity.</summary>
-    Task<IScaleSetRuntimeSession> CreateMessageSessionAsync(long scaleSetId, string ownerName, CancellationToken cancellationToken);
-}
-
-/// <summary>A queue session that can be closed independently from runner resources.</summary>
-public interface IScaleSetRuntimeSession : IMessageSession;
-
-/// <summary>Creates a production ScaleSet client adapter for runtime control-plane calls.</summary>
-public sealed class ScaleSetRuntimeClientAdapter : IScaleSetRuntimeClient
-{
-    private readonly ScaleSetClient _client;
-
-    /// <summary>Creates an adapter around the client whose lifetime it owns.</summary>
-    public ScaleSetRuntimeClientAdapter(ScaleSetClient client)
-    {
-        ArgumentNullException.ThrowIfNull(client);
-        _client = client;
-    }
-
-    /// <inheritdoc />
-    public Task<RunnerGroup> GetRunnerGroupByNameAsync(string name, CancellationToken cancellationToken) =>
-        _client.GetRunnerGroupByNameAsync(name, cancellationToken);
-
-    /// <inheritdoc />
-    public Task<RunnerScaleSet?> FindScaleSetAsync(long runnerGroupId, string name, CancellationToken cancellationToken) =>
-        _client.FindScaleSetAsync(runnerGroupId, name, cancellationToken);
-
-    /// <inheritdoc />
-    public Task<RunnerScaleSet> CreateScaleSetAsync(RunnerScaleSet scaleSet, CancellationToken cancellationToken) =>
-        _client.CreateScaleSetAsync(scaleSet, cancellationToken);
-
-    /// <inheritdoc />
-    public Task<RunnerReference?> GetRunnerAsync(long runnerId, CancellationToken cancellationToken) =>
-        _client.GetRunnerAsync(runnerId, cancellationToken);
-
-    /// <inheritdoc />
-    public Task RemoveRunnerAsync(long runnerId, CancellationToken cancellationToken) =>
-        _client.RemoveRunnerAsync(runnerId, cancellationToken);
-
-    /// <inheritdoc />
-    public async Task<RunnerScaleSetJitRunnerConfig?> GenerateJitConfigAsync(
-        long scaleSetId,
-        RunnerScaleSetJitRunnerSetting runnerSetting,
-        CancellationToken cancellationToken) =>
-        await _client.GenerateJitConfigAsync(scaleSetId, runnerSetting, cancellationToken).ConfigureAwait(false);
-
-    /// <inheritdoc />
-    public async Task<IScaleSetRuntimeSession> CreateMessageSessionAsync(
-        long scaleSetId,
-        string ownerName,
-        CancellationToken cancellationToken) =>
-        new ScaleSetRuntimeSessionAdapter(await _client.CreateMessageSessionAsync(scaleSetId, ownerName, cancellationToken).ConfigureAwait(false));
-
-    /// <inheritdoc />
-    public void Dispose() => _client.Dispose();
-
-    private sealed class ScaleSetRuntimeSessionAdapter(MessageSessionClient session) : IScaleSetRuntimeSession
-    {
-        public RunnerScaleSetSession Session => session.Session;
-
-        public Task<RunnerScaleSetMessage?> GetMessageAsync(long lastMessageId, int maxCapacity, CancellationToken cancellationToken) =>
-            session.GetMessageAsync(lastMessageId, maxCapacity, cancellationToken);
-
-        public Task DeleteMessageAsync(long messageId, CancellationToken cancellationToken) =>
-            session.DeleteMessageAsync(messageId, cancellationToken);
-
-        public Task<IReadOnlyList<long>> AcquireJobsAsync(IReadOnlyList<long> runnerRequestIds, CancellationToken cancellationToken) =>
-            session.AcquireJobsAsync(runnerRequestIds, cancellationToken);
-
-        public Task CloseAsync(CancellationToken cancellationToken) => session.CloseAsync(cancellationToken);
-    }
-}
+namespace ScaleSet.Hosting.Runtime;
 
 /// <summary>
-/// Builds Docker-backed per-scale-set runtimes from the validated environment
+/// Builds per-scale-set runtimes from the validated host
 /// configuration and a process-wide host capacity coordinator.
 /// </summary>
 public sealed partial class ScaleSetRuntimeFactory : IScaleSetRuntimeFactory
 {
     private readonly AutoscalerOptions _options;
+    private readonly Dictionary<string, CredentialOptions> _credentials;
     private readonly ILoggerFactory _loggerFactory;
     private readonly TimeProvider _timeProvider;
-    private readonly Func<
-        GitHubTarget,
-        ScaleSetCredentials,
-        ScaleSetClientOptions,
-        ILogger<ScaleSetClient>,
-        TimeProvider,
-        IScaleSetRuntimeClient> _clientFactory;
-    private readonly Func<ScaleSetOptions, ILogger<DockerRunnerProvider>, TimeProvider, IRunnerProvider> _providerFactory;
+    private readonly IScaleSetRuntimeClientFactory _clientFactory;
+    private readonly Dictionary<string, IRunnerProviderFactory> _providers;
     private readonly ScaleSetTelemetryMetrics? _telemetry;
 
-    /// <summary>Creates a runtime factory; optional factories keep the runtime replaceable in tests.</summary>
+    /// <summary>Creates a runtime factory using the registered provider backends and control-plane client factory.</summary>
     public ScaleSetRuntimeFactory(
         AutoscalerOptions options,
         ILoggerFactory loggerFactory,
-        TimeProvider? timeProvider = null,
-        Func<GitHubTarget, ScaleSetCredentials, ScaleSetClientOptions, ILogger<ScaleSetClient>, TimeProvider, IScaleSetRuntimeClient>? clientFactory = null,
-        Func<ScaleSetOptions, ILogger<DockerRunnerProvider>, TimeProvider, IRunnerProvider>? providerFactory = null,
+        TimeProvider timeProvider,
+        IScaleSetRuntimeClientFactory clientFactory,
+        IEnumerable<IRunnerProviderFactory> providerFactories,
         ScaleSetTelemetryMetrics? telemetry = null)
     {
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(loggerFactory);
+        ArgumentNullException.ThrowIfNull(timeProvider);
+        ArgumentNullException.ThrowIfNull(clientFactory);
+        ArgumentNullException.ThrowIfNull(providerFactories);
         _options = options;
+        _credentials = new Dictionary<string, CredentialOptions>(options.Credentials, StringComparer.OrdinalIgnoreCase);
         _loggerFactory = loggerFactory;
-        _timeProvider = timeProvider ?? TimeProvider.System;
-        _clientFactory = clientFactory ?? CreateScaleSetClient;
-        _providerFactory = providerFactory ?? CreateDockerProvider;
+        _timeProvider = timeProvider;
+        _clientFactory = clientFactory;
+        _providers = providerFactories.ToDictionary(static factory => factory.Name, StringComparer.OrdinalIgnoreCase);
         _telemetry = telemetry;
     }
 
     /// <inheritdoc />
-    public Task<IScaleSetRuntime> CreateAsync(
+    public async Task<IScaleSetRuntime> CreateAsync(
         ScaleSetOptions scaleSet,
         HostCapacityCoordinator capacityCoordinator,
         CancellationToken cancellationToken)
@@ -163,10 +64,15 @@ public sealed partial class ScaleSetRuntimeFactory : IScaleSetRuntimeFactory
         cancellationToken.ThrowIfCancellationRequested();
         if (string.IsNullOrWhiteSpace(scaleSet.Key)
             || string.IsNullOrWhiteSpace(scaleSet.CredentialsRef)
-            || !_options.Credentials.TryGetValue(scaleSet.CredentialsRef, out CredentialOptions? credential)
+            || !_credentials.TryGetValue(scaleSet.CredentialsRef, out CredentialOptions? credential)
             || credential is null)
         {
             throw new AutoscalerConfigurationException("A configured scale set references an unavailable credential.");
+        }
+
+        if (!_providers.TryGetValue(scaleSet.Provider, out IRunnerProviderFactory? providerFactory))
+        {
+            throw new AutoscalerConfigurationException("A configured scale set references an unavailable runner provider.");
         }
 
         GitHubTarget target = GitHubTarget.Parse(scaleSet.GithubUrl!);
@@ -179,33 +85,25 @@ public sealed partial class ScaleSetRuntimeFactory : IScaleSetRuntimeFactory
         IRunnerProvider? provider = null;
         try
         {
-            runtimeClient = _clientFactory(
-                target,
-                credentials,
-                clientOptions,
-                _loggerFactory.CreateLogger<ScaleSetClient>(),
-                _timeProvider)
+            runtimeClient = _clientFactory.Create(target, credentials, clientOptions)
                 ?? throw new InvalidOperationException("The scale-set client factory returned no client.");
-            provider = _providerFactory(
-                scaleSet,
-                _loggerFactory.CreateLogger<DockerRunnerProvider>(),
-                _timeProvider)
+            provider = providerFactory.Create(scaleSet)
                 ?? throw new InvalidOperationException("The runner provider factory returned no provider.");
-            IScaleSetRuntime runtime = new ScaleSetRuntime(
+            return new ScaleSetRuntime(
                 _options.Controller,
                 scaleSet,
                 runtimeClient,
                 provider,
+                providerFactory,
                 capacityCoordinator,
                 _loggerFactory,
                 _timeProvider,
                 _telemetry);
-            return Task.FromResult(runtime);
         }
         catch (Exception exception)
         {
             List<Exception> failures = [exception];
-            CaptureDisposalFailure(() => DisposeProvider(provider), failures);
+            await CaptureProviderDisposalFailureAsync(provider, failures).ConfigureAwait(false);
             CaptureDisposalFailure(() => runtimeClient?.Dispose(), failures);
             if (failures.Count > 1)
             {
@@ -215,20 +113,6 @@ public sealed partial class ScaleSetRuntimeFactory : IScaleSetRuntimeFactory
             throw;
         }
     }
-
-    private static ScaleSetRuntimeClientAdapter CreateScaleSetClient(
-        GitHubTarget target,
-        ScaleSetCredentials credentials,
-        ScaleSetClientOptions options,
-        ILogger<ScaleSetClient> logger,
-        TimeProvider timeProvider) =>
-        new ScaleSetRuntimeClientAdapter(new ScaleSetClient(target, credentials, options, logger: logger, timeProvider: timeProvider));
-
-    private static DockerRunnerProvider CreateDockerProvider(
-        ScaleSetOptions scaleSet,
-        ILogger<DockerRunnerProvider> logger,
-        TimeProvider timeProvider) =>
-        new DockerRunnerProvider(scaleSet.RunnerProfile, logger: logger, timeProvider: timeProvider);
 
     private static ScaleSetCredentials CreateCredentials(CredentialOptions credential)
     {
@@ -248,11 +132,15 @@ public sealed partial class ScaleSetRuntimeFactory : IScaleSetRuntimeFactory
         return ScaleSetCredentials.FromGitHubApp(credential.ClientId, installationId, credential.PrivateKeyPem);
     }
 
-    private static void DisposeProvider(IRunnerProvider? provider)
+    private static async Task CaptureProviderDisposalFailureAsync(IRunnerProvider? provider, List<Exception> failures)
     {
-        if (provider is IDisposable disposable)
+        if (provider is IAsyncDisposable asyncDisposable)
         {
-            disposable.Dispose();
+            await CaptureAsyncDisposalFailure(asyncDisposable, failures).ConfigureAwait(false);
+        }
+        else if (provider is IDisposable disposable)
+        {
+            CaptureDisposalFailure(disposable.Dispose, failures);
         }
     }
 
@@ -261,6 +149,23 @@ public sealed partial class ScaleSetRuntimeFactory : IScaleSetRuntimeFactory
         try
         {
             dispose();
+        }
+        catch (Exception exception)
+        {
+            failures.Add(exception);
+        }
+    }
+
+    private static async Task CaptureAsyncDisposalFailure(IAsyncDisposable? resource, List<Exception> failures)
+    {
+        if (resource is null)
+        {
+            return;
+        }
+
+        try
+        {
+            await resource.DisposeAsync().ConfigureAwait(false);
         }
         catch (Exception exception)
         {
@@ -284,6 +189,7 @@ public sealed partial class ScaleSetRuntimeFactory : IScaleSetRuntimeFactory
         private readonly ScaleSetOptions _scaleSetOptions;
         private readonly IScaleSetRuntimeClient _client;
         private readonly IRunnerProvider _provider;
+        private readonly IRunnerProviderFactory _providerFactory;
         private readonly HostCapacityCoordinator _capacityCoordinator;
         private readonly ILoggerFactory _loggerFactory;
         private readonly ILogger<ScaleSetRuntime> _logger;
@@ -296,7 +202,7 @@ public sealed partial class ScaleSetRuntimeFactory : IScaleSetRuntimeFactory
         private FileRunnerStateJournal? _journal;
         private RunnerLifecycleManager? _lifecycle;
         private ScaleSetRunnerProvisioner? _provisioner;
-        private IScaleSetRuntimeSession? _session;
+        private IMessageSession? _session;
         private ScaleSetMessageHandler? _handler;
         private TaskCompletionSource? _activeOperation;
         private Task? _drainTask;
@@ -313,6 +219,7 @@ public sealed partial class ScaleSetRuntimeFactory : IScaleSetRuntimeFactory
             ScaleSetOptions scaleSetOptions,
             IScaleSetRuntimeClient client,
             IRunnerProvider provider,
+            IRunnerProviderFactory providerFactory,
             HostCapacityCoordinator capacityCoordinator,
             ILoggerFactory loggerFactory,
             TimeProvider timeProvider,
@@ -322,11 +229,18 @@ public sealed partial class ScaleSetRuntimeFactory : IScaleSetRuntimeFactory
             _scaleSetOptions = scaleSetOptions;
             _client = client;
             _provider = provider;
+            _providerFactory = providerFactory;
             _capacityCoordinator = capacityCoordinator;
             _loggerFactory = loggerFactory;
             _logger = loggerFactory.CreateLogger<ScaleSetRuntime>();
             _timeProvider = timeProvider;
-            _metrics = new ScaleSetRuntimeTelemetry(telemetry, ScaleSetKey);
+            _metrics = new ScaleSetRuntimeTelemetry(telemetry, ScaleSetKey, providerFactory.Name.ToUpperInvariant() switch
+            {
+                "DOCKER" => ScaleSetTelemetryProvider.Docker,
+                "ECS" => ScaleSetTelemetryProvider.Ecs,
+                "EC2" => ScaleSetTelemetryProvider.Ec2,
+                _ => ScaleSetTelemetryProvider.Other,
+            });
         }
 
         public string ScaleSetKey => _scaleSetOptions.Key!;
@@ -444,7 +358,7 @@ public sealed partial class ScaleSetRuntimeFactory : IScaleSetRuntimeFactory
                 _loggerFactory.CreateLogger<ScaleSetRunnerProvisioner>(),
                 _timeProvider,
                 _metrics.Metrics,
-                ScaleSetTelemetryProvider.Docker);
+                _metrics.Provider);
 
             await _metrics.MeasureAsync(
                 ScaleSetTelemetryOperation.Reconcile,
@@ -528,7 +442,7 @@ public sealed partial class ScaleSetRuntimeFactory : IScaleSetRuntimeFactory
 
             ScaleSetReconciliationLoop reconciliation = new(
                 _timeProvider, _controllerOptions.ReconcileInterval, _scaleSetOptions.Lifecycle.CleanupTimeout,
-                _metrics, _logger, ScaleSetKey);
+                _metrics, _logger, ScaleSetKey, _providerFactory.IsTransientFailure);
             await reconciliation.RunAsync(
                 handler,
                 (serialized, token) => queue.RunAsync(
@@ -541,9 +455,9 @@ public sealed partial class ScaleSetRuntimeFactory : IScaleSetRuntimeFactory
                 cancellationToken).ConfigureAwait(false);
         }
 
-        private async Task<IScaleSetRuntimeSession> OpenSessionAsync(CancellationToken cancellationToken)
+        private async Task<IMessageSession> OpenSessionAsync(CancellationToken cancellationToken)
         {
-            IScaleSetRuntimeSession session = await _client.CreateMessageSessionAsync(
+            IMessageSession session = await _client.CreateMessageSessionAsync(
                 _scaleSetId,
                 _controllerOptions.Identity,
                 cancellationToken).ConfigureAwait(false);
@@ -558,7 +472,7 @@ public sealed partial class ScaleSetRuntimeFactory : IScaleSetRuntimeFactory
             return session;
         }
 
-        private async Task CloseSessionAsync(IScaleSetRuntimeSession session, CancellationToken cancellationToken)
+        private async Task CloseSessionAsync(IMessageSession session, CancellationToken cancellationToken)
         {
             using CancellationTokenSource cleanup = new(_scaleSetOptions.Lifecycle.CleanupTimeout, _timeProvider);
             using CancellationTokenSource linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, cleanup.Token);
@@ -719,7 +633,7 @@ public sealed partial class ScaleSetRuntimeFactory : IScaleSetRuntimeFactory
             CaptureDisposalFailure(() => _provisioner?.Dispose(), failures);
             CaptureDisposalFailure(() => _lifecycle?.Dispose(), failures);
             await CaptureAsyncDisposalFailure(_journal, failures).ConfigureAwait(false);
-            CaptureDisposalFailure(() => DisposeProvider(_provider), failures);
+            await CaptureProviderDisposalFailureAsync(_provider, failures).ConfigureAwait(false);
             CaptureDisposalFailure(_client.Dispose, failures);
             await CaptureAsyncDisposalFailure(_bootstrapLease, failures).ConfigureAwait(false);
             CaptureDisposalFailure(_stopReconciliation.Dispose, failures);
@@ -733,23 +647,6 @@ public sealed partial class ScaleSetRuntimeFactory : IScaleSetRuntimeFactory
             if (failures.Count > 1)
             {
                 throw new AggregateException("Multiple scale-set runtime resources failed to close.", failures);
-            }
-        }
-
-        private static async Task CaptureAsyncDisposalFailure(IAsyncDisposable? resource, List<Exception> failures)
-        {
-            if (resource is null)
-            {
-                return;
-            }
-
-            try
-            {
-                await resource.DisposeAsync().ConfigureAwait(false);
-            }
-            catch (Exception exception)
-            {
-                failures.Add(exception);
             }
         }
 

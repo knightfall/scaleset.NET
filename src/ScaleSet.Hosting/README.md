@@ -1,31 +1,65 @@
 # Knightfall.ScaleSet.Hosting
 
 Use this .NET 10 library to turn GitHub job demand into ephemeral runner
-capacity. Provide a runner backend, open a durable journal for the scale set,
-and connect the message handler to a `ScaleSetListener`.
+capacity. Register the controller and a runner provider in your .NET Generic
+Host. The controller opens the durable state and owns the listener lifecycle.
 
 ```sh
 dotnet add package Knightfall.ScaleSet.Hosting --version 0.1.0-alpha.1
 ```
 
-`ScaleSetMessageHandler` processes job offers and lifecycle events.
-`HostCapacityCoordinator` plans and reserves count, CPU, and memory capacity
-using GitHub's assigned-job statistics. Construct the handler with a required
-`ScaleSetCapacityContext` before the optional logger. Share one coordinator
-and its demand registry across the host's scale sets, and pass each listener's
-`SetMaxRunners` to its context. GitHub started and completed events correlate
-by the scoped runner ID and name. A completed runner continues to use
-capacity until provider inspection confirms its absence.
+## Run the controller in a .NET host
 
-`ScaleSetRunnerProvisioner` records
-intent before requesting a JIT configuration and creating a runner.
-`RunnerLifecycleManager` and `FileRunnerStateJournal` record evidence about
-each operation for reconciliation after restart.
+```csharp
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
+using ScaleSet.Hosting;
+using ScaleSet.Hosting.Providers;
+using ScaleSet.Providers.Docker;
 
-Implement `IRunnerProvider` to discover resources by stable ownership, create
-or start a runner, inspect its status, and remove it safely. The Docker package
-implements this contract. Your worker owns startup reconciliation, message
-session lifetime, and shutdown. See the [worker example](https://github.com/knightfall/scaleset.NET/tree/main/examples/dotnet-worker)
-and [provider implementation](https://github.com/knightfall/scaleset.NET/blob/main/docs/implementation/DOCKER-PROVIDER.md).
+var builder = Host.CreateApplicationBuilder(args);
+builder.Services.AddSingleton<IRunnerProviderFactory, DockerRunnerProviderFactory>();
+builder.Services.AddScaleSetHosting(options);
+await builder.Build().RunAsync();
+```
+
+Supply a configured `AutoscalerOptions` with a writable persistent state
+directory, a stable controller identity, and a credential reference for each
+scale set. Set `ScaleSetOptions.Provider` to the registered factory name.
+The Docker registration shown here also requires
+`Knightfall.ScaleSet.Providers.Docker`. Use the
+[Docker quickstart](https://github.com/knightfall/scaleset.NET/tree/main/examples/docker-compose)
+for environment settings, or supply typed options directly. Treat options as
+immutable after registration.
+
+A factory validates backend-specific settings and creates a separate
+`IRunnerProvider` per scale set. Providers discover only resources in the
+requested ownership scope and use the durable operation ID to correlate
+create, start, inspect, and remove. The runtime owns each created provider
+and control-plane client. It closes the session and honors asynchronous
+provider disposal during cleanup. .NET dependency injection owns the
+registered factory services.
+
+Startup reconstructs the shared count, CPU, and memory ledger from all owned
+inventories before listeners advertise capacity. The controller periodically
+reconciles inventory and, during shutdown, halts admissions and drains work
+within each scale set's configured timeout. It retains potentially active
+runners and their durable records for the next start.
+
+The [custom provider example](https://github.com/knightfall/scaleset.NET/tree/main/examples/custom-provider-worker)
+exercises provisioning, restart adoption, and drain with an in-memory backend
+and the candidate packages. The host uses the production GitHub client by
+default. Tests can register an `IScaleSetRuntimeClientFactory` to supply
+a separate control-plane client.
+
+## Compose individual components
+
+Use `ScaleSetMessageHandler` with a required `ScaleSetCapacityContext` if
+your application owns the worker lifecycle. Share a `HostCapacityCoordinator`
+and its demand registry across sets, and pass each listener's
+`SetMaxRunners` to its context. `ScaleSetRunnerProvisioner` records intent
+before requesting a JIT configuration and creating a runner. `RunnerLifecycleManager`
+and `FileRunnerStateJournal` retain operation evidence for restart recovery.
+See the [component-level worker example](https://github.com/knightfall/scaleset.NET/tree/main/examples/dotnet-worker).
 
 Licensed under [Apache-2.0](https://github.com/knightfall/scaleset.NET/blob/main/LICENSE).

@@ -140,7 +140,7 @@ internal sealed record DockerRunnerProfileSnapshot(
     {
         ArgumentNullException.ThrowIfNull(profile);
 
-        string image = ValidatePinnedImage(profile.Image);
+        string image = ValidateImage(profile.Image);
         if (profile.Architecture is not RunnerArchitecture architecture || !Enum.IsDefined(architecture))
         {
             throw new ArgumentException("RunnerProfile.Architecture must be X64 or Arm64.", nameof(profile));
@@ -209,40 +209,40 @@ internal sealed record DockerRunnerProfileSnapshot(
             profile.Privileged);
     }
 
-    private static string ValidatePinnedImage(string? image)
+    private static string ValidateImage(string? image)
+    {
+        if (!IsPinnedImage(image))
+        {
+            throw new ArgumentException("RunnerProfile.Image must be a pinned image tag or sha256 digest.", nameof(image));
+        }
+
+        return image!;
+    }
+
+    internal static bool IsPinnedImage(string? image)
     {
         if (string.IsNullOrWhiteSpace(image) || image.Any(char.IsWhiteSpace))
         {
-            throw new ArgumentException("RunnerProfile.Image must be a pinned image tag or sha256 digest.", nameof(image));
+            return false;
         }
 
         int digestSeparator = image.LastIndexOf("@sha256:", StringComparison.OrdinalIgnoreCase);
         if (digestSeparator >= 0)
         {
             string digest = image[(digestSeparator + "@sha256:".Length)..];
-            if (digestSeparator > 0 && digest.Length == 64 && digest.All(Uri.IsHexDigit))
-            {
-                return image;
-            }
-
-            throw new ArgumentException("RunnerProfile.Image must be a pinned image tag or sha256 digest.", nameof(image));
+            return digestSeparator > 0 && digest.Length == 64 && digest.All(Uri.IsHexDigit);
         }
 
         int lastSlash = image.LastIndexOf('/');
         int tagSeparator = image.LastIndexOf(':');
         if (tagSeparator <= lastSlash + 1 || tagSeparator == image.Length - 1)
         {
-            throw new ArgumentException("RunnerProfile.Image must be a pinned image tag or sha256 digest.", nameof(image));
+            return false;
         }
 
         string tag = image[(tagSeparator + 1)..];
-        if (string.Equals(tag, "latest", StringComparison.OrdinalIgnoreCase)
-            || !(char.IsLetterOrDigit(tag[0]) || tag[0] == '_')
-            || tag.Any(static character => !char.IsLetterOrDigit(character) && character is not '.' and not '_' and not '-'))
-        {
-            throw new ArgumentException("RunnerProfile.Image must be a pinned image tag or sha256 digest.", nameof(image));
-        }
-
-        return image;
+        return !string.Equals(tag, "latest", StringComparison.OrdinalIgnoreCase)
+            && (char.IsLetterOrDigit(tag[0]) || tag[0] == '_')
+            && tag.All(static character => char.IsLetterOrDigit(character) || character is '.' or '_' or '-');
     }
 }

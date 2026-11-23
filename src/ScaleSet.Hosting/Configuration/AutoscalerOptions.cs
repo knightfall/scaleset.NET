@@ -85,7 +85,7 @@ public sealed class ScaleSetOptions
     /// <summary>Gets or sets startup, drain, and cleanup timeouts.</summary>
     public LifecycleOptions Lifecycle { get; set; } = new();
 
-    /// <summary>Gets or sets the Docker runner resource profile.</summary>
+    /// <summary>Gets or sets runner capacity and backend profile settings.</summary>
     public RunnerProfileOptions RunnerProfile { get; set; } = new();
 }
 
@@ -135,7 +135,7 @@ public sealed class LifecycleOptions
     public TimeSpan CleanupTimeout { get; set; } = TimeSpan.FromMinutes(1);
 }
 
-/// <summary>Resources and execution settings for a Docker runner.</summary>
+/// <summary>Runner capacity and Docker execution settings.</summary>
 public sealed class RunnerProfileOptions
 {
     /// <summary>Gets or sets the pinned container image reference.</summary>

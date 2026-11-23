@@ -3,7 +3,7 @@ using Microsoft.Extensions.Logging;
 using ScaleSet.Hosting.Capacity;
 using ScaleSet.Hosting.Configuration;
 
-namespace ScaleSet.Autoscaler.Runtime;
+namespace ScaleSet.Hosting.Runtime;
 
 /// <summary>Starts all configured scale-set runtimes after shared capacity is rebuilt.</summary>
 public sealed partial class ScaleSetAutoscalerService : BackgroundService

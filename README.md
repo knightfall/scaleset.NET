@@ -49,9 +49,11 @@ the packages are available in the registry.
 dotnet add package Knightfall.ScaleSet.Client --version 0.1.0-alpha.1
 ```
 
-Use the [authenticated client quickstart](docs/usage.md) for GitHub API access,
-the [.NET worker example](examples/dotnet-worker/README.md) to compose the
-packages in your own service, or the [Docker quickstart](docs/implementation/DOCKER-DEPLOYMENT.md)
+Use the [authenticated client quickstart](docs/usage.md) for GitHub API access.
+To run the controller in your own .NET host, follow the
+[custom provider worker](examples/custom-provider-worker/README.md). The
+[component-level worker](examples/dotnet-worker/README.md) shows how to own
+individual lifecycle steps. Use the [Docker quickstart](docs/implementation/DOCKER-DEPLOYMENT.md)
 to run a job with the supplied [autoscaler](src/ScaleSet.Autoscaler/README.md).
 
 ## AWS direction

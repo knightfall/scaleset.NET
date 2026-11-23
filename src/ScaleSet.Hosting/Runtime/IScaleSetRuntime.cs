@@ -1,7 +1,7 @@
 using ScaleSet.Hosting.Capacity;
 using ScaleSet.Hosting.Configuration;
 
-namespace ScaleSet.Autoscaler.Runtime;
+namespace ScaleSet.Hosting.Runtime;
 
 /// <summary>Owns the resources and message loop for one configured scale set.</summary>
 public interface IScaleSetRuntime : IAsyncDisposable
@@ -22,7 +22,7 @@ public interface IScaleSetRuntime : IAsyncDisposable
     Task StopAsync(CancellationToken cancellationToken);
 }
 
-/// <summary>Creates one Docker-backed runtime from a validated scale-set option.</summary>
+/// <summary>Creates one runner scale-set runtime from a validated scale-set option.</summary>
 public interface IScaleSetRuntimeFactory
 {
     /// <summary>Creates a runtime that shares the host-wide capacity ledger.</summary>

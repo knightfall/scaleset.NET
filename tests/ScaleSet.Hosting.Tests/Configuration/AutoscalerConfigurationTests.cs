@@ -1,5 +1,7 @@
 using Microsoft.Extensions.Configuration;
 using ScaleSet.Hosting.Configuration;
+using ScaleSet.Hosting.Providers;
+using ScaleSet.Providers.Docker;
 using ScaleSet.Hosting.Scaling;
 
 namespace ScaleSet.Hosting.Tests.Configuration;
@@ -378,22 +380,48 @@ public sealed class AutoscalerConfigurationTests
     }
 
     [Fact]
-    public void Validate_RejectsNonDockerProviderUnpinnedImagesAndInvalidResources()
+    public void Validate_RejectsUnregisteredProviderAndKeepsSharedResourceLimits()
     {
         AutoscalerOptions options = ValidOptions();
         options.ScaleSets[0].Provider = "Ecs";
-        options.ScaleSets[0].RunnerProfile.Image = "ghcr.io/example/runner:latest";
         options.ScaleSets[0].RunnerProfile.Cpu = 0;
         options.ScaleSets[0].RunnerProfile.Memory = 0;
-        options.ScaleSets[0].RunnerProfile.Architecture = null;
 
-        IReadOnlyList<string> errors = AutoscalerConfiguration.Validate(options);
+        IReadOnlyList<string> errors = AutoscalerConfiguration.Validate(options, [new DockerRunnerProviderFactory()]);
 
         Assert.Contains(errors, error => error.StartsWith("ScaleSets[0].Provider", StringComparison.Ordinal));
-        Assert.Contains(errors, error => error.StartsWith("ScaleSets[0].RunnerProfile.Image", StringComparison.Ordinal));
         Assert.Contains(errors, error => error.StartsWith("ScaleSets[0].RunnerProfile.Cpu", StringComparison.Ordinal));
         Assert.Contains(errors, error => error.StartsWith("ScaleSets[0].RunnerProfile.Memory", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Validate_DockerProviderRequiresItsOwnImageAndArchitecture()
+    {
+        AutoscalerOptions options = ValidOptions();
+        options.ScaleSets[0].RunnerProfile.Image = "ghcr.io/example/runner:latest";
+        options.ScaleSets[0].RunnerProfile.Architecture = null;
+
+        IReadOnlyList<string> errors = AutoscalerConfiguration.Validate(options, [new DockerRunnerProviderFactory()]);
+
+        Assert.Contains(errors, error => error.StartsWith("ScaleSets[0].RunnerProfile.Image", StringComparison.Ordinal));
         Assert.Contains(errors, error => error.StartsWith("ScaleSets[0].RunnerProfile.Architecture", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Validate_CustomProviderNeedsOnlyItsSharedProfileAndFactorySettings()
+    {
+        AutoscalerOptions options = ValidOptions();
+        options.ScaleSets[0].Provider = "example";
+        options.ScaleSets[0].RunnerProfile.Image = null;
+        options.ScaleSets[0].RunnerProfile.Architecture = null;
+        TestProviderFactory provider = new();
+
+        Assert.Empty(AutoscalerConfiguration.Validate(options, [provider]));
+        Assert.Contains(AutoscalerConfiguration.Validate(options, [provider, new TestProviderFactory()]),
+            error => error.Contains("unique", StringComparison.Ordinal));
+        options.ScaleSets[0].RunnerProfile.Cpu = 0;
+        Assert.StartsWith("ScaleSets[0].RunnerProfile.Cpu",
+            Assert.Single(AutoscalerConfiguration.Validate(options, [provider])), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -402,12 +430,12 @@ public sealed class AutoscalerConfigurationTests
         AutoscalerOptions options = ValidOptions();
         options.ScaleSets[0].RunnerProfile.DockerBuildMode = DockerBuildMode.DockerInDocker;
 
-        IReadOnlyList<string> errors = AutoscalerConfiguration.Validate(options);
+        IReadOnlyList<string> errors = AutoscalerConfiguration.Validate(options, [new DockerRunnerProviderFactory()]);
 
         Assert.Contains(errors, error => error.StartsWith("ScaleSets[0].RunnerProfile.Privileged", StringComparison.Ordinal));
 
         options.ScaleSets[0].RunnerProfile.Privileged = true;
-        Assert.Empty(AutoscalerConfiguration.Validate(options));
+        Assert.Empty(AutoscalerConfiguration.Validate(options, [new DockerRunnerProviderFactory()]));
     }
 
     [Fact]
@@ -539,6 +567,15 @@ public sealed class AutoscalerConfigurationTests
         {
             Assert.Empty(errors);
         }
+    }
+
+    private sealed class TestProviderFactory : IRunnerProviderFactory
+    {
+        public string Name => "Example";
+
+        public IReadOnlyList<string> Validate(ScaleSetOptions scaleSet, string configurationPath) => [];
+
+        public IRunnerProvider Create(ScaleSetOptions scaleSet) => throw new NotSupportedException();
     }
 
     private static AutoscalerOptions ValidOptions()

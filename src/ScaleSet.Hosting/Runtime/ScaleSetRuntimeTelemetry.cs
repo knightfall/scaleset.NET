@@ -2,11 +2,13 @@ using System.Diagnostics;
 using ScaleSet.Client;
 using ScaleSet.Hosting.Telemetry;
 
-namespace ScaleSet.Autoscaler.Runtime;
+namespace ScaleSet.Hosting.Runtime;
 
-internal sealed class ScaleSetRuntimeTelemetry(ScaleSetTelemetryMetrics? metrics, string scaleSetKey)
+internal sealed class ScaleSetRuntimeTelemetry(ScaleSetTelemetryMetrics? metrics, string scaleSetKey, ScaleSetTelemetryProvider provider)
 {
     public ScaleSetTelemetryMetrics? Metrics => metrics;
+
+    public ScaleSetTelemetryProvider Provider => provider;
 
     public Task MeasureAsync(ScaleSetTelemetryOperation operation, Func<Task> execute) =>
         MeasureAsync(operation, async () =>
@@ -40,11 +42,11 @@ internal sealed class ScaleSetRuntimeTelemetry(ScaleSetTelemetryMetrics? metrics
         }
         finally
         {
-            metrics.RecordOperation(operation, outcome, Stopwatch.GetElapsedTime(start), scaleSetKey, ScaleSetTelemetryProvider.Docker);
+            metrics.RecordOperation(operation, outcome, Stopwatch.GetElapsedTime(start), scaleSetKey, provider);
         }
     }
 
-    internal sealed class MeteredSession(IScaleSetRuntimeSession session, ScaleSetRuntimeTelemetry telemetry) : IScaleSetRuntimeSession
+    internal sealed class MeteredSession(IMessageSession session, ScaleSetRuntimeTelemetry telemetry) : IMessageSession
     {
         public RunnerScaleSetSession Session => session.Session;
 
