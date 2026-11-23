@@ -117,6 +117,11 @@
           "Microsoft.Extensions.Primitives": "11.0.0"
         }
       },
+      "Microsoft.Extensions.DependencyInjection.Abstractions": {
+        "type": "Transitive",
+        "resolved": "11.0.0",
+        "contentHash": "a2c4Kp55miXT6G+DSb75pczXQJHgNMzPyZEyMxrrKxuQrgvctcDWJWD9fVe/uGbQdu4Z0c3B7AVKp1DXmD64nQ=="
+      },
       "Microsoft.Extensions.Primitives": {
         "type": "Transitive",
         "resolved": "11.0.0",
@@ -156,27 +161,38 @@
           "Serilog": "4.2.0"
         }
       },
+      "System.Diagnostics.DiagnosticSource": {
+        "type": "Transitive",
+        "resolved": "11.0.0",
+        "contentHash": "+boRR9uSKiIPtFeRLGwO5xylhDF80xpwM+dmk5jgIqqeUKLbujGkGICMTKqQrBzKO6fIp8BU8DV6YZkQukqo3A=="
+      },
       "Knightfall.ScaleSet.Client": {
-        "type": "Project"
+        "type": "Project",
+        "dependencies": {
+          "Microsoft.Extensions.Logging.Abstractions": "[11.0.0, )"
+        }
       },
       "Knightfall.ScaleSet.Hosting": {
         "type": "Project",
         "dependencies": {
           "Knightfall.ScaleSet.Client": "[0.1.0-alpha.1, )",
           "Knightfall.ScaleSet.Listener": "[0.1.0-alpha.1, )",
-          "Microsoft.Extensions.Configuration.Binder": "[11.0.0, )"
+          "Microsoft.Extensions.Configuration.Binder": "[11.0.0, )",
+          "Microsoft.Extensions.Logging.Abstractions": "[11.0.0, )"
         }
       },
       "Knightfall.ScaleSet.Listener": {
         "type": "Project",
         "dependencies": {
-          "Knightfall.ScaleSet.Client": "[0.1.0-alpha.1, )"
+          "Knightfall.ScaleSet.Client": "[0.1.0-alpha.1, )",
+          "Microsoft.Extensions.Logging.Abstractions": "[11.0.0, )"
         }
       },
       "Knightfall.ScaleSet.Providers.Docker": {
         "type": "Project",
         "dependencies": {
-          "Knightfall.ScaleSet.Hosting": "[0.1.0-alpha.1, )"
+          "Knightfall.ScaleSet.Hosting": "[0.1.0-alpha.1, )",
+          "Microsoft.Extensions.Logging.Abstractions": "[11.0.0, )"
         }
       },
       "Microsoft.Extensions.Configuration.Binder": {
@@ -187,6 +203,16 @@
         "dependencies": {
           "Microsoft.Extensions.Configuration": "11.0.0",
           "Microsoft.Extensions.Configuration.Abstractions": "11.0.0"
+        }
+      },
+      "Microsoft.Extensions.Logging.Abstractions": {
+        "type": "CentralTransitive",
+        "requested": "[11.0.0, )",
+        "resolved": "11.0.0",
+        "contentHash": "MTMO2V1eT9Dm5VIpJGLNwIjAjoBErUlfuB+DEaZ0tb8J+Nf/Xlj8he5AztK9p1iOJPIyuBeOrVy2u/CSdsfzPw==",
+        "dependencies": {
+          "Microsoft.Extensions.DependencyInjection.Abstractions": "11.0.0",
+          "System.Diagnostics.DiagnosticSource": "11.0.0"
         }
       }
     },
