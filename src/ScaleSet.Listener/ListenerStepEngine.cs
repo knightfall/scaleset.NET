@@ -229,6 +229,9 @@ internal sealed class ListenerStepEngine(
         await InvokeAsync(budget, ScaleSetListenerOperation.Acknowledge, _checkpoint!.Revision, delivery, async (_, token) =>
         {
             _acknowledgmentNotSent = Guid.Empty;
+            // A transport failure after DELETE is uncertain even if a custom retry policy
+            // would replay it. The Client's same-session queue-401 refresh still applies.
+            using var retry = ScaleSetRequestRetry.Configure(static options => options with { MaxRetries = 0 });
             await session.DeleteMessageAsync(delivery.Message!.MessageId, token).ConfigureAwait(false);
             ValidateSession();
             PrepareWrite(ScaleSetListenerOperation.PersistSettled, delivery, null);

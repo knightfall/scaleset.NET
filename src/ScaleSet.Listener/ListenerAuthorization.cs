@@ -1,7 +1,7 @@
 namespace ScaleSet.Listener;
 
 /// <summary>Identifies an individually authorized Listener operation.</summary>
-internal enum ScaleSetListenerOperation
+public enum ScaleSetListenerOperation
 {
     /// <summary>Read the latest checkpoint.</summary>
     ReadCheckpoint = 0,
@@ -27,12 +27,12 @@ internal enum ScaleSetListenerOperation
 /// <param name="Revision">Observed checkpoint revision, if known.</param>
 /// <param name="DeliveryKind">Kind of the relevant observation, if known.</param>
 /// <param name="MessageId">Real message identifier, if applicable.</param>
-internal sealed record ScaleSetListenerOperationContext(
+public sealed record ScaleSetListenerOperationContext(
     ScaleSetListenerSessionKey SessionKey, ScaleSetListenerOperation Operation,
     long? Revision, ScaleSetListenerDeliveryKind? DeliveryKind, long? MessageId);
 
 /// <summary>Grants a bounded permit or defers an operation.</summary>
-internal sealed class ScaleSetListenerAuthorization
+public sealed class ScaleSetListenerAuthorization
 {
     private ScaleSetListenerAuthorization(
         DateTimeOffset? validUntil, int? maxCapacity, DateTimeOffset? retryAt, CancellationToken ownershipLost)
@@ -78,7 +78,7 @@ internal sealed class ScaleSetListenerAuthorization
 }
 
 /// <summary>Authorizes each Listener operation under one fixed ownership incarnation.</summary>
-internal interface IScaleSetListenerExecutionPolicy
+public interface IScaleSetListenerExecutionPolicy
 {
     /// <summary>Returns an allowed permit or explicit deferral within the supplied operation budget.</summary>
     /// <param name="context">Nonsecret identity and stage for the operation.</param>
@@ -88,7 +88,7 @@ internal interface IScaleSetListenerExecutionPolicy
 }
 
 /// <summary>Identifies the outcome of one serialized step.</summary>
-internal enum ScaleSetListenerStepStatus
+public enum ScaleSetListenerStepStatus
 {
     /// <summary>Initial statistics were handled and their completion committed.</summary>
     Initialized = 0,
@@ -109,7 +109,7 @@ internal enum ScaleSetListenerStepStatus
 /// <param name="MessageId">Real message associated with the result, if applicable.</param>
 /// <param name="PendingPhase">Durable pending phase, if available.</param>
 /// <param name="RetryAt">Optional hint for scheduling a later step.</param>
-internal sealed record ScaleSetListenerStepResult(
+public sealed record ScaleSetListenerStepResult(
     ScaleSetListenerStepStatus Status, long? MessageId = null,
     ScaleSetListenerPendingPhase? PendingPhase = null, DateTimeOffset? RetryAt = null);
 

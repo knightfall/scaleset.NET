@@ -208,6 +208,7 @@ public sealed class MessageSessionClient : IMessageSession
                 await RefreshSessionAsync(expiredSession, cancellationToken).ConfigureAwait(false);
             }
 
+            cancellationToken.ThrowIfCancellationRequested();
             return await operation(Session, cancellationToken).ConfigureAwait(false);
         }
         finally
@@ -284,6 +285,12 @@ public sealed class MessageSessionClient : IMessageSession
                 expectedStatus: 200,
                 cancellationToken,
                 response => ParseAndValidateSession(response, _ownerName)).ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
+            if (refreshedSession.SessionId != session.SessionId)
+            {
+                throw new InvalidDataException("A queue token refresh returned a different message session.");
+            }
+
             Volatile.Write(ref _session, refreshedSession);
         }
         catch (OperationCanceledException exception)

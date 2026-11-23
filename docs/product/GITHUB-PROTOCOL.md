@@ -66,8 +66,8 @@ conflicts/not-found responses into success.
 | Payload poll | `getMessage` | HTTP 200 -> decode outer envelope and inner JSON string |
 | Acknowledge | `deleteMessage` | DELETE queue URL/{messageId}; queue bearer token; 204 |
 | Acquire | `acquireJobs` | POST scale-set/{id}/acquirejobs; JSON int64 request-ID array; admin-service origin but queue bearer token; 200 `value` int64 array |
-| Refresh | `refreshMessageSession` | PATCH scale-set/{id}/sessions/{guid}; admin bearer token; 200 replacement snapshot |
-| Queue 401 | GetMessage/DeleteMessage/AcquireJobs | Refresh once and retry once; compare session ID/token after locking to avoid duplicate concurrent refresh |
+| Refresh | `refreshMessageSession` | PATCH scale-set/{id}/sessions/{guid}; admin bearer token; 200 refreshed snapshot for the same session GUID |
+| Queue 401 | GetMessage/DeleteMessage/AcquireJobs | Refresh once and retry once on the same session GUID; compare session ID/token after locking to avoid duplicate concurrent refresh |
 | Close | `Close`, `deleteMessageSession` | DELETE sessions/{guid}; admin bearer token; 204; host owns bounded cleanup |
 
 ## Serialization and errors

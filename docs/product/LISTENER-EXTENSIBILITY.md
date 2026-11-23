@@ -465,7 +465,11 @@ Admission, rate-limit cooldown, and rotation are application concerns:
 - Credential candidate validation and session rotation happen at supervisor
   boundaries after the active step settles. The Listener must not add its own
   401 refresh or recreate sessions. Existing Client refresh and retries use
-  the provided operation token, including any refresh-plus-retry path.
+  the provided operation token, including the single same-session refresh and
+  retry after a queue 401. During advanced acknowledgement, the pump disables
+  configurable Client retries for the dispatch so that transport ambiguity
+  reaches the supervisor. Custom session clients must also preserve this
+  guarantee.
 
 ## 7. Compatibility and failure behavior
 
