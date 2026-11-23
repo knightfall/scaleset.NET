@@ -79,6 +79,60 @@ packages to resolve an existing scale set, open a session, provision Docker
 runners, drain jobs, and close the session. It includes instructions for
 restoring the prerelease from local package files.
 
+## Run a checkpointed listener
+
+Use `ScaleSetListener.RunAsync` for a continuous loop with an in-memory
+cursor. Use `ScaleSetListenerPump.StepAsync` for a controller that supplies
+checkpoint storage, a replay-safe handler, and per-operation authorization.
+The [package example](../examples/checkpointed-listener/README.md) implements
+all three interfaces and runs without credentials using a scripted session.
+
+Compose one pump per exact session and ownership incarnation. The scope key
+identifies the configured GitHub host and target. Supply the actual
+scale-set ID and session GUID. The store and policy are bound to the same
+ownership incarnation.
+
+```csharp
+var key = new ScaleSetListenerSessionKey(scopeKey, scaleSetId, session.Session.SessionId);
+var options = new ScaleSetListenerPumpOptions(key, ownershipLost);
+var pump = new ScaleSetListenerPump(session, options, checkpointStore, deliveryHandler, executionPolicy);
+ScaleSetListenerStepResult result = await pump.StepAsync(stoppingToken);
+```
+
+Schedule another step after processing the result. `Deferred` gives the
+controller a chance to reconcile, refresh admission, or wait for a shared
+cooldown. `RetryAt` is an optional scheduling hint. A handler can defer when
+the current capacity or durable effect ledger prevents safe processing.
+The advertised poll capacity is recalculated separately from the handler's
+post-poll acquisition allowance. The handler must make its own fenced
+reservations and forward the supplied token to acquisition calls.
+
+| State or failure | Supervisor response |
+| --- | --- |
+| `Received` | Resume handling with the original observation time. Keep request effects idempotent across retries. Null statistics carry no demand observation. |
+| `Processed` | Resume acknowledgement without repeating the handler. |
+| `Acknowledging` or `RecoveryRequired` | Stop queue work. Retain the record and reconcile requests and reservations. Use authoritative acknowledgement or session-retirement evidence before resolving the lane. Closure retires the session while its old delivery outcome can remain unknown. |
+| Uncertain store write | Let the same pump read back the exact transition and revision before doing further work. A reconstructed pump sees committed state only. |
+| `CheckpointConflict` | Retire the pump. Reestablish ownership and read the consistent store before continuing. |
+| Graceful stop | Stop scheduling steps. Let a completed handler finish bounded persistence and acknowledgement while ownership remains current. Await the active step before closing the session. |
+| Ownership loss | Cancel the fixed token, await the active step, and retire the pump. The store and effect ledger enforce fencing at commit. |
+
+A normal real delivery requires four logical writes: receipt, completed
+processing, acknowledgement intent, and atomic cursor settlement. The store
+must preserve the transition ID, exact revision, and immutable snapshot.
+Use explicit schema migration and encoded-size limits at the adapter boundary.
+A store can keep large payloads separately while preserving an atomic logical
+view. See the [checkpoint and operation contract](product/LISTENER-EXTENSIBILITY.md)
+for validation limits, readback semantics, and cancellation budgets.
+
+The caller owns the session, storage, handler, policy, and clock. A new pump
+can resume with the same still-open session client. A replacement session
+uses a fresh key and cursor and keeps the old uncertain record for
+reconciliation. The application deals with shared credential cooldown,
+credential validation and rotation, transport disposal, and session
+supervision. Cancellation limits in-process execution. Distributed fencing
+and replay-safe business effects depend on the store and the application ledger.
+
 ## Restore from GitHub Packages
 
 To consume the GitHub Packages copy, configure this `NuGet.Config` alongside

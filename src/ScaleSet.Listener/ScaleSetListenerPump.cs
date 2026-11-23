@@ -7,6 +7,8 @@ namespace ScaleSet.Listener;
 /// <remarks>
 /// The caller owns every collaborator and the session lifecycle. Drive a session through only one
 /// pump or legacy listener at a time. Checkpointing requires a fenced store and replay-safe handler.
+/// A reconstructed pump can continue with the same still-open session client. Session replacement
+/// requires a fresh key. The caller retains unresolved checkpoints for reconciliation.
 /// </remarks>
 public sealed class ScaleSetListenerPump
 {
@@ -20,6 +22,8 @@ public sealed class ScaleSetListenerPump
     /// <param name="policy">Consumer-owned authorization policy for the fixed ownership incarnation.</param>
     /// <param name="timeProvider">Clock and timers for observations and deadlines.</param>
     /// <exception cref="ArgumentNullException">A required collaborator is null.</exception>
+    /// <exception cref="ArgumentException">The session key is invalid.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">An operation budget falls outside the timer range.</exception>
     public ScaleSetListenerPump(
         IMessageSessionClient session,
         ScaleSetListenerPumpOptions options,
@@ -45,8 +49,15 @@ public sealed class ScaleSetListenerPump
     /// while the fixed ownership signal remains valid.
     /// </param>
     /// <returns>The outcome, including deferral, checkpoint conflict, or acknowledgement requiring recovery.</returns>
+    /// <remarks>
+    /// A failed callback or transport request propagates its failure. The pump awaits all work it
+    /// started before releasing the step, including a callback that takes time to observe cancellation.
+    /// A failed acknowledgement can leave a durable intent that causes a later step to require recovery.
+    /// </remarks>
     /// <exception cref="InvalidOperationException">Another step is active or the client session no longer matches.</exception>
     /// <exception cref="OperationCanceledException">The step was canceled by graceful stop, ownership loss, or a deadline.</exception>
+    /// <exception cref="TimeoutException">The budget or permit expired before an operation was authorized or completed.</exception>
+    /// <exception cref="InvalidDataException">The checkpoint or delivery has an invalid identity, schema, or payload.</exception>
     public async Task<ScaleSetListenerStepResult> StepAsync(CancellationToken stoppingToken = default)
     {
         using var activity = ScaleSetListener.ListenerActivitySource.StartActivity("scaleset.listener.step");

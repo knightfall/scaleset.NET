@@ -1,16 +1,13 @@
 # Durable and externally controlled listener execution
 
-Status: **planned; not implemented**. Prepared 2026-11-24 (Australia/Sydney).
-Source baseline: `36831ad` in `scaleset.NET`. This proposal extends
-`Knightfall.ScaleSet.Listener` using the existing `ScaleSet.*` namespaces and
-`.NET 10` target. It does not authorize AWS deployment or change the existing
-Docker runtime's persistence model.
+Status: **implemented and verified in candidate builds**. Release publication
+follows the [publishing policy](../releases/PUBLISHING.md). The feature extends
+`Knightfall.ScaleSet.Listener` under the existing `ScaleSet.*` namespaces on
+.NET 10. The planning baseline was `36831ad`.
 
 Tracking: [#58 — Add checkpointed, stepwise listener execution with external
 operation authorization](https://github.com/knightfall/scaleset.NET/issues/58).
-Implementation issues are linked under LE1–LE5 below. The umbrella issue
-contains the planning baseline so development does not depend on this document
-being published first. [#46](https://github.com/knightfall/scaleset.NET/issues/46)
+Implementation issues are linked under LE1–LE5 below. [#46](https://github.com/knightfall/scaleset.NET/issues/46)
 is already closed and its session ownership, telemetry discovery, and Hosting
 recovery work is part of the baseline.
 
@@ -71,8 +68,9 @@ merely because a cancellation token is cancelled.
 
 Keep the legacy Listener and Client interfaces intact. The advanced driver
 binds one session and one caller-owned execution incarnation. All declarations
-below are in `ScaleSet.Listener`. LE2 implements these contracts internally;
-LE3 exposes them with the operation enforcement in §6.
+below are in `ScaleSet.Listener`. LE3 exposes the driver with the operation
+enforcement in §6. The checkpoint model also exposes
+`ScaleSetListenerCheckpoint.CurrentSchemaVersion` for adapters.
 
 ```csharp
 public sealed class ScaleSetListenerPump
@@ -116,7 +114,7 @@ public sealed record ScaleSetListenerDelivery
     public DateTimeOffset ObservedAt { get; }
     public RunnerScaleSetMessage? Message { get; }
     public RunnerScaleSetStatistic? InitialStatistics { get; }
-    public bool IsReplay { get; }
+    public bool IsReplay { get; internal init; }
 }
 
 public sealed record ScaleSetListenerPendingDelivery(
@@ -125,7 +123,10 @@ public sealed record ScaleSetListenerPendingDelivery(
 public sealed record ScaleSetListenerCheckpoint(
     ScaleSetListenerSessionKey SessionKey, int SchemaVersion, long Revision,
     Guid TransitionId, bool InitialStatisticsCompleted,
-    long? LastAcknowledgedMessageId, ScaleSetListenerPendingDelivery? Pending);
+    long? LastAcknowledgedMessageId, ScaleSetListenerPendingDelivery? Pending)
+{
+    public const int CurrentSchemaVersion = 1;
+}
 
 public enum ScaleSetListenerCheckpointWriteResult { Committed, Conflict }
 
@@ -300,10 +301,8 @@ The concrete `ScaleSetClient.CreateMessageSessionAsync` opens a session with
 POST and returns the caller-owned `MessageSessionClient`. Its constructor
 is internal. The queue-401 path PATCHes that object's current session GUID
 and retries the same queue operation once with refreshed credentials. The
-baseline parser validates that the returned GUID is nonempty, but accepts a
-different GUID. That could send the retry, including a cursor or DELETE, to a
-different queue before the Listener next reads the session snapshot. LE3 must
-reject a mismatched refresh before publishing the snapshot or retrying. A
+baseline parser accepted a different nonempty GUID. LE3 rejects a mismatched
+refresh before publishing the snapshot or retrying a cursor or DELETE. A
 same-GUID refresh may change queue credentials and URL without resetting
 checkpoint state. A custom client must also keep each in-flight operation
 bound to the exact session, including any internal retry. [Concrete Client baseline](https://github.com/knightfall/scaleset.NET/blob/36831ad11fce41f85ff54300aa15ef0a4c80b189/src/ScaleSet.Client/MessageSessionClient.cs)
@@ -534,7 +533,7 @@ the separate deployment qualification gates in its own plan.
 
 | ID | Deliverable | Depends on | Completion gate |
 | --- | --- | --- | --- |
-| [LE1: Contract and feasibility (#59)](https://github.com/knightfall/scaleset.NET/issues/59) | Final public API/type inventory, checkpoint validation rules, state transitions, and a concrete-client session recovery walkthrough. Map each AWS T09 requirement to a supported seam or a named separate dependency. | This proposal | No unresolved claim that a checkpoint recreates a remote session; agree recovery handling for `Acknowledging` and demonstrate the intended consumer composition. |
+| [LE1: Contract and feasibility (#59)](https://github.com/knightfall/scaleset.NET/issues/59) | Final public API/type inventory, checkpoint validation rules, state transitions, and a concrete-client session recovery walkthrough. Map each AWS T09 requirement to a supported seam or a named separate dependency. | #58 | No unresolved claim that a checkpoint recreates a remote session; agree recovery handling for `Acknowledging` and demonstrate the intended consumer composition. |
 | [LE2: Checkpointed step engine (#60)](https://github.com/knightfall/scaleset.NET/issues/60) | Internal state-transition engine, immutable delivery snapshots, store contract, initial/empty/real processing, explicit deferral, receipt/process/ack transitions, and concurrency exclusion. Exercise the agreed policy contract through test collaborators while the public driver remains unexposed. | LE1 | Deterministic crash/write-conflict/duplicate/ack-ambiguity tests pass. Existing Hosting execution remains unchanged; no placeholder public driver is shipped. |
 | [LE3: Operation authorization (#61)](https://github.com/knightfall/scaleset.NET/issues/61) | Assemble the public advanced driver with per-stage permits, timeout/ownership/graceful-stop composition, post-poll processing boundary, and safe integration with existing Client refresh. | LE2 | Ownership-loss, shutdown, long-poll capacity changes, and concrete wire-count tests pass. The advanced API is exposed only with its authorization guarantees implemented. |
 | [LE4: Compatibility and consumer proof (#62)](https://github.com/knightfall/scaleset.NET/issues/62) | Existing API regression coverage, optional common internal helpers, packaged consumer example using a deterministic checkpoint store and fake ownership/cooldown coordinator. | LE3 | Listener, relevant Client and Hosting suites pass; example runs from candidate packages without provider dependencies. Mark the example's storage as demonstrative, not a production distributed store. |
@@ -543,21 +542,58 @@ the separate deployment qualification gates in its own plan.
 Use focused PRs for these increments, each with meaningful tests for the
 behavior it introduces and existing repository analyzer/build requirements.
 Do not merge placeholder API bodies or silently publish a partial advanced
-contract. No calendar estimate or package version is selected before LE1 and
-the current release policy are reviewed.
+contract. The verified candidate and release boundary are recorded below.
 
-## 10. Mapping the AWS consumer requirements
+## 10. AWS T09 handoff
 
-| AWS planning requirement | Feature disposition |
+Use the matching candidate packages `Knightfall.ScaleSet.Client` and
+`Knightfall.ScaleSet.Listener` version `0.1.0-alpha.1` from the package
+candidate for source commit
+`28eb8a95e4e4d3f84f8876c3436c95a7714dc088`. The release workflow reuses the
+prerelease version across candidate builds, so the source commit and candidate
+manifest identify the actual compatible binaries. Pin the selected candidate
+or a future published release confirmed to include this feature.
+[Source commit](https://github.com/knightfall/scaleset.NET/commit/28eb8a95e4e4d3f84f8876c3436c95a7714dc088) ·
+[Candidate build and artifact](https://github.com/knightfall/scaleset.NET/actions/runs/45265772997)
+
+The candidate manifest SHA-256 is
+`df15e6086bc0b6bd7f501a5789f12ae5a9291508498d869886a23d2f737221d2`.
+
+| Artifact | SHA-256 |
 | --- | --- |
-| Durable cursor and pending-delivery resume | Session-bound checkpoint store resumes only an existing client for the same GUID. Cross-process reattachment or retirement evidence is tracked in [#64](https://github.com/knightfall/scaleset.NET/issues/64). |
-| Pre/post-poll lease checks and ack fencing | Operation policy before poll, receipt persistence, processing, ack intent, DELETE, and final commit; consumer store enforces real ownership conditions. |
-| Capacity refresh after the long poll | Processing authorization and handler boundary after poll; handler owns current capacity and atomic acquisition reservations. |
-| Persist-before-handle and yield | `Received` checkpoint before processing, typed handler/policy deferral, and no implicit ack on yield. |
-| Shared cooldown and credential rotation | Caller scheduling using typed Client failures and policy deferral; credentials/session lifecycle remain outside Listener. |
-| Serialized profile lane | One bounded step at a time; caller interleaves reconciliation and chooses when to resume. |
+| `Knightfall.ScaleSet.Client.0.1.0-alpha.1.nupkg` | `46ddda968b900a4c7c87eed94460db1c3a7d64bad09b4a13cede4122cf27061c` |
+| `Knightfall.ScaleSet.Listener.0.1.0-alpha.1.nupkg` | `d02a1f3a8639cdcd38a1789d1b2245ff653c087dee9d5670df5cc8b63b0352e6` |
 
-The intended result is a reusable Listener contract that supports the AWS
-controller's execution needs. It does not turn the existing file-backed
-Hosting runtime into a distributed controller or prove the AWS deployment's
-service-specific guarantees.
+| AWS planning requirement | API and candidate demonstration |
+| --- | --- |
+| Durable cursor and pending-delivery resume | `IScaleSetListenerCheckpointStore` uses the exact scope/set/session key. The example round-trips JSON, restores `Received` with its original time, and resumes `Processed` directly at acknowledgement. T09 still needs [#64](https://github.com/knightfall/scaleset.NET/issues/64) for cross-process session reattachment or authoritative retirement. |
+| Pre/post-poll ownership and acknowledgement bounds | `IScaleSetListenerExecutionPolicy` runs before each effect. `ScaleSetListenerPumpOptions.OwnershipLost` cancels the in-flight operation. The example revokes ownership during a poll. AWS must condition store and ledger mutations on the same ownership incarnation. |
+| Capacity refresh after the long poll | `HandleDelivery` authorization and `IScaleSetListenerDeliveryHandler` run after the poll. The example drops capacity to zero while the poll is blocked, then resumes with a new allowance. T09 computes `OutsideAssigned` and fences reservations in its admission ledger. |
+| Persist-before-handle and yield | `PersistReceived` precedes handling. `Deferred` retains its phase and `RecoveryRequired` stops uncertain acknowledgement. The example checks both outcomes and verifies the absence of an unauthorized DELETE or next poll. |
+| Shared cooldown and credential rotation | Policy uses `Defer(retryAt)`; a supervisor uses typed Client failures and performs rotation after the active step settles. The example exercises deferral and session replacement, and the Listener tests exercise shared cooldown across pumps. T09 manages credential-specific state and candidate validation. |
+| Serialized profile lane | `StepAsync` processes at most one delivery and excludes overlapping steps on the same pump. The example schedules another step explicitly. T09 interleaves reconciliation and sessions in its own profile lanes. |
+
+The [runnable package example](../../examples/checkpointed-listener/README.md)
+models a single-process checkpoint store and ledger. AWS must verify its
+transactions, lease lineage, request reconciliation, and recovery in its own
+adapter and deployment qualification.
+
+## 11. Validation and release evidence
+
+- The analyzer-enabled Release build and native .NET test run cover the Client,
+  Listener, Hosting, and Docker projects. Linux-only Docker integration runs
+  in CI. The local macOS run passed 509 tests, including 68 Listener tests.
+  Two Linux Docker integration cases were skipped locally.
+- The advanced package example runs from a clean NuGet cache with Client and
+  Listener as its only SDK packages. Its dependency graph adds no Hosting,
+  Docker, AWS, storage provider, or telemetry exporter requirement. Existing
+  worker packages build, the custom-provider example runs, and an unchanged
+  independently compiled legacy smoke program runs with candidate assemblies
+  substituted for the pre-feature Client and Listener assemblies.
+  [Pre-feature package baseline](https://github.com/knightfall/scaleset.NET/actions/runs/45262031116)
+- The Client wire fixtures verify same-GUID refresh and cancellation, guard
+  against retry to a replacement GUID, and preserve acknowledgement
+  uncertainty. Target service recovery after process loss remains a separate
+  qualification in [#64](https://github.com/knightfall/scaleset.NET/issues/64).
+- The [publishing policy](../releases/PUBLISHING.md) governs release and registry
+  verification. Candidate packaging and local execution precede publication.

@@ -516,11 +516,12 @@ design; they do not start automatically when the Docker release finishes.
 
 ## 13. Product milestones and acceptance gates
 
-The proposed [Listener extensibility feature](LISTENER-EXTENSIBILITY.md) adds
+The [Listener extensibility feature](LISTENER-EXTENSIBILITY.md) adds
 opt-in checkpointed, stepwise execution and external operation authorization.
 It preserves the existing listener API and leaves storage, ownership,
 credential rotation, and remote-session recovery policy with the consumer.
-Its LE1–LE5 work packages are planned work, not completed M3 functionality.
+The feature contract records LE1–LE5 verification. Publication and AWS T09
+integration have separate gates.
 
 | Milestone | Deliverables | Dependencies | Gate |
 |---|---|---|---|
