@@ -6,8 +6,8 @@ namespace ScaleSet.Providers.Docker;
 
 internal static class DockerProviderDiagnostics
 {
-    private static readonly ActivitySource ActivitySource = new("ScaleSet.Providers.Docker");
-    private static readonly Meter Meter = new("ScaleSet.Providers.Docker");
+    private static readonly ActivitySource ActivitySource = new(DockerRunnerProvider.ActivitySourceName);
+    private static readonly Meter Meter = new(DockerRunnerProvider.MeterName);
     private static readonly Counter<long> Requests = Meter.CreateCounter<long>(
         "scaleset.docker.requests",
         unit: "{request}",

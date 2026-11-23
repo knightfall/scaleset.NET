@@ -21,6 +21,9 @@ Use `GetRunnerGroupByNameAsync` and `ListScaleSetsAsync` to verify access.
 `CreateMessageSessionAsync` returns a `MessageSessionClient` whose caller owns
 closure. Use `CloseAsync` with a bounded token after polling stops. The client
 manages registration and queue tokens, HTTP timeouts, and retry policy.
+Use `IMessageSession` for code that owns closure and `IMessageSessionClient`
+for code that only processes the queue. Close sessions before disposing the
+client. If you supplied an `HttpClient`, its lifetime remains yours.
 
 Use the Listener package for the message loop and Hosting for provisioning
 through a runner provider. See the [authenticated quickstart](https://github.com/knightfall/scaleset.NET/blob/main/docs/usage.md)

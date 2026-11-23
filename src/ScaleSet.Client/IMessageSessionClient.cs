@@ -29,3 +29,12 @@ public interface IMessageSessionClient
         IReadOnlyList<long> runnerRequestIds,
         CancellationToken cancellationToken);
 }
+
+/// <summary>Queue operations and explicit closure for a session owned by the caller.</summary>
+/// <remarks>Close the session before disposing the client that opened it.</remarks>
+public interface IMessageSession : IMessageSessionClient
+{
+    /// <summary>Closes the session after admitted queue operations settle.</summary>
+    /// <param name="cancellationToken">Token used to bound or cancel session cleanup.</param>
+    Task CloseAsync(CancellationToken cancellationToken = default);
+}

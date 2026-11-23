@@ -1,4 +1,6 @@
 using System.Collections.Immutable;
+using System.Diagnostics;
+using System.Diagnostics.Metrics;
 using System.Net;
 using System.Text.Json;
 using ScaleSet.Hosting.Capacity;
@@ -41,6 +43,62 @@ public sealed class DockerRunnerProviderTests
         Assert.Contains(context.Handler.Requests, request => request.Uri.AbsolutePath == "/v1.47/info");
         Assert.Contains(context.Handler.Requests, request => request.Uri.AbsolutePath == "/v1.47/containers/json");
         Assert.DoesNotContain(context.Handler.Requests, request => request.Uri.AbsolutePath.Contains("v1.56", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task DiscoverAsync_ExportsEngineSpansAndMetricsThroughPublicNames()
+    {
+        using var trace = new Activity("docker-test").SetIdFormat(ActivityIdFormat.W3C).Start();
+        var operations = new List<string>();
+        using ActivityListener tracing = new()
+        {
+            ShouldListenTo = static source => source.Name == DockerRunnerProvider.ActivitySourceName,
+            Sample = static (ref ActivityCreationOptions<ActivityContext> _) => ActivitySamplingResult.AllData,
+            ActivityStopped = activity =>
+            {
+                if (activity.TraceId == trace.TraceId && activity.OperationName == "scaleset.docker.request")
+                {
+                    operations.Add(Assert.IsType<string>(activity.GetTagItem("scaleset.docker.operation")));
+                }
+            },
+        };
+        ActivitySource.AddActivityListener(tracing);
+        var counts = new List<long>();
+        var durations = new List<double>();
+        using MeterListener metrics = new()
+        {
+            InstrumentPublished = static (instrument, listener) =>
+            {
+                if (instrument.Meter.Name == DockerRunnerProvider.MeterName)
+                {
+                    listener.EnableMeasurementEvents(instrument);
+                }
+            },
+        };
+        metrics.SetMeasurementEventCallback<long>((instrument, value, _, _) =>
+        {
+            if (Activity.Current?.TraceId == trace.TraceId && instrument.Name == "scaleset.docker.requests")
+            {
+                counts.Add(value);
+            }
+        });
+        metrics.SetMeasurementEventCallback<double>((instrument, value, _, _) =>
+        {
+            if (Activity.Current?.TraceId == trace.TraceId && instrument.Name == "scaleset.docker.request.duration")
+            {
+                durations.Add(value);
+            }
+        });
+        metrics.Start();
+
+        using DockerProviderTestContext context = new(new DockerTestHttpMessageHandler(
+            (_, _) => Task.FromResult(DockerTestHttpMessageHandler.Json(HttpStatusCode.OK, "[]"))));
+        await context.Provider.DiscoverAsync(DockerProviderTestContext.CreateScope(), TestContext.Current.CancellationToken);
+
+        Assert.Equal(["version", "info", "list-containers"], operations);
+        Assert.Equal([1L, 1L, 1L], counts);
+        Assert.Equal(3, durations.Count);
+        Assert.All(durations, duration => Assert.True(duration >= 0));
     }
 
     [Theory]

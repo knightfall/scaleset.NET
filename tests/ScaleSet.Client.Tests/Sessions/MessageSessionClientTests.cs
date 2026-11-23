@@ -610,7 +610,8 @@ public sealed class MessageSessionClientTests
 
             return Task.FromResult(NotFoundResponse());
         });
-        MessageSessionClient session = await fixture.Client.CreateMessageSessionAsync(LargeScaleSetId, "runner-host", TestContext.Current.CancellationToken);
+        IMessageSession session = Assert.IsAssignableFrom<IMessageSession>(await fixture.Client.CreateMessageSessionAsync(
+            LargeScaleSetId, "runner-host", TestContext.Current.CancellationToken));
 
         await session.CloseAsync(TestContext.Current.CancellationToken);
         await session.CloseAsync(TestContext.Current.CancellationToken);
@@ -624,6 +625,11 @@ public sealed class MessageSessionClientTests
             () => session.AcquireJobsAsync([1], TestContext.Current.CancellationToken));
         Assert.Equal(0, Volatile.Read(ref polls));
         Assert.Equal(1, Volatile.Read(ref closes));
+
+        fixture.Client.Dispose();
+        using HttpResponseMessage transportProbe = await fixture.HttpClient.GetAsync(
+            "https://actions.example.test/transport-ownership-probe", TestContext.Current.CancellationToken);
+        Assert.Equal(HttpStatusCode.NotFound, transportProbe.StatusCode);
     }
 
     [Fact]
@@ -991,16 +997,14 @@ public sealed class MessageSessionClientTests
 
     private sealed class ClientFixture : IDisposable
     {
-        private readonly HttpClient _httpClient;
-
         public ClientFixture(Func<RecordedRequest, CancellationToken, Task<HttpResponseMessage>> responder)
         {
             Handler = new RecordingHandler(DispatchAsync);
-            _httpClient = new HttpClient(Handler);
+            HttpClient = new HttpClient(Handler);
             Client = new ScaleSetClient(
                 GitHubTarget.Parse("https://github.com/example-org/example-repo"),
                 ScaleSetCredentials.FromPersonalAccessToken("synthetic-pat"),
-                httpClient: _httpClient);
+                httpClient: HttpClient);
             _responder = responder;
         }
 
@@ -1008,12 +1012,14 @@ public sealed class MessageSessionClientTests
 
         public RecordingHandler Handler { get; }
 
+        public HttpClient HttpClient { get; }
+
         public ScaleSetClient Client { get; }
 
         public void Dispose()
         {
             Client.Dispose();
-            _httpClient.Dispose();
+            HttpClient.Dispose();
         }
 
         private async Task<HttpResponseMessage> DispatchAsync(RecordedRequest request, CancellationToken cancellationToken)
