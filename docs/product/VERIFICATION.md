@@ -1,6 +1,6 @@
 # Verification Evidence
 
-Updated 2026-11-22 (Australia/Sydney).
+Updated 2026-11-23 (Australia/Sydney).
 
 The reference baseline is `actions/scaleset` `716908e507993947ada4273aecf2361c02e5836c`.
 
@@ -66,6 +66,22 @@ The canaries exercised repository scope with the authenticated GitHub CLI
 account credential. Live organization, enterprise, and GitHub App runs, AWS
 deployments, registry publication, and post-publish registry verification remain
 pending.
+
+## Docker restart and drain
+
+The repository-scope Compose canary used source commit
+`dc38cda7156886864f176986118705b1535a11dc` and local Linux ARM64 image
+`sha256:ed572614e5a3e0d3b62f1187d3af6538408fb41d674261ceb937e1be0f5b6124`.
+
+- The [restart job](https://github.com/knightfall/scaleset-dotnet-alpha-canary/actions/runs/45115829296)
+  was in progress when the controller stopped and restarted with the same
+  persistent state. The same runner container stayed alive and completed the job.
+- The [drain job](https://github.com/knightfall/scaleset-dotnet-alpha-canary/actions/runs/45115949941)
+  was in progress when the controller began shutdown. It completed successfully,
+  and the controller finished draining within the configured 65-second budget.
+- Both runner records reached `Gone`. Docker and GitHub reported zero surviving
+  canary runners. A separate restart with the same candidate also recovered the
+  exited runner left by an earlier drain attempt.
 
 ## Current support and limits
 
