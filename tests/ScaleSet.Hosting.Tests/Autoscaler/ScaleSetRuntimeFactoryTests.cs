@@ -26,7 +26,7 @@ public sealed partial class ScaleSetRuntimeFactoryTests
     private const string CredentialSentinel = "synthetic-PAT-secret-6419";
 
     [Fact]
-    public async Task AddScaleSetHosting_RejectsAnUnregisteredProviderBeforeStartingAnyRuntime()
+    public void AddScaleSetHosting_RejectsAnUnregisteredProviderBeforeStartingAnyRuntime()
     {
         using TemporaryStateDirectory directory = new();
         (AutoscalerOptions options, ScaleSetOptions first) = CreateOptions(directory.Path);
@@ -44,15 +44,11 @@ public sealed partial class ScaleSetRuntimeFactoryTests
         builder.Services.AddSingleton<IScaleSetRuntimeClientFactory>(new TestRuntimeClientFactory(client));
         builder.Services.AddSingleton<IRunnerProviderFactory>(new TestRunnerProviderFactory(new FakeRunnerProvider()));
         builder.Services.AddScaleSetHosting(options);
-        using IHost host = builder.Build();
-
-        AutoscalerConfigurationException error = await Assert.ThrowsAsync<AutoscalerConfigurationException>(
-            () => host.StartAsync(TestContext.Current.CancellationToken));
+        AutoscalerConfigurationException error = Assert.Throws<AutoscalerConfigurationException>(() => builder.Build());
 
         Assert.Contains("ScaleSets[1].Provider", error.Message, StringComparison.Ordinal);
         Assert.Equal(0, client.CreateCount);
         Assert.Equal(0, client.SessionCreateCount);
-        Assert.False(host.Services.GetRequiredService<AutoscalerHealthState>().IsReady);
     }
 
     [Theory]
