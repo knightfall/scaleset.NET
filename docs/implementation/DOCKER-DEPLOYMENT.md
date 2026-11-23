@@ -130,12 +130,33 @@ Logs use `ILogger` routed through Serilog to the configured OTLP endpoint.
 Traces and metrics are exported separately by the OpenTelemetry SDK. Compose
 runs the collector as a separate service.
 
+### GitHub session recovery
+
+The autoscaler reconnects a scale set after temporary queue transport
+failures, expired sessions, or session-open conflicts. The worker closes its
+known session before it requests a replacement. A conflict during session
+creation is retried without closing another controller's session. An
+unconfirmed close stops recovery so two sessions cannot run concurrently.
+Successful message acknowledgment or an empty poll resets the retry budget.
+
+The worker makes up to three consecutive retries with delays of one, two,
+and four seconds. It honors GitHub rate-limit hints up to 30 seconds.
+A failed acknowledgment passes through the same recovery policy. The
+replacement listener processes job activity against the same handler,
+journal, and capacity ledger. Authentication, invalid responses, application
+failures, and exhausted retry budgets stop the autoscaler under its existing
+worker supervision. Other scale sets keep polling while a worker is
+recovering.
+
+### Runtime telemetry
+
 Capacity spans use the `ScaleSet.Hosting` activity source. The
 `ScaleSet.Hosting.Capacity` meter exports `scaleset.capacity.operations` and
 `scaleset.capacity.creation_lease.operations` with operation and outcome tags.
 The `ScaleSet.Hosting` meter exports `scaleset.operations` and
 `scaleset.operation.duration` for startup inventory reconciliation, job
-acquisition, runner provisioning, queue polls, acknowledgments, and drain.
+acquisition, runner provisioning, queue polls, acknowledgments, session
+recovery, and drain.
 Empty poll responses and cancellations have distinct outcomes. A drain that
 reaches its deadline reports `unknown` because work may still be active.
 

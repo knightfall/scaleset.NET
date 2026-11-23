@@ -20,13 +20,9 @@ public sealed partial class ScaleSetMessageHandler
         using (admissionLease)
         {
             RunnerScaleSetStatistic? statistics = message?.Statistics;
-            int offeredJobCount = statistics is null || message is null
-                ? 0
-                : message.JobAvailableMessages
-                    .Select(static job => job.RunnerRequestId)
-                    .Where(static requestId => requestId > 0)
-                    .Distinct()
-                    .Count();
+            long[] offers = admitted && statistics is not null && message is not null
+                ? GetUnacquiredOffers(message.JobAvailableMessages)
+                : Array.Empty<long>();
 
             IReadOnlyList<CapacityReservationLease> reservations;
             await capacity.DemandRegistry.PlanningGate.WaitAsync(cancellationToken).ConfigureAwait(false);
@@ -40,7 +36,7 @@ public sealed partial class ScaleSetMessageHandler
                         statistics.TotalIdleRunners);
                 }
 
-                reservations = PlanAndReserveCapacity(capacity, admitted, offeredJobCount);
+                reservations = PlanAndReserveCapacity(capacity, admitted, offers.Length);
             }
             finally
             {
@@ -56,7 +52,7 @@ public sealed partial class ScaleSetMessageHandler
             {
                 int availableRequests = GetAvailableAdmissionCount(statistics.TotalAssignedJobs);
                 await AcquireCapacityJobsAsync(
-                    message.JobAvailableMessages,
+                    offers,
                     availableRequests,
                     cancellationToken).ConfigureAwait(false);
             }
@@ -94,7 +90,7 @@ public sealed partial class ScaleSetMessageHandler
     }
 
     private async Task AcquireCapacityJobsAsync(
-        IReadOnlyList<JobAvailableMessage> messages,
+        IReadOnlyList<long> offers,
         int maximumCount,
         CancellationToken cancellationToken)
     {
@@ -103,12 +99,7 @@ public sealed partial class ScaleSetMessageHandler
             return;
         }
 
-        long[] offeredIds = messages
-            .Select(static message => message.RunnerRequestId)
-            .Where(static requestId => requestId > 0)
-            .Distinct()
-            .Take(maximumCount)
-            .ToArray();
+        long[] offeredIds = offers.Take(maximumCount).ToArray();
         if (offeredIds.Length == 0)
         {
             return;

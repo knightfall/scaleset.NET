@@ -40,11 +40,7 @@ public interface IScaleSetRuntimeClient : IDisposable
 }
 
 /// <summary>A queue session that can be closed independently from runner resources.</summary>
-public interface IScaleSetRuntimeSession : IMessageSessionClient
-{
-    /// <summary>Closes the GitHub message session.</summary>
-    Task CloseAsync(CancellationToken cancellationToken);
-}
+public interface IScaleSetRuntimeSession : IMessageSession;
 
 /// <summary>Creates a production ScaleSet client adapter for runtime control-plane calls.</summary>
 public sealed class ScaleSetRuntimeClientAdapter : IScaleSetRuntimeClient
@@ -480,28 +476,9 @@ public sealed partial class ScaleSetRuntimeFactory : IScaleSetRuntimeFactory
         private async Task RunListenerAsync(CancellationToken cancellationToken)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            IScaleSetRuntimeSession session = await _client.CreateMessageSessionAsync(
-                _scaleSetId,
-                _controllerOptions.Identity,
-                cancellationToken).ConfigureAwait(false);
-            if (_metrics.Metrics is not null)
-            {
-                session = new ScaleSetRuntimeTelemetry.MeteredSession(session, _metrics);
-            }
-
-            lock (_sync)
-            {
-                // Record the session even if shutdown raced with its creation.
-                // Stop closes it after the listener operation has returned.
-                _session = session;
-                if (_stopRequested)
-                {
-                    return;
-                }
-            }
-
+            ScaleSetSessionRecovery queue = new(_timeProvider, _metrics, _logger, ScaleSetKey);
             ScaleSetListener listener = new(
-                session,
+                queue,
                 new ScaleSetListenerOptions
                 {
                     ScaleSetId = _scaleSetId,
@@ -517,7 +494,7 @@ public sealed partial class ScaleSetRuntimeFactory : IScaleSetRuntimeFactory
                 listener.SetMaxRunners);
             ScaleSetMessageHandler handler = new(
                 _journal!.Scope,
-                session,
+                queue,
                 _provisioner!,
                 _lifecycle!,
                 _journal,
@@ -534,7 +511,46 @@ public sealed partial class ScaleSetRuntimeFactory : IScaleSetRuntimeFactory
                 _handler = handler;
             }
 
-            await listener.RunAsync(handler, cancellationToken).ConfigureAwait(false);
+            await queue.RunAsync(
+                OpenSessionAsync,
+                CloseSessionAsync,
+                token => listener.RunAsync(handler, token),
+                cancellationToken).ConfigureAwait(false);
+        }
+
+        private async Task<IScaleSetRuntimeSession> OpenSessionAsync(CancellationToken cancellationToken)
+        {
+            IScaleSetRuntimeSession session = await _client.CreateMessageSessionAsync(
+                _scaleSetId,
+                _controllerOptions.Identity,
+                cancellationToken).ConfigureAwait(false);
+            if (_metrics.Metrics is not null)
+            {
+                session = new ScaleSetRuntimeTelemetry.MeteredSession(session, _metrics);
+            }
+
+            // Stop waits for this operation before closing the session, even
+            // when cancellation races with the response to an open request.
+            _session = session;
+            return session;
+        }
+
+        private async Task CloseSessionAsync(IScaleSetRuntimeSession session, CancellationToken cancellationToken)
+        {
+            using CancellationTokenSource cleanup = new(_scaleSetOptions.Lifecycle.CleanupTimeout, _timeProvider);
+            using CancellationTokenSource linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, cleanup.Token);
+            try
+            {
+                await session.CloseAsync(linked.Token).ConfigureAwait(false);
+            }
+            catch (ScaleSetApiException exception) when (exception.StatusCode is 404 or 410)
+            {
+                // The DELETE names the exact owned session. GitHub may have
+                // expired it, or applied a prior close whose response was lost.
+            }
+
+            _session = null;
+            RuntimeSessionClosed(_logger, ScaleSetKey);
         }
 
         private void CompleteOperation(TaskCompletionSource operation)
@@ -580,13 +596,9 @@ public sealed partial class ScaleSetRuntimeFactory : IScaleSetRuntimeFactory
                     await activeDrain.ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
                 }
 
-                IScaleSetRuntimeSession? session = _session;
-                _session = null;
-                if (session is not null)
+                if (_session is { } session)
                 {
-                    using CancellationTokenSource cleanup = new(_scaleSetOptions.Lifecycle.CleanupTimeout, _timeProvider);
-                    await session.CloseAsync(cleanup.Token).ConfigureAwait(false);
-                    RuntimeSessionClosed(_logger, ScaleSetKey);
+                    await CloseSessionAsync(session, CancellationToken.None).ConfigureAwait(false);
                 }
             }
         }

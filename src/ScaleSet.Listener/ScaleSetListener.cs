@@ -9,10 +9,13 @@ namespace ScaleSet.Listener;
 /// <remarks>The caller owns session creation, closure and recovery after failure.</remarks>
 public sealed partial class ScaleSetListener
 {
+    /// <summary>Activity source used for polling and message processing spans.</summary>
+    public const string ActivitySourceName = "ScaleSet.Listener";
+
     /// <summary>Identifier of the synthetic message carrying the session's initial statistics.</summary>
     public const long InitialMessageId = -1;
 
-    private static readonly ActivitySource ActivitySource = new("ScaleSet.Listener");
+    private static readonly ActivitySource ActivitySource = new(ActivitySourceName);
     private readonly IMessageSessionClient _client;
     private readonly long _scaleSetId;
     private readonly TimeSpan _acknowledgmentTimeout;

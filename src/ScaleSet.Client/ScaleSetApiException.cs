@@ -82,6 +82,10 @@ public class ScaleSetApiException : Exception
     /// <summary>HTTP status code, or <see langword="null"/> when no response was received.</summary>
     public int? StatusCode { get; }
 
+    /// <summary>Whether the request failed because of a temporary transport or response-read failure.</summary>
+    /// <remarks>Caller cancellation and certificate failures are excluded. Request replay safety depends on the operation.</remarks>
+    public bool IsTransientTransportFailure { get; internal init; }
+
     /// <summary>Recognized domain classification, or <see langword="null"/> when none was identified.</summary>
     public ScaleSetDomainError? DomainError { get; }
 

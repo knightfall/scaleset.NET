@@ -7,7 +7,7 @@ namespace ScaleSet.Client;
 
 /// <summary>Uses an initialized runner scale set session to poll and acknowledge queue messages.</summary>
 /// <remarks>The caller owns this client and must call <see cref="CloseAsync"/> when the session is no longer needed.</remarks>
-public sealed class MessageSessionClient : IMessageSessionClient
+public sealed class MessageSessionClient : IMessageSession
 {
     private const string ScaleSetPath = "/_apis/runtime/runnerscalesets";
     private readonly ScaleSetClient _client;
@@ -116,8 +116,7 @@ public sealed class MessageSessionClient : IMessageSessionClient
             cancellationToken);
     }
 
-    /// <summary>Deletes the current session from the Actions service.</summary>
-    /// <param name="cancellationToken">Token used to bound or cancel session cleanup.</param>
+    /// <inheritdoc />
     public async Task CloseAsync(CancellationToken cancellationToken = default)
     {
         TaskCompletionSource completion;

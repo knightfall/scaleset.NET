@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Diagnostics.Metrics;
 using System.Collections.Concurrent;
 using ScaleSet.Hosting.Capacity;
+using ScaleSet.Listener;
 
 namespace ScaleSet.Hosting.Telemetry;
 
@@ -10,11 +11,10 @@ public static class ScaleSetTelemetrySources
     public const string Autoscaler = "ScaleSet.Autoscaler";
     public const string Client = "ScaleSet.Client";
     public const string Hosting = "ScaleSet.Hosting";
-
     /// <summary>Meter name for capacity counters. Capacity activities use <see cref="Hosting"/>.</summary>
     public const string HostingCapacity = Hosting + ".Capacity";
 
-    public const string Listener = "ScaleSet.Listener";
+    public const string Listener = ScaleSetListener.ActivitySourceName;
     public const string DockerProvider = "ScaleSet.Providers.Docker";
 
     public static ActivitySource ActivitySource { get; } =

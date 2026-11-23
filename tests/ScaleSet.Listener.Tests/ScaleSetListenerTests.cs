@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using ScaleSet.Client;
 using ScaleSet.Listener;
 using Xunit;
@@ -51,6 +52,40 @@ public sealed class ScaleSetListenerTests
         Assert.Null(handled[1]);
         Assert.Equal((0L, 10), Assert.Single(client.Polls));
         Assert.Empty(client.Acknowledgments);
+    }
+
+    [Fact]
+    public async Task RunAsync_ExportsPollingAndProcessingThroughPublicActivitySource()
+    {
+        using var trace = new Activity("listener-test").SetIdFormat(ActivityIdFormat.W3C).Start();
+        using var stop = new CancellationTokenSource();
+        var spans = new List<string>();
+        using ActivityListener telemetry = new()
+        {
+            ShouldListenTo = static source => source.Name == ScaleSetListener.ActivitySourceName,
+            Sample = static (ref ActivityCreationOptions<ActivityContext> _) => ActivitySamplingResult.AllData,
+            ActivityStopped = activity =>
+            {
+                if (activity.TraceId == trace.TraceId)
+                {
+                    spans.Add(activity.OperationName);
+                }
+            },
+        };
+        ActivitySource.AddActivityListener(telemetry);
+        var handler = new MessageHandler((message, _) =>
+        {
+            if (message is null)
+            {
+                stop.Cancel();
+            }
+
+            return Task.CompletedTask;
+        });
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => Create(new MessageSource()).RunAsync(handler, stop.Token));
+
+        Assert.Equal(["scaleset.message.process", "scaleset.message.poll", "scaleset.message.process"], spans);
     }
 
     [Fact]

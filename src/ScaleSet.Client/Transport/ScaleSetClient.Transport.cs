@@ -346,7 +346,10 @@ public sealed partial class ScaleSetClient
                     "ScaleSet HTTP request timed out.",
                     statusCode: null,
                     method: method.Method,
-                    safeUri: safeUri);
+                    safeUri: safeUri)
+                {
+                    IsTransientTransportFailure = true,
+                };
 
                 TimeSpan? delay = await EvaluateStandardFailureRetryAsync(
                     retryOptions,
@@ -397,7 +400,12 @@ public sealed partial class ScaleSetClient
                     "ScaleSet HTTP transport failed.",
                     statusCode: null,
                     method: method.Method,
-                    safeUri: safeUri);
+                    safeUri: safeUri)
+                {
+                    IsTransientTransportFailure = !isCertificateError
+                        && httpException.HttpRequestError is HttpRequestError.Unknown or HttpRequestError.NameResolutionError
+                            or HttpRequestError.ConnectionError or HttpRequestError.HttpProtocolError or HttpRequestError.ResponseEnded,
+                };
 
                 TimeSpan? delay = await EvaluateStandardFailureRetryAsync(
                     retryOptions,
@@ -512,7 +520,8 @@ public sealed partial class ScaleSetClient
                             snapshot: snapshot,
                             message: isTimeout
                                 ? "ScaleSet response body read timed out."
-                                : "ScaleSet response body could not be read.");
+                                : "ScaleSet response body could not be read.",
+                            transientTransportFailure: true);
 
                         if (retryOptions.ShouldRetry is not null)
                         {
@@ -1263,7 +1272,8 @@ public sealed partial class ScaleSetClient
         bool queueTokenOnUnauthorized,
         IReadOnlyCollection<string> knownSecrets,
         ScaleSetResponseSnapshot snapshot,
-        string? message = null)
+        string? message = null,
+        bool transientTransportFailure = false)
     {
         int status = (int)response.StatusCode;
         ScaleSetDomainError? domainError = queueTokenOnUnauthorized && response.StatusCode == HttpStatusCode.Unauthorized
@@ -1282,7 +1292,10 @@ public sealed partial class ScaleSetClient
             activityId: activityId.Length == 0 ? null : activityId,
             githubRequestId: githubRequestId.Length == 0 ? null : githubRequestId,
             bodyPreview: bodyPreview,
-            response: snapshot);
+            response: snapshot)
+        {
+            IsTransientTransportFailure = transientTransportFailure,
+        };
     }
 
     private static ScaleSetRateLimitException CreateRateLimitException(

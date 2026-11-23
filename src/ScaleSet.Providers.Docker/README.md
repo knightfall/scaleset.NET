@@ -20,4 +20,8 @@ Connect the provider to `ScaleSetRunnerProvisioner` for a custom worker, or run
 the supplied autoscaler for a Compose deployment. See the [worker example](https://github.com/knightfall/scaleset.NET/tree/main/examples/dotnet-worker)
 and [Docker quickstart](https://github.com/knightfall/scaleset.NET/blob/main/docs/implementation/DOCKER-DEPLOYMENT.md).
 
+Use `DockerRunnerProvider.ActivitySourceName` for Engine request spans and
+`DockerRunnerProvider.MeterName` for request counts and duration histograms.
+Both subscriptions use `ScaleSet.Providers.Docker`.
+
 Licensed under [Apache-2.0](https://github.com/knightfall/scaleset.NET/blob/main/LICENSE).

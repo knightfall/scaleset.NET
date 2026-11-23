@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Collections.Immutable;
 using System.Diagnostics.Metrics;
+using System.Net;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -357,7 +358,7 @@ public sealed class ScaleSetRuntimeFactoryTests
         Channel<RunnerScaleSetMessage?> messages = Channel.CreateUnbounded<RunnerScaleSetMessage?>();
         Channel<long> acknowledgmentAttempts = Channel.CreateUnbounded<long>();
         TaskCompletionSource waitingForAnotherMessage = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        IOException acknowledgmentFailure = new("synthetic acknowledgment failure");
+        InvalidOperationException acknowledgmentFailure = new("synthetic permanent acknowledgment failure");
         int polls = 0;
         FakeRuntimeSession session = new()
         {
@@ -420,7 +421,7 @@ public sealed class ScaleSetRuntimeFactoryTests
         Assert.Equal(11, await acknowledgmentAttempts.Reader.ReadAsync(deadline.Token));
         if (failFinalAcknowledgment)
         {
-            Assert.Same(acknowledgmentFailure, await Assert.ThrowsAsync<IOException>(() => run));
+            Assert.Same(acknowledgmentFailure, await Assert.ThrowsAsync<InvalidOperationException>(() => run));
         }
         else
         {
@@ -458,18 +459,277 @@ public sealed class ScaleSetRuntimeFactoryTests
         Assert.Equal(1, operations.Count(item => item == ("drain", "success")));
     }
 
+    [Fact]
+    public async Task RunAsync_RecoversFailedAcknowledgmentWithoutDuplicateProvisioningOrStoppingPeer()
+    {
+        using TemporaryStateDirectory directory = new();
+        (AutoscalerOptions options, ScaleSetOptions scaleSet) = CreateRecoveryOptions(directory.Path);
+        ScaleSetOptions peer = new()
+        {
+            Key = "peer",
+            GithubUrl = "https://github.com/org/peer",
+            Name = scaleSet.Name,
+            CredentialsRef = scaleSet.CredentialsRef,
+            RunnerProfile = scaleSet.RunnerProfile,
+            Scaling = scaleSet.Scaling,
+            Lifecycle = scaleSet.Lifecycle,
+        };
+        options.ScaleSets.Add(peer);
+        BackoffClock clock = new();
+        CancellationToken token = TestContext.Current.CancellationToken;
+        using CancellationTokenSource deadline = CancellationTokenSource.CreateLinkedTokenSource(token);
+        deadline.CancelAfter(TimeSpan.FromSeconds(10));
+        TaskCompletionSource<long> acknowledged = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        RunnerScaleSetMessage message = new()
+        {
+            MessageId = 51,
+            Statistics = new RunnerScaleSetStatistic { TotalAssignedJobs = 1 },
+            JobAvailableMessages = [new JobAvailableMessage { RunnerRequestId = 800 }],
+        };
+        FakeRuntimeSession first = new()
+        {
+            Poll = _ => Task.FromResult<RunnerScaleSetMessage?>(message),
+            Acknowledge = (_, _) => throw new HttpRequestException(HttpRequestError.ConnectionError, "synthetic lost acknowledgment"),
+            Close = _ => Task.CompletedTask,
+        };
+        int replacementPolls = 0;
+        FakeRuntimeSession replacement = new()
+        {
+            Poll = async cancellationToken =>
+            {
+                if (++replacementPolls == 1)
+                {
+                    return message;
+                }
+
+                await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken).ConfigureAwait(false);
+                return null;
+            },
+            Acknowledge = (messageId, _) =>
+            {
+                acknowledged.SetResult(messageId);
+                return Task.CompletedTask;
+            },
+            Close = _ => Task.CompletedTask,
+        };
+        int jitRequests = 0;
+        FakeScaleSetRuntimeClient client = new()
+        {
+            OnOpen = (attempt, _) =>
+            {
+                if (attempt == 1)
+                {
+                    return Task.FromResult<IScaleSetRuntimeSession>(first);
+                }
+
+                Assert.Equal(2, attempt);
+                Assert.Equal(1, first.CloseCount);
+                return Task.FromResult<IScaleSetRuntimeSession>(replacement);
+            },
+            OnGenerateJit = setting =>
+            {
+                Interlocked.Increment(ref jitRequests);
+                return new RunnerScaleSetJitRunnerConfig
+                {
+                    Runner = new RunnerReference { Id = 915, Name = setting.Name },
+                    EncodedJitConfig = "synthetic-jit",
+                };
+            },
+        };
+        FakeRunnerProvider provider = new() { AllowProvisioning = true };
+        HostCapacityCoordinator capacity = new(options.HostCapacity, options.ScaleSets);
+        await using IScaleSetRuntime runtime = await CreateFactory(options, client, provider, timeProvider: clock)
+            .CreateAsync(scaleSet, capacity, token);
+        Channel<RunnerScaleSetMessage?> peerMessages = Channel.CreateUnbounded<RunnerScaleSetMessage?>();
+        TaskCompletionSource<long> peerAcknowledged = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        FakeRuntimeSession peerSession = new()
+        {
+            Poll = cancellationToken => peerMessages.Reader.ReadAsync(cancellationToken).AsTask(),
+            Acknowledge = (messageId, _) =>
+            {
+                peerAcknowledged.SetResult(messageId);
+                return Task.CompletedTask;
+            },
+            Close = _ => Task.CompletedTask,
+        };
+        FakeScaleSetRuntimeClient peerClient = new() { RuntimeSession = peerSession };
+        await using IScaleSetRuntime peerRuntime = await CreateFactory(options, peerClient, new FakeRunnerProvider())
+            .CreateAsync(peer, capacity, token);
+        await runtime.InitializeAsync(token);
+        await peerRuntime.InitializeAsync(token);
+        Task peerRun = peerRuntime.RunAsync(deadline.Token);
+        Task run = runtime.RunAsync(deadline.Token);
+
+        Action reconnect = await clock.WaitForDelayAsync(TimeSpan.FromSeconds(1), deadline.Token);
+        await peerMessages.Writer.WriteAsync(new RunnerScaleSetMessage
+        {
+            MessageId = 52,
+            Statistics = new RunnerScaleSetStatistic(),
+        }, token);
+        Assert.Equal(52, await peerAcknowledged.Task.WaitAsync(deadline.Token));
+        Assert.Equal(1, client.SessionCreateCount);
+        Assert.Equal(0, peerSession.CloseCount);
+
+        reconnect();
+        Assert.Equal(51, await acknowledged.Task.WaitAsync(deadline.Token));
+        await runtime.StopAsync(token);
+        await peerRuntime.StopAsync(token);
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => run);
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => peerRun);
+
+        Assert.Equal(2, client.SessionCreateCount);
+        Assert.Equal(1, first.CloseCount);
+        Assert.Equal(1, replacement.CloseCount);
+        Assert.Equal(1, Volatile.Read(ref jitRequests));
+        Assert.Equal(1, capacity.CaptureSnapshot().Usage.RunnerCount);
+    }
+
+    [Theory]
+    [InlineData(409, false, 4)]
+    [InlineData(409, true, 1)]
+    [InlineData(403, false, 1)]
+    public async Task RunAsync_BoundsSessionConflictsAndStopsOnCancellationOrPermanentFailure(
+        int status,
+        bool cancelDuringBackoff,
+        int expectedSessionAttempts)
+    {
+        using TemporaryStateDirectory directory = new();
+        (AutoscalerOptions options, ScaleSetOptions scaleSet) = CreateRecoveryOptions(directory.Path);
+        BackoffClock clock = new();
+        CancellationToken token = TestContext.Current.CancellationToken;
+        using CancellationTokenSource deadline = CancellationTokenSource.CreateLinkedTokenSource(token);
+        deadline.CancelAfter(TimeSpan.FromSeconds(10));
+        ScaleSetApiException failure = new("synthetic session-open failure", statusCode: status);
+        FakeScaleSetRuntimeClient client = new() { OnOpen = (_, _) => throw failure };
+        await using IScaleSetRuntime runtime = await CreateFactory(options, client, new FakeRunnerProvider(), timeProvider: clock)
+            .CreateAsync(scaleSet, new HostCapacityCoordinator(options.HostCapacity, options.ScaleSets), token);
+        await runtime.InitializeAsync(token);
+        Task run = runtime.RunAsync(deadline.Token);
+
+        if (cancelDuringBackoff)
+        {
+            await clock.CancelDuringNextDelayAsync(TimeSpan.FromSeconds(1), deadline);
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => run);
+        }
+        else
+        {
+            for (int retry = 0; retry < expectedSessionAttempts - 1; retry++)
+            {
+                await clock.ElapseNextDelayAsync(TimeSpan.FromSeconds(1 << retry), deadline.Token);
+            }
+
+            Assert.Same(failure, await Assert.ThrowsAsync<ScaleSetApiException>(() => run.WaitAsync(deadline.Token)));
+        }
+
+        Assert.Equal(expectedSessionAttempts, client.SessionCreateCount);
+    }
+
+    [Fact]
+    public async Task RunAsync_UnconfirmedClosePreventsOpeningAReplacementSession()
+    {
+        using TemporaryStateDirectory directory = new();
+        (AutoscalerOptions options, ScaleSetOptions scaleSet) = CreateOptions(directory.Path);
+        CancellationToken token = TestContext.Current.CancellationToken;
+        HttpRequestException pollFailure = new(HttpRequestError.ConnectionError, "synthetic queue failure");
+        ScaleSetApiException closeFailure = new("synthetic close failure", statusCode: 503);
+        int closeAttempts = 0;
+        FakeRuntimeSession session = new()
+        {
+            Poll = _ => throw pollFailure,
+            Close = _ => ++closeAttempts == 1 ? throw closeFailure : Task.CompletedTask,
+        };
+        FakeScaleSetRuntimeClient client = new() { RuntimeSession = session };
+        await using IScaleSetRuntime runtime = await CreateFactory(options, client, new FakeRunnerProvider())
+            .CreateAsync(scaleSet, new HostCapacityCoordinator(options.HostCapacity, options.ScaleSets), token);
+        await runtime.InitializeAsync(token);
+
+        AggregateException failure = await Assert.ThrowsAsync<AggregateException>(() => runtime.RunAsync(token));
+        Assert.Equal([pollFailure, closeFailure], failure.InnerExceptions);
+        Assert.Equal(1, client.SessionCreateCount);
+        await runtime.StopAsync(token);
+        Assert.Equal(2, session.CloseCount);
+    }
+
+    [Theory]
+    [InlineData("connection", true)]
+    [InlineData("timeout", true)]
+    [InlineData("tls", false)]
+    public async Task RunAsync_UsesTheProductionClientTransportClassification(string failure, bool reconnects)
+    {
+        using TemporaryStateDirectory directory = new();
+        (AutoscalerOptions options, ScaleSetOptions scaleSet) = CreateRecoveryOptions(directory.Path);
+        CancellationToken token = TestContext.Current.CancellationToken;
+        using CancellationTokenSource deadline = CancellationTokenSource.CreateLinkedTokenSource(token);
+        deadline.CancelAfter(TimeSpan.FromSeconds(10));
+        BackoffClock clock = new();
+        using SessionTransport transport = new(failure, options.Controller.Identity);
+        using HttpClient httpClient = new(transport, disposeHandler: false);
+        using ScaleSetRuntimeClientAdapter adapter = new(new ScaleSetClient(
+            GitHubTarget.Parse(scaleSet.GithubUrl!),
+            ScaleSetCredentials.FromPersonalAccessToken(CredentialSentinel),
+            new ScaleSetClientOptions { Retry = ScaleSetRetryOptions.Disabled },
+            httpClient,
+            timeProvider: clock));
+        FakeScaleSetRuntimeClient client = new()
+        {
+            OnOpen = (_, cancellationToken) => adapter.CreateMessageSessionAsync(987, options.Controller.Identity, cancellationToken),
+        };
+        await using IScaleSetRuntime runtime = await CreateFactory(options, client, new FakeRunnerProvider(), timeProvider: clock)
+            .CreateAsync(scaleSet, new HostCapacityCoordinator(options.HostCapacity, options.ScaleSets), token);
+        await runtime.InitializeAsync(token);
+        Task run = runtime.RunAsync(deadline.Token);
+
+        if (reconnects)
+        {
+            await clock.ElapseNextDelayAsync(TimeSpan.FromSeconds(1), deadline.Token);
+            await transport.ReplacementPolled.WaitAsync(deadline.Token);
+            Assert.Equal([transport.FirstSessionId], transport.Closed);
+            Assert.Equal(2, client.SessionCreateCount);
+        }
+        else
+        {
+            ScaleSetApiException error = await Assert.ThrowsAsync<ScaleSetApiException>(() => run.WaitAsync(deadline.Token));
+            Assert.Null(error.StatusCode);
+            Assert.False(error.IsTransientTransportFailure);
+            Assert.DoesNotContain("synthetic transport detail", error.ToString(), StringComparison.Ordinal);
+            Assert.Equal(1, client.SessionCreateCount);
+        }
+
+        await runtime.StopAsync(token);
+        if (reconnects)
+        {
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => run);
+            Assert.Equal([transport.FirstSessionId, transport.ReplacementSessionId], transport.Closed);
+        }
+        else
+        {
+            Assert.Equal([transport.FirstSessionId], transport.Closed);
+        }
+    }
+
     private static ScaleSetRuntimeFactory CreateFactory(
         AutoscalerOptions options,
         FakeScaleSetRuntimeClient client,
         FakeRunnerProvider provider,
-        ScaleSetTelemetryMetrics? telemetry = null) =>
+        ScaleSetTelemetryMetrics? telemetry = null,
+        TimeProvider? timeProvider = null) =>
         new(
             options,
             NullLoggerFactory.Instance,
-            TimeProvider.System,
+            timeProvider ?? TimeProvider.System,
             (_, _, _, _, _) => client,
             (_, _, _) => provider,
             telemetry);
+
+    private static (AutoscalerOptions Options, ScaleSetOptions ScaleSet) CreateRecoveryOptions(string stateDirectory)
+    {
+        (AutoscalerOptions options, ScaleSetOptions scaleSet) = CreateOptions(stateDirectory);
+        TimeSpan controlBudget = TimeSpan.FromMinutes(1);
+        options.Controller.ControlOperationTimeout = controlBudget;
+        scaleSet.Lifecycle.CleanupTimeout = controlBudget;
+        scaleSet.Lifecycle.ShutdownDrainTimeout = controlBudget;
+        return (options, scaleSet);
+    }
 
     private static (AutoscalerOptions Options, ScaleSetOptions ScaleSet) CreateOptions(string stateDirectory)
     {
@@ -527,6 +787,7 @@ public sealed class ScaleSetRuntimeFactoryTests
 
         public Func<RunnerScaleSet, CancellationToken, Task<RunnerScaleSet>>? OnCreate { get; init; }
         public Func<RunnerScaleSetJitRunnerSetting, RunnerScaleSetJitRunnerConfig>? OnGenerateJit { get; init; }
+        public Func<int, CancellationToken, Task<IScaleSetRuntimeSession>>? OnOpen { get; init; }
 
         public FakeRuntimeSession? RuntimeSession { get; init; }
 
@@ -575,8 +836,8 @@ public sealed class ScaleSetRuntimeFactoryTests
 
         public Task<IScaleSetRuntimeSession> CreateMessageSessionAsync(long scaleSetId, string ownerName, CancellationToken cancellationToken)
         {
-            Interlocked.Increment(ref _sessionCreateCount);
-            return Task.FromResult<IScaleSetRuntimeSession>(RuntimeSession
+            int attempt = Interlocked.Increment(ref _sessionCreateCount);
+            return OnOpen?.Invoke(attempt, cancellationToken) ?? Task.FromResult<IScaleSetRuntimeSession>(RuntimeSession
                 ?? throw new InvalidOperationException("This test did not configure a session."));
         }
 
@@ -664,6 +925,132 @@ public sealed class ScaleSetRuntimeFactoryTests
             DisposeCount++;
             OnDispose?.Invoke();
         }
+    }
+
+    private sealed class BackoffClock : TimeProvider
+    {
+        private readonly Channel<(TimeSpan Due, BackoffTimer Timer)> _delays = Channel.CreateUnbounded<(TimeSpan, BackoffTimer)>();
+
+        public override ITimer CreateTimer(TimerCallback callback, object? state, TimeSpan dueTime, TimeSpan period)
+        {
+            // This fixture uses system timers for control and cleanup budgets.
+            // Only the 1, 2, and 4 second recovery delays use manual timers.
+            if (period != Timeout.InfiniteTimeSpan || dueTime.TotalSeconds is not (1 or 2 or 4))
+            {
+                return System.CreateTimer(callback, state, dueTime, period);
+            }
+
+            BackoffTimer timer = new(callback, state);
+            Assert.True(_delays.Writer.TryWrite((dueTime, timer)));
+            return timer;
+        }
+
+        public async Task<Action> WaitForDelayAsync(TimeSpan expected, CancellationToken cancellationToken)
+        {
+            (TimeSpan due, BackoffTimer timer) = await _delays.Reader.ReadAsync(cancellationToken).ConfigureAwait(false);
+            Assert.Equal(expected, due);
+            return timer.Fire;
+        }
+
+        public async Task ElapseNextDelayAsync(TimeSpan expected, CancellationToken cancellationToken)
+        {
+            Action elapse = await WaitForDelayAsync(expected, cancellationToken).ConfigureAwait(false);
+            elapse();
+        }
+
+        public async Task CancelDuringNextDelayAsync(TimeSpan expected, CancellationTokenSource cancellation)
+        {
+            _ = await WaitForDelayAsync(expected, cancellation.Token).ConfigureAwait(false);
+            await cancellation.CancelAsync().ConfigureAwait(false);
+        }
+
+        private sealed class BackoffTimer(TimerCallback callback, object? state) : ITimer
+        {
+            public void Fire() => callback(state);
+
+            public bool Change(TimeSpan dueTime, TimeSpan period) => throw new NotSupportedException();
+
+            public void Dispose()
+            {
+            }
+
+            public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+        }
+    }
+
+    private sealed class SessionTransport(string failure, string owner) : HttpMessageHandler
+    {
+        private const string DiscoveryJwt = "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJleHAiOjQxMDI0NDQ4MDB9.";
+        private readonly TaskCompletionSource _replacementPolled = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly ConcurrentQueue<Guid> _closed = new();
+        private int _opened;
+
+        public Guid FirstSessionId { get; } = Guid.NewGuid();
+
+        public Guid ReplacementSessionId { get; } = Guid.NewGuid();
+
+        public Task ReplacementPolled => _replacementPolled.Task;
+
+        public IReadOnlyList<Guid> Closed => _closed.ToArray();
+
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            string path = Assert.IsType<Uri>(request.RequestUri, exactMatch: false).AbsolutePath;
+            if (path.EndsWith("/runners/registration-token", StringComparison.Ordinal))
+            {
+                return Json(HttpStatusCode.Created, """{"token":"synthetic-registration","expires_at":"2099-01-01T00:00:00Z"}""");
+            }
+
+            if (path == "/actions/runner-registration")
+            {
+                return Json(HttpStatusCode.OK, $$"""{"url":"https://actions.example.test/tenant/123/","token":"{{DiscoveryJwt}}"}""");
+            }
+
+            if (request.Method == HttpMethod.Post && path.EndsWith("/sessions", StringComparison.Ordinal))
+            {
+                bool first = Interlocked.Increment(ref _opened) == 1;
+                if (!first)
+                {
+                    Assert.Equal([FirstSessionId], Closed);
+                }
+
+                return Json(HttpStatusCode.OK, ScaleSetJson.Serialize(new RunnerScaleSetSession
+                {
+                    SessionId = first ? FirstSessionId : ReplacementSessionId,
+                    OwnerName = owner,
+                    MessageQueueUrl = first ? "https://queue.example.test/first" : "https://queue.example.test/replacement",
+                    MessageQueueAccessToken = "synthetic-queue-token",
+                    Statistics = new RunnerScaleSetStatistic(),
+                }));
+            }
+
+            if (request.Method == HttpMethod.Delete && path.Contains("/sessions/", StringComparison.Ordinal))
+            {
+                _closed.Enqueue(Guid.Parse(path[(path.LastIndexOf('/') + 1)..]));
+                return new HttpResponseMessage(HttpStatusCode.NoContent);
+            }
+
+            if (path == "/first")
+            {
+                throw failure switch
+                {
+                    "connection" => new HttpRequestException(HttpRequestError.ConnectionError, "synthetic transport detail"),
+                    "timeout" => new OperationCanceledException("synthetic transport detail"),
+                    "tls" => new HttpRequestException(HttpRequestError.SecureConnectionError, "synthetic transport detail"),
+                    _ => throw new InvalidOperationException("Unexpected test failure classification."),
+                };
+            }
+
+            Assert.Equal("/replacement", path);
+            _replacementPolled.SetResult();
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken).ConfigureAwait(false);
+            return new HttpResponseMessage(HttpStatusCode.Accepted);
+        }
+
+        private static HttpResponseMessage Json(HttpStatusCode statusCode, string json) => new(statusCode)
+        {
+            Content = new StringContent(json, Encoding.UTF8, "application/json"),
+        };
     }
 
     private sealed class TemporaryStateDirectory : IDisposable

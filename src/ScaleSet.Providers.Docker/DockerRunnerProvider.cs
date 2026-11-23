@@ -9,12 +9,19 @@ using Microsoft.Extensions.Logging;
 using ScaleSet.Hosting.Capacity;
 using ScaleSet.Hosting.Configuration;
 using ScaleSet.Hosting.Providers;
+using ScaleSet.Hosting.Telemetry;
 
 namespace ScaleSet.Providers.Docker;
 
 /// <summary>Manages GitHub Actions runner containers through the Docker Engine API.</summary>
 public sealed partial class DockerRunnerProvider : IRunnerProvider, IDisposable
 {
+    /// <summary>Activity source used for Docker Engine request spans.</summary>
+    public const string ActivitySourceName = ScaleSetTelemetrySources.DockerProvider;
+
+    /// <summary>Meter used for Docker Engine request counts and durations.</summary>
+    public const string MeterName = ActivitySourceName;
+
     private const string ProductLabelValue = "scaleset.net";
     private const string ContainerSocketPath = "/var/run/docker.sock";
     private const int MaximumJitConfigurationCharacters = 1024 * 1024;

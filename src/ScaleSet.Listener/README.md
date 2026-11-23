@@ -19,4 +19,9 @@ Hosting provides `ScaleSetMessageHandler` for that purpose. The application
 owns session creation, recovery after a listener failure, and closure when
 polling stops. See the [worker example](https://github.com/knightfall/scaleset.NET/tree/main/examples/dotnet-worker).
 
+Subscribe to `ScaleSetListener.ActivitySourceName` (`ScaleSet.Listener`) for
+`scaleset.message.poll` and `scaleset.message.process` spans. The listener
+emits no dedicated metrics. The autoscaler records queue operation metrics in
+its host meter.
+
 Licensed under [Apache-2.0](https://github.com/knightfall/scaleset.NET/blob/main/LICENSE).

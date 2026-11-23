@@ -1,3 +1,4 @@
+using ScaleSet.Client;
 using ScaleSet.Hosting.State;
 
 namespace ScaleSet.Hosting.Controller;
@@ -117,6 +118,18 @@ public sealed partial class ScaleSetMessageHandler
         }
 
         return new CallbackLease(this);
+    }
+
+    private long[] GetUnacquiredOffers(IReadOnlyList<JobAvailableMessage> messages)
+    {
+        lock (_drainSync)
+        {
+            return messages
+                .Select(static message => message.RunnerRequestId)
+                .Where(requestId => requestId > 0 && !_pendingAcquiredRequests.Contains(requestId))
+                .Distinct()
+                .ToArray();
+        }
     }
 
     private void RecordAcquiredRequests(IEnumerable<long> requestIds)
