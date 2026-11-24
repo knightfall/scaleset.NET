@@ -552,21 +552,21 @@ contract. The verified candidate and release boundary are recorded below.
 Use the matching candidate packages `Knightfall.ScaleSet.Client` and
 `Knightfall.ScaleSet.Listener` version `0.1.0-alpha.1` from the package
 candidate for source commit
-`28eb8a95e4e4d3f84f8876c3436c95a7714dc088`. The release workflow reuses the
+`7787e1e0a0db8aa299570af4942bc270be66b1e1`. The release workflow reuses the
 prerelease version across candidate builds, so the source commit and candidate
-manifest identify the actual compatible binaries. The pinned artifacts verify
-the Listener pump. Exact-session retirement after process loss requires a
-Client build that includes `DeleteMessageSessionAsync`.
-[Source commit](https://github.com/knightfall/scaleset.NET/commit/28eb8a95e4e4d3f84f8876c3436c95a7714dc088) ·
-[Candidate build and artifact](https://github.com/knightfall/scaleset.NET/actions/runs/45265772997)
+manifest identify the verified binaries. These artifacts include the Listener
+pump and `DeleteMessageSessionAsync` for confirmed exact-session retirement
+after process loss.
+[Source commit](https://github.com/knightfall/scaleset.NET/commit/7787e1e0a0db8aa299570af4942bc270be66b1e1) ·
+[Candidate build and artifact](https://github.com/knightfall/scaleset.NET/actions/runs/45282199202)
 
 The candidate manifest SHA-256 is
-`df15e6086bc0b6bd7f501a5789f12ae5a9291508498d869886a23d2f737221d2`.
+`8eb55197047d22359cc7d95c76eacdcc84551720f75e5713d2070924bed9705f`.
 
 | Artifact | SHA-256 |
 | --- | --- |
-| `Knightfall.ScaleSet.Client.0.1.0-alpha.1.nupkg` | `46ddda968b900a4c7c87eed94460db1c3a7d64bad09b4a13cede4122cf27061c` |
-| `Knightfall.ScaleSet.Listener.0.1.0-alpha.1.nupkg` | `d02a1f3a8639cdcd38a1789d1b2245ff653c087dee9d5670df5cc8b63b0352e6` |
+| `Knightfall.ScaleSet.Client.0.1.0-alpha.1.nupkg` | `7398899d9012b95adc9461cb1817052ac850b8803e011369a065a5319d425dce` |
+| `Knightfall.ScaleSet.Listener.0.1.0-alpha.1.nupkg` | `a6ecb023d2c267ae827c3668937324e297c8edf6eb9ab9d22e9838769ece92ac` |
 
 | AWS planning requirement | API and candidate demonstration |
 | --- | --- |
@@ -585,9 +585,9 @@ adapter and deployment qualification.
 ## 11. Validation and release evidence
 
 - The analyzer-enabled Release build and native .NET test run cover the Client,
-  Listener, Hosting, and Docker projects. Linux-only Docker integration runs
-  in CI. The local macOS run passed 509 tests, including 68 Listener tests.
-  Two Linux Docker integration cases were skipped locally.
+  Listener, Hosting, and Docker projects. All 516 tests passed in the Linux
+  candidate run and on macOS with a local Linux Docker engine, including both
+  Docker integration cases.
 - The advanced package example runs from a clean NuGet cache with Client and
   Listener as its only SDK packages. Its dependency graph adds no Hosting,
   Docker, AWS, storage provider, or telemetry exporter requirement. Existing
@@ -599,7 +599,7 @@ adapter and deployment qualification.
   against retry to a replacement GUID, and preserve acknowledgement
   uncertainty. Separate Client transport tests verify exact-session retirement,
   including administrative authentication and no automatic retry. The
-  repository-scope canary and remaining service evidence are tracked in
+  completed GitHub.com repository-scope canary and its limits are recorded in
   [#64](https://github.com/knightfall/scaleset.NET/issues/64).
 - The [publishing policy](../releases/PUBLISHING.md) governs release and registry
   verification. Candidate packaging and local execution precede publication.
