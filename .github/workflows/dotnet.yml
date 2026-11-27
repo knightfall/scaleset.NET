@@ -49,6 +49,13 @@ jobs:
         run: dotnet restore ScaleSet.slnx --locked-mode
       - name: Build with Roslynator and compiler warnings as errors
         run: dotnet build ScaleSet.slnx --configuration Release --no-restore -p:RunAnalyzersDuringBuild=true
+      - name: Verify Linux Docker JIT handoff
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          fixture_image=$(python3 tests/ScaleSet.Docker.IntegrationTests/verify-jit-handoff.py --fixture-image)
+          docker pull "$fixture_image"
+          python3 tests/ScaleSet.Docker.IntegrationTests/verify-jit-handoff.py
       - name: Test solution discovery and behavior
         run: dotnet test --solution ScaleSet.slnx --configuration Release --no-build
         env:

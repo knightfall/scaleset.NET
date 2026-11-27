@@ -1,6 +1,7 @@
 """Exercise the installed NuGet CLI against a disposable loopback V3 registry."""
 import http.server
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -50,7 +51,7 @@ def check_retry(root):
                 status = 201 if symbol_uploads == 1 else 409
             else:
                 status = 409
-            requests.append((self.path.rstrip("/"), status))
+            requests.append((self.path.rstrip("/"), status, self.headers.get("X-NuGet-ApiKey")))
             self.send_response(status)
             self.end_headers()
 
@@ -72,11 +73,11 @@ def check_retry(root):
                     str(path),
                     "--source",
                     source,
-                    "--api-key",
-                    "fixture-key",
                     "--allow-insecure-connections",
                     *options,
                 ],
+                env={**os.environ, "NUGET_API_KEY": "fixture-package-key",
+                     "NUGET_SYMBOL_API_KEY": "fixture-symbol-key"},
                 capture_output=True,
                 text=True,
                 timeout=30,
@@ -86,16 +87,22 @@ def check_retry(root):
 
         try:
             push(package, ["--no-symbols", "--skip-duplicate"], True)
-            push(symbols, ["--skip-duplicate"], True)
-            push(symbols, ["--skip-duplicate"], True)
+            push(symbols, [], True)
+            push(symbols, [], False)
             push(package, ["--no-symbols"], False)
         finally:
             server.shutdown()
             thread.join()
 
-    if requests != [("/package", 409), ("/symbols", 201), ("/symbols", 409), ("/package", 409)]:
-        raise RuntimeError("NuGet package/symbol endpoints or duplicate request sequence differ: " + repr(requests))
-    print("NuGet CLI preserved separate symbol retries and rejected an unapproved package duplicate.")
+    expected = [
+        ("/package", 409, "fixture-package-key"),
+        ("/symbols", 201, "fixture-symbol-key"),
+        ("/symbols", 409, "fixture-symbol-key"),
+        ("/package", 409, "fixture-package-key"),
+    ]
+    if requests != expected:
+        raise RuntimeError("NuGet package or symbol routing, authentication, or retry behavior differs.")
+    print("NuGet CLI sent separate environment credentials and rejected unverified duplicates.")
 
 
 if __name__ == "__main__":

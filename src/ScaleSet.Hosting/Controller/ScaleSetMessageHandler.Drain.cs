@@ -1,17 +1,27 @@
+using System.Collections.Immutable;
+using System.Runtime.ExceptionServices;
 using ScaleSet.Client;
+using ScaleSet.Hosting.Capacity;
 using ScaleSet.Hosting.State;
 
 namespace ScaleSet.Hosting.Controller;
 
 public sealed partial class ScaleSetMessageHandler
 {
+    private static readonly TimeSpan AdmissionSettlementTimeout = TimeSpan.FromSeconds(1);
     private readonly object _drainSync = new();
     private readonly HashSet<long> _pendingAcquiredRequests = [];
+    private readonly HashSet<long> _assignedAcquiredRequests = [];
+    private readonly Dictionary<(Guid OperationId, long Generation), DeferredPermitRelease> _deferredPermitReleases = [];
+    private readonly CancellationTokenSource _deferredSettlementStop = new();
+    private Task? _deferredSettlementTask;
+    private bool _admissionTrimPending;
     private bool _drainStarted;
     private int _activeAdmissions;
     private int _activeCallbacks;
 
     /// <summary>Stops admitting new jobs while allowing lifecycle messages to continue.</summary>
+    /// <remarks>Unused admission permits are settled during the drain wait.</remarks>
     public void BeginDrain()
     {
         lock (_drainSync)
@@ -19,6 +29,7 @@ public sealed partial class ScaleSetMessageHandler
             _drainStarted = true;
         }
 
+        Interlocked.Exchange(ref _lastAdvertisedMaximum, 0);
         _capacity.SetListenerMaximum(0);
     }
 
@@ -49,50 +60,80 @@ public sealed partial class ScaleSetMessageHandler
         }
         ArgumentNullException.ThrowIfNull(timeProvider);
         BeginDrain();
+        if (timeout == TimeSpan.Zero)
+        {
+            return await TryReadDrainedOperationsAsync(cancellationToken).ConfigureAwait(false) is not null;
+        }
 
         using CancellationTokenSource deadline = new(timeout, timeProvider);
         using CancellationTokenSource linked = CancellationTokenSource.CreateLinkedTokenSource(
             cancellationToken,
             deadline.Token);
-
-        while (true)
+        try
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            IReadOnlyList<RunnerOperationState> operations = await _journal
-                .ReadAllAsync(cancellationToken)
-                .ConfigureAwait(false);
-            bool hasBusyOperation = operations.Any(static operation => operation.Stage == RunnerLifecycleStage.Busy);
-            bool hasPendingRequests;
-            bool hasActiveAdmissions;
-            bool hasActiveCallbacks;
-            lock (_drainSync)
+            while (await TryReadDrainedOperationsAsync(linked.Token).ConfigureAwait(false) is null)
             {
-                hasPendingRequests = _pendingAcquiredRequests.Count > 0;
-                hasActiveAdmissions = _activeAdmissions > 0;
-                hasActiveCallbacks = _activeCallbacks > 0;
+                await Task.Delay(TimeSpan.FromMilliseconds(250), timeProvider, linked.Token).ConfigureAwait(false);
             }
 
-            if (!hasBusyOperation && !hasPendingRequests && !hasActiveAdmissions && !hasActiveCallbacks)
-            {
-                return true;
-            }
+            return true;
+        }
+        catch (OperationCanceledException) when (deadline.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
+        {
+            return false;
+        }
+    }
 
-            if (deadline.IsCancellationRequested)
+    internal async Task<ImmutableArray<RunnerOperationState>?> TryReadDrainedOperationsAsync(CancellationToken cancellationToken)
+    {
+        // Keep journal evidence stable against callbacks without holding the host-wide gate during I/O.
+        if (!_callbackGate.Wait(0, cancellationToken))
+        {
+            return null;
+        }
+
+        try
+        {
+            SemaphoreSlim gate = _capacity.DemandRegistry.PlanningGate;
+            if (!gate.Wait(0, cancellationToken))
             {
-                return false;
+                return null;
             }
 
             try
             {
-                await Task.Delay(TimeSpan.FromMilliseconds(250), timeProvider, linked.Token).ConfigureAwait(false);
+                lock (_drainSync)
+                {
+                    _admissionTrimPending = true;
+                    SettleAdmissionUnderGate();
+                    if (!IsDrainQuiescent())
+                    {
+                        return null;
+                    }
+                }
             }
-            catch (OperationCanceledException) when (
-                deadline.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
+            finally
             {
-                return false;
+                gate.Release();
+            }
+
+            var operations = await _journal.ReadActiveAsync(cancellationToken).ConfigureAwait(false);
+            lock (_drainSync)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                return IsDrainQuiescent() && !operations.Any(static operation => operation.Stage == RunnerLifecycleStage.Busy)
+                    ? operations
+                    : null;
             }
         }
+        finally
+        {
+            _callbackGate.Release();
+        }
     }
+
+    private bool IsDrainQuiescent() => _activeCallbacks == 0 && _activeAdmissions == 0
+        && _pendingAcquiredRequests.Count == 0 && !_admissionTrimPending && _deferredPermitReleases.Count == 0;
 
     private bool TryEnterAdmission(out IDisposable? lease)
     {
@@ -147,19 +188,169 @@ public sealed partial class ScaleSetMessageHandler
         }
     }
 
-    private void RecordJobStarted(long requestId)
+    internal async Task SettleDrainAdmissionAsync(TimeProvider timeProvider)
     {
+        // The runtime has stopped all producers. Join any previously scheduled settlement before disposal.
+        Task? deferredSettlement;
+        bool needsSettlement;
         lock (_drainSync)
         {
-            _pendingAcquiredRequests.Remove(requestId);
+            deferredSettlement = _deferredSettlementTask;
+            needsSettlement = _admissionTrimPending || _deferredPermitReleases.Count != 0
+                || _capacity.DemandRegistry.GetAdmissionPermits(_scope.ScaleSetKey).Count != 0;
+        }
+
+        using CancellationTokenSource deadline = new(AdmissionSettlementTimeout, timeProvider);
+        SemaphoreSlim gate = _capacity.DemandRegistry.PlanningGate;
+        try
+        {
+            if (!needsSettlement)
+            {
+                return;
+            }
+
+            await gate.WaitAsync(deadline.Token).ConfigureAwait(false);
+            try
+            {
+                lock (_drainSync)
+                {
+                    _admissionTrimPending = true;
+                    SettleAdmissionUnderGate();
+                }
+            }
+            finally
+            {
+                gate.Release();
+            }
+        }
+        catch (OperationCanceledException exception) when (deadline.IsCancellationRequested)
+        {
+            throw new TimeoutException("Timed out settling scale-set admission permits during stop.", exception);
+        }
+        finally
+        {
+            await _deferredSettlementStop.CancelAsync().ConfigureAwait(false);
+            if (deferredSettlement is not null)
+            {
+                await deferredSettlement.ConfigureAwait(false);
+            }
+            _deferredSettlementStop.Dispose();
         }
     }
 
-    private void RecordJobCompleted(long requestId)
+    private void DeferPermitRelease(CapacityReservationLease lease, bool retainTombstone)
+    {
+        lock (_drainSync)
+        {
+            var key = (lease.Handle.Identity.OperationId, lease.Handle.Generation);
+            if (_deferredPermitReleases.TryGetValue(key, out var previous))
+            {
+                retainTombstone |= previous.RetainTombstone;
+            }
+
+            _deferredPermitReleases[key] = new DeferredPermitRelease(lease, retainTombstone);
+            StartDeferredSettlementUnderLock();
+        }
+    }
+
+    private void StartDeferredSettlementUnderLock() => _deferredSettlementTask ??= RunDeferredSettlementAsync();
+
+    private async Task RunDeferredSettlementAsync()
+    {
+        await Task.CompletedTask.ConfigureAwait(ConfigureAwaitOptions.ForceYielding);
+        SemaphoreSlim gate = _capacity.DemandRegistry.PlanningGate;
+        try
+        {
+            await gate.WaitAsync(_deferredSettlementStop.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (_deferredSettlementStop.IsCancellationRequested)
+        {
+            return;
+        }
+
+        try
+        {
+            lock (_drainSync)
+            {
+                try
+                {
+                    SettleAdmissionUnderGate();
+                }
+                catch (Exception exception)
+                {
+                    LogAdmissionTrimFailed(_logger, _scope.ScaleSetKey, exception.GetType().Name);
+                }
+                finally
+                {
+                    _deferredSettlementTask = null;
+                }
+            }
+        }
+        finally
+        {
+            gate.Release();
+        }
+    }
+
+    private void SettleAdmissionUnderGate()
+    {
+        // Callers hold the planning gate and the drain lock. Failed releases stay tracked for the next attempt.
+        Exception? releaseFailure = null;
+        foreach (var (key, release) in _deferredPermitReleases.ToArray())
+        {
+            try
+            {
+                ReleaseKnownUnusedPermit(release.Lease, release.RetainTombstone);
+                _deferredPermitReleases.Remove(key);
+            }
+            catch (Exception exception)
+            {
+                LogCapacityStateUpdateFailed(_logger, key.OperationId, _scope.ScaleSetKey, exception.GetType().Name);
+                releaseFailure ??= exception;
+            }
+        }
+
+        SettleAdmissionTrimUnderGate();
+
+        if (releaseFailure is not null)
+        {
+            ExceptionDispatchInfo.Throw(releaseFailure);
+        }
+    }
+
+    private void SettleAdmissionTrimUnderGate()
+    {
+        if (_admissionTrimPending && _activeAdmissions == 0)
+        {
+            TrimUnneededAdmissionPermitsUnderGate();
+            _admissionTrimPending = false;
+        }
+    }
+
+    private void RecordAssignments(IReadOnlyList<JobAssignedMessage> assignments)
+    {
+        lock (_drainSync)
+        {
+            foreach (JobAssignedMessage assignment in assignments)
+            {
+                if (_pendingAcquiredRequests.Contains(assignment.RunnerRequestId))
+                {
+                    _assignedAcquiredRequests.Add(assignment.RunnerRequestId);
+                }
+            }
+        }
+    }
+
+    private void RecordJobStarted(long requestId) => RemoveAcquiredRequest(requestId);
+
+    private void RecordJobCompleted(long requestId) => RemoveAcquiredRequest(requestId);
+
+    private void RemoveAcquiredRequest(long requestId)
     {
         lock (_drainSync)
         {
             _pendingAcquiredRequests.Remove(requestId);
+            _assignedAcquiredRequests.Remove(requestId);
         }
     }
 
@@ -202,4 +393,6 @@ public sealed partial class ScaleSetMessageHandler
 
         public void Dispose() => Interlocked.Exchange(ref _owner, null)?.ExitCallback();
     }
+
+    private sealed record DeferredPermitRelease(CapacityReservationLease Lease, bool RetainTombstone);
 }

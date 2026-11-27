@@ -13,4 +13,7 @@
   <ItemGroup>
     <ProjectReference Include="../ScaleSet.Hosting/ScaleSet.Hosting.csproj" />
   </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="ScaleSet.Docker.Tests" />
+  </ItemGroup>
 </Project>

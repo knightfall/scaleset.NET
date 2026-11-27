@@ -12,6 +12,9 @@ internal sealed record DockerProviderOptionsSnapshot(
     TimeSpan ImagePullTimeout,
     int MaximumPullResponseBytes,
     int MaximumPullLineBytes,
+    bool AllowHostSocket,
+    bool HardenUnprivilegedContainers,
+    long PidsLimit,
     string User,
     ImmutableArray<string> Command,
     string? WorkingDirectory)
@@ -59,6 +62,8 @@ internal sealed record DockerProviderOptionsSnapshot(
             throw new ArgumentOutOfRangeException(nameof(options), "MaximumPullLineBytes must be between one kibibyte and one mebibyte, and no greater than MaximumPullResponseBytes.");
         }
 
+        ArgumentOutOfRangeException.ThrowIfNegative(options.PidsLimit);
+
         string user = ValidateText(options.User, nameof(options.User), 128);
         if (options.Command is null || options.Command.Count is < 1 or > 64)
         {
@@ -84,6 +89,9 @@ internal sealed record DockerProviderOptionsSnapshot(
             options.ImagePullTimeout,
             options.MaximumPullResponseBytes,
             options.MaximumPullLineBytes,
+            options.AllowHostSocket,
+            options.HardenUnprivilegedContainers,
+            options.PidsLimit,
             user,
             command.ToImmutable(),
             workingDirectory);

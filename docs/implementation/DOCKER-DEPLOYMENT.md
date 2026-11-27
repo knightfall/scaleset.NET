@@ -51,7 +51,7 @@ docker compose --env-file examples/docker-compose/.env -f examples/docker-compos
 ```
 
 The compose file binds health port 8080 to loopback on the host. `/health/live`
-reports whether the worker is running and not shutting down. `/health/ready`
+reports whether the worker is running, including during drain. `/health/ready`
 returns 503 until scale-set identity and runner inventory reconciliation finish.
 Set `SCALESET__Health__ListenUrl` to change the container listener URL and
 `HEALTH_PORT` to change the host-side port. Expose readiness only to the
@@ -129,8 +129,9 @@ capacity. A registration the service reports as still running, or that lacks
 verifiable ownership, keeps its slot. Provider removals use non-forced
 deletion, and cleanup releases only the capacity lease captured before the
 checks. A later pass rechecks provider absence before releasing a newer lease.
-A never-started container with durable start intent can reuse its existing
-registration and container. Drain waits for starting or uncertain resources
+An interrupted Docker start has no durable JIT credential to replay. The
+controller reconciles the exact container and registration before reclaiming
+capacity. Drain waits for starting or uncertain resources
 that may have accepted work before arrival of a job-start event. The drain
 deadline bounds that wait.
 
@@ -138,6 +139,25 @@ Set `Scaling.IdleTimeout` to zero or leave it unset. GitHub's idle count is
 aggregate, and runner lookups expose identity without a per-runner idle or
 assignment fence. Configuration rejects positive idle timeouts. Live runners
 stay available for demand and minimum-capacity policy.
+
+## Upgrading runner state
+
+Stop the controller and back up the entire mounted state directory before the
+upgrade. The new journal imports the v1 JSON records into
+`runner-state.sqlite3` in one transaction. It keeps `runner-state.json` as a
+format marker so older controllers reject the migrated directory. Keep the
+database and marker together. Restoring a pre-upgrade backup requires
+reconciling any runner or registration created after that backup before
+allowing the older controller to admit work. The journal retains terminal
+operation IDs and runner names to prevent replay and name reuse. Reconciliation
+reads active rows only. The database still grows with completed work.
+
+Existing running containers continue under their original image startup
+configuration. The new provider reconciles unstarted or ambiguous owned
+containers before it releases capacity. Newly created containers use the
+tmpfs handoff and a provider-owned shell entrypoint. See the
+[Docker provider README](../../src/ScaleSet.Providers.Docker/README.md) for
+image requirements.
 
 ## Shutdown and signals
 
@@ -147,7 +167,9 @@ docker compose --env-file examples/docker-compose/.env -f examples/docker-compos
 
 The sample sets a ten-minute Compose stop grace. The application drains for
 the configured per-scale-set period, closes sessions with a separate bounded
-cleanup timeout, and preserves busy or uncertain runners. If you raise drain
+cleanup timeout, and preserves busy or uncertain runners. A warm runner can
+remain available without consuming the drain deadline once GitHub confirms
+its exact scale-set membership and reports it online and idle. If you raise drain
 or cleanup limits or configure many scale sets, increase
 `SCALESET_STOP_GRACE_PERIOD` so it covers the maximum parallel drain plus
 sequential session cleanup, acknowledgment, and telemetry flush budgets.

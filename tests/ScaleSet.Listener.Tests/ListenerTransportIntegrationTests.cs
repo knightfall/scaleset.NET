@@ -31,7 +31,7 @@ public sealed class ListenerTransportIntegrationTests
 
             if (path.EndsWith("/acquirejobs", StringComparison.Ordinal))
             {
-                Assert.Equal("admin.example", request.RequestUri.Host);
+                Assert.Equal("admin-fixture.actions.githubusercontent.com", request.RequestUri.Host);
                 Assert.Equal("queue-token", request.Headers.Authorization?.Parameter);
                 Assert.Equal("[5000000001]", await request.Content!.ReadAsStringAsync(token));
                 acquired = true;
@@ -58,12 +58,12 @@ public sealed class ListenerTransportIntegrationTests
                 Assert.True(expiresDuringAcknowledgment);
                 Assert.True(stop.IsCancellationRequested);
                 Assert.False(token.IsCancellationRequested);
-                Assert.Equal("admin.example", request.RequestUri.Host);
+                Assert.Equal("admin-fixture.actions.githubusercontent.com", request.RequestUri.Host);
                 Assert.StartsWith("eyJhbGciOiJSUzI1NiJ9.", request.Headers.Authorization?.Parameter);
                 refreshed = true;
                 return Json(HttpStatusCode.OK, """
                     {"sessionId":"11111111-1111-1111-1111-111111111111","ownerName":"controller",
-                     "messageQueueUrl":"https://queue.example/queue","messageQueueAccessToken":"replacement-queue-token",
+                     "messageQueueUrl":"https://queue-fixture.actions.githubusercontent.com/queue","messageQueueAccessToken":"replacement-queue-token",
                      "statistics":{"totalAssignedJobs":0}}
                     """);
             }
@@ -204,7 +204,7 @@ public sealed class ListenerTransportIntegrationTests
                 return Task.FromResult(Json(HttpStatusCode.OK, JsonSerializer.Serialize(new
                 {
                     sessionId = different ? "22222222-2222-2222-2222-222222222222" : "11111111-1111-1111-1111-111111111111",
-                    messageQueueUrl = different ? "https://queue.example/queue-replacement" : "https://queue.example/queue",
+                    messageQueueUrl = different ? "https://queue-fixture.actions.githubusercontent.com/queue-replacement" : "https://queue-fixture.actions.githubusercontent.com/queue",
                     messageQueueAccessToken = "new-queue-token",
                     statistics = new { totalAssignedJobs = 0 },
                 })));
@@ -306,19 +306,19 @@ public sealed class ListenerTransportIntegrationTests
                 .TrimEnd('=').Replace('+', '-').Replace('/', '_');
             return Json(HttpStatusCode.OK, JsonSerializer.Serialize(new
             {
-                url = "https://admin.example/tenant/",
+                url = "https://admin-fixture.actions.githubusercontent.com/tenant/",
                 token = $"eyJhbGciOiJSUzI1NiJ9.{payload}.signature",
             }));
         }
 
-        Assert.Equal("admin.example", request.RequestUri.Host);
+        Assert.Equal("admin-fixture.actions.githubusercontent.com", request.RequestUri.Host);
         Assert.Equal("Bearer", request.Headers.Authorization?.Scheme);
         Assert.StartsWith("eyJhbGciOiJSUzI1NiJ9.", request.Headers.Authorization?.Parameter);
         if (request.Method == HttpMethod.Post && path.EndsWith("/sessions", StringComparison.Ordinal))
         {
             return Json(HttpStatusCode.OK, """
                 {"sessionId":"11111111-1111-1111-1111-111111111111","ownerName":"controller",
-                 "messageQueueUrl":"https://queue.example/queue","messageQueueAccessToken":"queue-token",
+                 "messageQueueUrl":"https://queue-fixture.actions.githubusercontent.com/queue","messageQueueAccessToken":"queue-token",
                  "statistics":{"totalAssignedJobs":0}}
                 """);
         }

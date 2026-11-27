@@ -122,6 +122,88 @@ public sealed partial class ScaleSetRuntimeFactoryTests
         Assert.Equal(1, session.CloseCount);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task InitializeAsync_ReconcilesUnlinkedJitByExactName(bool registrationExists)
+    {
+        using TemporaryStateDirectory directory = new();
+        (AutoscalerOptions options, ScaleSetOptions scaleSet) = CreateOptions(directory.Path);
+        var token = TestContext.Current.CancellationToken;
+        RunnerOwnershipScope scope = new(options.Controller.Identity, scaleSet.Key!, 987);
+        RunnerIdentity identity = new(scope, Guid.NewGuid(), "durable-jit-name", capacityResources: new(1m, 1024));
+        var stateDirectory = GetSetStateDirectory(directory.Path, scope.ScaleSetKey);
+        await using (FileRunnerStateJournal journal = await FileRunnerStateJournal.OpenAsync(stateDirectory, scope, token))
+        {
+            await journal.WriteAsync(new(identity, RunnerLifecycleStage.Unknown, 0, DateTimeOffset.UtcNow), -1, token);
+        }
+
+        int removeCalls = 0;
+        LookupRuntimeClient client = new(name =>
+        {
+            Assert.Equal(identity.RunnerName, name);
+            return registrationExists ? new RunnerReference { Id = 915, Name = name, RunnerScaleSetId = 987 } : null;
+        })
+        {
+            ExistingScaleSet = new RunnerScaleSet { Id = 987, RunnerGroupId = 44, Name = scaleSet.Name },
+            OnRemoveRunner = (id, _) =>
+            {
+                Assert.Equal(915L, id);
+                removeCalls++;
+                return Task.CompletedTask;
+            },
+        };
+        HostCapacityCoordinator capacity = new(options.HostCapacity, options.ScaleSets);
+        await using (IScaleSetRuntime runtime = await CreateFactory(options, client, new FakeRunnerProvider())
+            .CreateAsync(scaleSet, capacity, token))
+        {
+            await runtime.InitializeAsync(token);
+            Assert.Equal(0, capacity.CaptureSnapshot().Usage.RunnerCount);
+            Assert.Equal(registrationExists ? 1 : 0, removeCalls);
+        }
+
+        await using FileRunnerStateJournal reopened = await FileRunnerStateJournal.OpenAsync(stateDirectory, scope, token);
+        RunnerOperationState tombstone = Assert.Single(await reopened.ReadAllAsync(token));
+        Assert.Equal(RunnerLifecycleStage.Gone, tombstone.Stage);
+        Assert.Equal(registrationExists ? 915L : (long?)null, tombstone.Identity.GitHubRunnerId);
+    }
+
+    [Fact]
+    public async Task InitializeAsync_UsesDurableQuantitiesForProviderInventoryWithoutMeasurements()
+    {
+        using TemporaryStateDirectory directory = new();
+        (AutoscalerOptions options, ScaleSetOptions scaleSet) = CreateOptions(directory.Path);
+        var token = TestContext.Current.CancellationToken;
+        RunnerOwnershipScope scope = new(options.Controller.Identity, scaleSet.Key!, 987);
+        Guid operationId = Guid.NewGuid();
+        RunnerIdentity identity = new(scope, operationId, "durable-resources", 915, new(1m, 1024));
+        string stateDirectory = GetSetStateDirectory(directory.Path, scope.ScaleSetKey);
+        await using (FileRunnerStateJournal journal = await FileRunnerStateJournal.OpenAsync(stateDirectory, scope, token))
+        {
+            await journal.WriteAsync(new(identity, RunnerLifecycleStage.Unknown, 0, DateTimeOffset.UtcNow, "container"), -1, token);
+        }
+
+        RunnerResource resource = new("container", new RunnerIdentity(scope, operationId, identity.RunnerName, 915),
+            RunnerResourceStatus.Running);
+        HostCapacityCoordinator capacity = new(options.HostCapacity, options.ScaleSets);
+        FakeScaleSetRuntimeClient client = new()
+        {
+            ExistingScaleSet = new RunnerScaleSet { Id = 987, RunnerGroupId = 44, Name = scaleSet.Name },
+        };
+        await using IScaleSetRuntime runtime = await CreateFactory(options, client, new FakeRunnerProvider { Current = resource })
+            .CreateAsync(scaleSet, capacity, token);
+        await runtime.InitializeAsync(token);
+
+        var lease = Assert.IsType<CapacityReservationLease>(capacity.DemandRegistry.GetCapacityLease(operationId));
+        Assert.Equal(identity.CapacityResources, lease.Handle.Resources);
+    }
+
+    private sealed class LookupRuntimeClient(Func<string, RunnerReference?> find) : FakeScaleSetRuntimeClient, IScaleSetRunnerNameLookup
+    {
+        public Task<RunnerReference?> FindRunnerByNameAsync(string name, CancellationToken cancellationToken) =>
+            Task.FromResult(find(name));
+    }
+
     [Fact]
     public async Task InitializeAsync_KeepsMissingProviderCapacityWhileTheRegistrationIsPresent()
     {
@@ -307,6 +389,182 @@ public sealed partial class ScaleSetRuntimeFactoryTests
         Assert.Equal(2, Volatile.Read(ref discoveries));
         await runtime.StopAsync(token);
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => listener);
+    }
+
+    [Theory]
+    [InlineData("idle")]
+    [InlineData("deadline")]
+    [InlineData("caller")]
+    public async Task DrainAsync_VerifiesWarmRunnerWithinShutdownBudget(string outcome)
+    {
+        using TemporaryStateDirectory directory = new();
+        (AutoscalerOptions options, ScaleSetOptions scaleSet) = CreateOptions(directory.Path);
+        scaleSet.Scaling.MinRunners = 1;
+        scaleSet.Lifecycle.ShutdownDrainTimeout = TimeSpan.FromSeconds(20);
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+        deadline.CancelAfter(TimeSpan.FromSeconds(10));
+        var token = deadline.Token;
+        using var caller = CancellationTokenSource.CreateLinkedTokenSource(token);
+        PeriodicReconciliationClock clock = new(scaleSet.Lifecycle.ShutdownDrainTimeout);
+        TaskCompletionSource polling = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        TaskCompletionSource<CancellationToken> lookup = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        TaskCompletionSource<bool> idleReply = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        FakeRuntimeSession session = new()
+        {
+            Poll = async cancellationToken =>
+            {
+                polling.TrySetResult();
+                await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+                return null;
+            },
+            Close = _ => Task.CompletedTask,
+        };
+        FakeRunnerProvider provider = new() { AllowProvisioning = true };
+        IdleRuntimeClient client = new((identity, cancellationToken) =>
+        {
+            Assert.Equal(provider.Current!.Identity, identity);
+            lookup.SetResult(cancellationToken);
+            return idleReply.Task.WaitAsync(cancellationToken);
+        })
+        {
+            RuntimeSession = session,
+            OnGenerateJit = setting => new RunnerScaleSetJitRunnerConfig
+            {
+                Runner = new RunnerReference { Id = 915, Name = setting.Name, RunnerScaleSetId = 987 },
+                EncodedJitConfig = "synthetic-jit",
+            },
+        };
+        HostCapacityCoordinator capacity = new(options.HostCapacity, options.ScaleSets);
+        await using IScaleSetRuntime runtime = await CreateFactory(options, client, provider, timeProvider: clock)
+            .CreateAsync(scaleSet, capacity, token);
+        await runtime.InitializeAsync(token);
+        Task listener = runtime.RunAsync(token);
+        await polling.Task.WaitAsync(token);
+
+        Task drain = runtime.DrainAsync(caller.Token);
+        CancellationToken lookupToken = await lookup.Task.WaitAsync(token);
+        Assert.False(drain.IsCompleted);
+        switch (outcome)
+        {
+            case "idle":
+                idleReply.SetResult(true);
+                await drain.WaitAsync(token);
+                Assert.False(lookupToken.IsCancellationRequested);
+                break;
+            case "deadline":
+                (await clock.Budget.WaitAsync(token)).Fire();
+                await drain.WaitAsync(token);
+                Assert.True(lookupToken.IsCancellationRequested);
+                Assert.False(caller.IsCancellationRequested);
+                break;
+            case "caller":
+                await caller.CancelAsync();
+                await Assert.ThrowsAnyAsync<OperationCanceledException>(() => drain.WaitAsync(token));
+                Assert.True(drain.IsCanceled);
+                Assert.True(lookupToken.IsCancellationRequested);
+                break;
+        }
+
+        Assert.Equal(RunnerResourceStatus.Running, provider.Current?.Status);
+        Assert.Equal(1, capacity.CaptureSnapshot().Usage.RunnerCount);
+        Assert.Equal(0, session.CloseCount);
+        await runtime.StopAsync(token);
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => listener);
+        Assert.Equal(1, session.CloseCount);
+        Assert.NotNull(provider.Current);
+    }
+
+    [Fact]
+    public async Task DrainAsync_RejectsIdleEvidenceFromBeforeJobCompletion()
+    {
+        using TemporaryStateDirectory directory = new();
+        (AutoscalerOptions options, ScaleSetOptions scaleSet) = CreateOptions(directory.Path);
+        scaleSet.Scaling.MinRunners = 1;
+        scaleSet.Lifecycle.ShutdownDrainTimeout = TimeSpan.FromSeconds(20);
+        using var guard = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+        guard.CancelAfter(TimeSpan.FromSeconds(10));
+        CancellationToken token = guard.Token;
+        PeriodicReconciliationClock clock = new(TimeSpan.FromSeconds(5));
+        Channel<RunnerScaleSetMessage?> messages = Channel.CreateUnbounded<RunnerScaleSetMessage?>();
+        Channel<long> acknowledgments = Channel.CreateUnbounded<long>();
+        TaskCompletionSource polling = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        TaskCompletionSource<RunnerIdentity> lookup = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        TaskCompletionSource<bool> idleReply = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        FakeRuntimeSession session = new()
+        {
+            Poll = cancellationToken =>
+            {
+                polling.TrySetResult();
+                return messages.Reader.ReadAsync(cancellationToken).AsTask();
+            },
+            Acknowledge = (id, cancellationToken) => acknowledgments.Writer.WriteAsync(id, cancellationToken).AsTask(),
+            Close = _ => Task.CompletedTask,
+        };
+        IdleRuntimeClient client = new((identity, cancellationToken) =>
+        {
+            lookup.SetResult(identity);
+            return idleReply.Task.WaitAsync(cancellationToken);
+        })
+        {
+            RuntimeSession = session,
+            OnGenerateJit = setting => new RunnerScaleSetJitRunnerConfig
+            {
+                Runner = new RunnerReference { Id = 915, Name = setting.Name, RunnerScaleSetId = 987 },
+                EncodedJitConfig = "synthetic-jit",
+            },
+        };
+        FakeRunnerProvider provider = new() { AllowProvisioning = true };
+        HostCapacityCoordinator capacity = new(options.HostCapacity, options.ScaleSets);
+        await using var services = new ServiceCollection().AddMetrics().BuildServiceProvider();
+        var meterFactory = services.GetRequiredService<IMeterFactory>();
+        using var metrics = new ScaleSetTelemetryMetrics(meterFactory, [scaleSet.Key!]);
+        Channel<string> outcomes = Channel.CreateUnbounded<string>();
+        using MeterListener telemetry = ObserveReconciliationOutcomes(meterFactory, outcomes.Writer);
+        await using IScaleSetRuntime runtime = await CreateFactory(options, client, provider, metrics, clock)
+            .CreateAsync(scaleSet, capacity, token);
+        await runtime.InitializeAsync(token);
+        Assert.Equal("success", await outcomes.Reader.ReadAsync(token));
+        Task listener = runtime.RunAsync(token);
+        PeriodicReconciliationClock.ManualTimer reconcile = await clock.Timer.WaitAsync(token);
+        await polling.Task.WaitAsync(token);
+        RunnerResource running = Assert.IsType<RunnerResource>(provider.Current);
+
+        Task drain = runtime.DrainAsync(token);
+        Assert.Equal(running.Identity, await lookup.Task.WaitAsync(token));
+        await messages.Writer.WriteAsync(new RunnerScaleSetMessage
+        {
+            MessageId = 81,
+            Statistics = new RunnerScaleSetStatistic(),
+            JobCompletedMessages =
+            [
+                new JobCompletedMessage { RunnerRequestId = 82, RunnerId = 915, RunnerName = running.Identity.RunnerName },
+            ],
+        }, token);
+        Assert.Equal(81, await acknowledgments.Reader.ReadAsync(token));
+        idleReply.SetResult(true);
+
+        Assert.Same(clock.Budget, await Task.WhenAny(drain, clock.Budget).WaitAsync(token));
+        Assert.False(drain.IsCompleted);
+        Assert.Same(running, provider.Current);
+        Assert.Equal(1, capacity.CaptureSnapshot().Usage.RunnerCount);
+
+        provider.Current = new RunnerResource(running.ProviderResourceId, running.Identity, RunnerResourceStatus.Exited, exitCode: 0);
+        reconcile.Fire();
+        Assert.Equal("success", await outcomes.Reader.ReadAsync(token));
+        (await clock.Budget).Fire();
+        await drain.WaitAsync(token);
+        Assert.Null(provider.Current);
+        Assert.Equal(0, capacity.CaptureSnapshot().Usage.RunnerCount);
+        Assert.Equal(0, session.CloseCount);
+        await runtime.StopAsync(token);
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => listener);
+        Assert.Equal(1, session.CloseCount);
+    }
+
+    private sealed class IdleRuntimeClient(Func<RunnerIdentity, CancellationToken, Task<bool>> isIdle)
+        : FakeScaleSetRuntimeClient, IScaleSetRunnerIdleLookup
+    {
+        public Task<bool> IsRunnerIdleAsync(RunnerIdentity identity, CancellationToken cancellationToken) => isIdle(identity, cancellationToken);
     }
 
     [Fact]

@@ -29,7 +29,7 @@ public sealed class AdminTokenRefreshTests
             if (path == "/actions/runner-registration")
             {
                 discoveryCalls++;
-                var host = $"https://actions{discoveryCalls}.example/tenant";
+                var host = $"https://actions{discoveryCalls}-fixture.actions.githubusercontent.com/tenant";
                 var token = TestResponses.CreateAdminToken(clock.GetUtcNow().AddSeconds(120)) + $"-{discoveryCalls}";
                 issuedTokens.Add(token);
                 return Task.FromResult(TestResponses.Json(HttpStatusCode.OK, $"{{\"url\":\"{host}\",\"token\":\"{token}\"}}"));
@@ -62,13 +62,13 @@ public sealed class AdminTokenRefreshTests
         Assert.Equal(2, registrationCalls);
         Assert.Equal(2, discoveryCalls);
         Assert.Equal(4, actionRequests.Count);
-        Assert.Equal("actions1.example", actionRequests[0].Uri.Host);
+        Assert.Equal("actions1-fixture.actions.githubusercontent.com", actionRequests[0].Uri.Host);
         Assert.Equal("Bearer " + issuedTokens[0], actionRequests[0].Authorization);
-        Assert.Equal("actions1.example", actionRequests[1].Uri.Host);
+        Assert.Equal("actions1-fixture.actions.githubusercontent.com", actionRequests[1].Uri.Host);
         Assert.Equal("Bearer " + issuedTokens[0], actionRequests[1].Authorization);
-        Assert.Equal("actions1.example", actionRequests[2].Uri.Host);
+        Assert.Equal("actions1-fixture.actions.githubusercontent.com", actionRequests[2].Uri.Host);
         Assert.Equal("Bearer " + issuedTokens[0], actionRequests[2].Authorization);
-        Assert.Equal("actions2.example", actionRequests[3].Uri.Host);
+        Assert.Equal("actions2-fixture.actions.githubusercontent.com", actionRequests[3].Uri.Host);
         Assert.Equal("Bearer " + issuedTokens[1], actionRequests[3].Authorization);
     }
 
@@ -95,7 +95,7 @@ public sealed class AdminTokenRefreshTests
                 discoveryEntered.TrySetResult();
                 await releaseDiscovery.Task.WaitAsync(cancellationToken);
                 var token = TestResponses.CreateAdminToken(clock.GetUtcNow().AddMinutes(10));
-                return TestResponses.Json(HttpStatusCode.OK, $"{{\"url\":\"https://actions{attempt}.example/tenant\",\"token\":\"{token}\"}}");
+                return TestResponses.Json(HttpStatusCode.OK, $"{{\"url\":\"https://actions{attempt}-fixture.actions.githubusercontent.com/tenant\",\"token\":\"{token}\"}}");
             }
 
             return TestResponses.Json(HttpStatusCode.OK, "ok");
@@ -116,7 +116,7 @@ public sealed class AdminTokenRefreshTests
 
         Assert.Equal(1, registrationCalls);
         Assert.Equal(1, discoveryCalls);
-        Assert.Equal(8, handler.Requests.Count(request => request.Uri.Host == "actions1.example"));
+        Assert.Equal(8, handler.Requests.Count(request => request.Uri.Host == "actions1-fixture.actions.githubusercontent.com"));
     }
 
     [Fact]
@@ -141,7 +141,7 @@ public sealed class AdminTokenRefreshTests
                 issuedTokens.Add(token);
                 return Task.FromResult(TestResponses.Json(
                     HttpStatusCode.OK,
-                    $"{{\"url\":\"https://actions{discoveryCalls}.example/tenant\",\"token\":\"{token}\"}}"));
+                    $"{{\"url\":\"https://actions{discoveryCalls}-fixture.actions.githubusercontent.com/tenant\",\"token\":\"{token}\"}}"));
             }
 
             return Task.FromResult(TestResponses.Json(HttpStatusCode.OK, "ok"));
@@ -159,9 +159,9 @@ public sealed class AdminTokenRefreshTests
         var actionRequests = handler.Requests.Where(request => request.Uri.Host.StartsWith("actions", StringComparison.Ordinal)).ToArray();
         Assert.Equal(2, discoveryCalls);
         Assert.Equal(2, actionRequests.Length);
-        Assert.Equal("actions1.example", actionRequests[0].Uri.Host);
+        Assert.Equal("actions1-fixture.actions.githubusercontent.com", actionRequests[0].Uri.Host);
         Assert.Equal("Bearer " + issuedTokens[0], actionRequests[0].Authorization);
-        Assert.Equal("actions2.example", actionRequests[1].Uri.Host);
+        Assert.Equal("actions2-fixture.actions.githubusercontent.com", actionRequests[1].Uri.Host);
         Assert.Equal("Bearer " + issuedTokens[1], actionRequests[1].Authorization);
     }
 
@@ -186,7 +186,7 @@ public sealed class AdminTokenRefreshTests
                 }
 
                 var token = TestResponses.CreateAdminToken(DateTimeOffset.UtcNow.AddMinutes(10));
-                return Task.FromResult(TestResponses.Json(HttpStatusCode.OK, $"{{\"url\":\"https://actions.example/tenant\",\"token\":\"{token}\"}}"));
+                return Task.FromResult(TestResponses.Json(HttpStatusCode.OK, $"{{\"url\":\"https://actions-fixture.actions.githubusercontent.com/tenant\",\"token\":\"{token}\"}}"));
             }
 
             return Task.FromResult(TestResponses.Json(HttpStatusCode.OK, "ok"));
@@ -235,8 +235,11 @@ public sealed class AdminTokenRefreshTests
                 discoveryBody = request.Content is null
                     ? string.Empty
                     : await request.Content.ReadAsStringAsync(cancellationToken);
+                string actionsHost = target.SourceUri.Host.EndsWith(".ghe.com", StringComparison.Ordinal)
+                    ? $"actions-fixture.actions.{target.SourceUri.Host}"
+                    : "actions-fixture.actions.githubusercontent.com";
                 var token = TestResponses.CreateAdminToken(DateTimeOffset.UtcNow.AddMinutes(10));
-                return TestResponses.Json(HttpStatusCode.OK, $"{{\"url\":\"https://actions.example/tenant\",\"token\":\"{token}\"}}");
+                return TestResponses.Json(HttpStatusCode.OK, $"{{\"url\":\"https://{actionsHost}/tenant\",\"token\":\"{token}\"}}");
             }
 
             return TestResponses.Json(HttpStatusCode.OK, "ok");

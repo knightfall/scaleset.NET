@@ -24,13 +24,96 @@ public sealed partial class DockerRunnerProvider : IRunnerProvider, IDisposable
 
     private const string ProductLabelValue = "scaleset.net";
     private const string ContainerSocketPath = "/var/run/docker.sock";
-    private const int MaximumJitConfigurationCharacters = 1024 * 1024;
+    private const int MaximumJitConfigurationBytes = 96 * 1024;
+    private const string JitBootstrapLabel = "io.scaleset.jit-bootstrap";
+    private const string JitMountPath = "/run/scaleset-jit";
+    private const string JitBootstrapVersion = "2";
+    private const int MaximumHandoffCentiseconds = 3000;
+    private const string HandoffClock = """
+        monotonic_now() {
+            IFS=' .' read -r seconds centiseconds _ < /proc/uptime || exit 125
+            now=$((seconds * 100 + 1$centiseconds - 100))
+        }
+        within_deadline() {
+            monotonic_now
+            [ "$now" -lt "$deadline" ]
+        }
+        """;
+    private const string BootstrapScript = HandoffClock + "\n" + """
+        umask 077
+        handoff=/run/scaleset-jit/handoff
+        monotonic_now
+        deadline=$((now + $1))
+        shift
+        mkdir "$handoff" || exit 125
+        offer="$handoff/offer"
+        clean_bootstrap() {
+            rm -f "$handoff/.payload" "$handoff/claimed" "$handoff/accepted" "$handoff/.deadline" "$handoff/deadline" || return 1
+            if [ -d "$offer" ]; then
+                rm -f "$offer/.incoming" "$offer/config" && rmdir "$offer" || return 1
+            fi
+            rmdir "$handoff"
+        }
+        trap 'clean_bootstrap' 0
+        trap 'exit 125' HUP INT TERM
+        printf '%s\n' "$deadline" > "$handoff/.deadline" &&
+            mv "$handoff/.deadline" "$handoff/deadline" || exit 125
+        while [ ! -f "$offer/config" ]; do
+            within_deadline || exit 125
+            sleep 0.1
+        done
+        within_deadline || exit 125
+        mv "$offer/config" "$handoff/.payload" || exit 125
+        {
+            IFS= read -r sender && IFS= read -r ACTIONS_RUNNER_INPUT_JITCONFIG
+        } < "$handoff/.payload" || exit 125
+        rm -f "$handoff/.payload" || exit 125
+        case "$sender" in ''|*[!0-9]*|0|1) exit 125 ;; esac
+        : > "$handoff/claimed" || exit 125
+        # The sender checks the deadline before accepting. Acceptance plus sender exit completes the handoff.
+        while [ ! -f "$handoff/accepted" ] || kill -0 "$sender" 2>/dev/null; do
+            within_deadline || exit 125
+            sleep 0.1
+        done
+        clean_bootstrap || exit 125
+        trap - 0 HUP INT TERM
+        export ACTIONS_RUNNER_INPUT_JITCONFIG
+        exec "$@"
+        """;
+    private const string JitHandoffScript = HandoffClock + "\n" + """
+        umask 077
+        handoff=/run/scaleset-jit/handoff
+        monotonic_now
+        deadline=$((now + $1))
+        while [ ! -f "$handoff/deadline" ]; do
+            within_deadline || exit 125
+            sleep 0.1
+        done
+        IFS= read -r bootstrap_deadline < "$handoff/deadline" || exit 125
+        case "$bootstrap_deadline" in ''|*[!0-9]*) exit 125 ;; esac
+        [ "$bootstrap_deadline" -ge "$deadline" ] || deadline=$bootstrap_deadline
+        within_deadline || exit 125
+        offer="$handoff/offer"
+        mkdir "$offer" || exit 125
+        trap 'rm -f "$offer/.incoming" "$offer/config"' 0
+        trap 'exit 125' HUP INT TERM
+        printf '%s\n%s\n' "$$" "$SCALESET_JIT_CONFIG" > "$offer/.incoming" &&
+            mv "$offer/.incoming" "$offer/config" || exit 125
+        while [ ! -f "$handoff/claimed" ]; do
+            within_deadline || exit 125
+            sleep 0.1
+        done
+        within_deadline || exit 125
+        : > "$handoff/accepted"
+        """;
     private const int MaximumContainerListBytes = 16 * 1024 * 1024;
     private readonly DockerProviderOptionsSnapshot _options;
     private readonly DockerRunnerProfileSnapshot _profile;
+    private readonly int _handoffCentiseconds;
     private readonly DockerEngineClient _engine;
+    private readonly TimeProvider _timeProvider;
     private readonly ILogger<DockerRunnerProvider>? _logger;
-    private bool _disposed;
+    private int _disposed;
 
     /// <summary>Creates a provider bound to a snapshot of one runner profile.</summary>
     /// <param name="runnerProfile">The immutable-at-construction runner execution profile.</param>
@@ -47,13 +130,27 @@ public sealed partial class DockerRunnerProvider : IRunnerProvider, IDisposable
     {
         _options = DockerProviderOptionsSnapshot.Capture(options, callerOwnsHttpClient: httpClient is not null);
         _profile = DockerRunnerProfileSnapshot.Capture(runnerProfile);
-        _engine = new DockerEngineClient(_options, httpClient, timeProvider ?? TimeProvider.System);
+        if (_profile.DockerBuildMode == DockerBuildMode.HostSocket && !_options.AllowHostSocket)
+        {
+            throw new ArgumentException("The HostSocket profile requires explicit AllowHostSocket opt-in.", nameof(options));
+        }
+
+        _handoffCentiseconds = (int)Math.Min(MaximumHandoffCentiseconds, Math.Ceiling(_options.RequestTimeout.TotalMilliseconds / 10));
+        _timeProvider = timeProvider ?? TimeProvider.System;
+        _engine = new DockerEngineClient(_options, httpClient, _timeProvider);
         _logger = logger;
+        if (_profile.DockerBuildMode == DockerBuildMode.HostSocket && logger is not null)
+        {
+            LogHostSocketEnabled(logger);
+        }
         Capabilities = new RunnerProviderCapabilities(
             "docker",
             ImmutableArray.Create(RunnerArchitecture.X64, RunnerArchitecture.Arm64),
             supportsOwnershipScopedDiscovery: true,
-            providesTerminalStateEvidence: true);
+            providesTerminalStateEvidence: true)
+        {
+            RequiresJitConfigurationAtStart = true,
+        };
     }
 
     /// <inheritdoc />
@@ -95,7 +192,7 @@ public sealed partial class DockerRunnerProvider : IRunnerProvider, IDisposable
         ImmutableArray<RunnerResource>.Builder resources = ImmutableArray.CreateBuilder<RunnerResource>();
         foreach (DockerContainerSummaryDto container in containers)
         {
-            IReadOnlyDictionary<string, string>? labels = container.Labels;
+            Dictionary<string, string>? labels = container.Labels;
             if (!HasScopeLabels(labels, scope))
             {
                 continue;
@@ -107,8 +204,17 @@ public sealed partial class DockerRunnerProvider : IRunnerProvider, IDisposable
                 throw ProviderFailure("list-containers", "invalid-owned-container-id");
             }
 
-            RunnerIdentity identity = CreateIdentityFromLabels(labels, scope)
-                ?? throw ProviderFailure("list-containers", "invalid-owned-container-labels");
+            RunnerIdentity? identity = CreateIdentityFromLabels(labels, scope);
+            if (identity is null)
+            {
+                if (_logger is not null)
+                {
+                    LogInvalidContainerLabels(_logger);
+                }
+
+                continue;
+            }
+
             RunnerResource? resource = await InspectResourceAsync(
                 containerId!,
                 identity,
@@ -127,12 +233,6 @@ public sealed partial class DockerRunnerProvider : IRunnerProvider, IDisposable
         ThrowIfDisposed();
         ArgumentNullException.ThrowIfNull(request);
         ValidateIdentity(request.Identity);
-        if (string.IsNullOrWhiteSpace(request.EncodedJitConfig)
-            || request.EncodedJitConfig.Length > MaximumJitConfigurationCharacters)
-        {
-            throw new ArgumentException("EncodedJitConfig must be nonempty and no larger than one mebibyte.", nameof(request));
-        }
-
         await _engine.EnsureCompatibleEngineAsync(cancellationToken).ConfigureAwait(false);
         string platform = GetPlatform(_profile.Architecture);
         if (string.Equals(_engine.ApiVersion, "1.40", StringComparison.Ordinal)
@@ -141,14 +241,14 @@ public sealed partial class DockerRunnerProvider : IRunnerProvider, IDisposable
             throw ProviderFailure("create-container", "api-version-cannot-enforce-platform");
         }
 
-        await EnsureImageAvailableAsync(platform, cancellationToken).ConfigureAwait(false);
+        DockerImageInspectResponse image = await EnsureImageAvailableAsync(platform, cancellationToken).ConfigureAwait(false);
         string containerName = CreateContainerName(request.Identity);
         string nameQuery = $"name={Uri.EscapeDataString(containerName)}";
         string platformQuery = string.Equals(_engine.ApiVersion, "1.40", StringComparison.Ordinal)
             ? string.Empty
             : $"&platform={Uri.EscapeDataString(platform)}";
         string path = $"v{_engine.ApiVersion}/containers/create?{nameQuery}{platformQuery}";
-        DockerContainerCreateBody body = CreateBody(request);
+        DockerContainerCreateBody body = CreateBody(request.Identity, image.Config?.Entrypoint ?? []);
         DockerApiResult<DockerContainerCreateResponse> result = await _engine.SendJsonAsync<DockerContainerCreateResponse>(
             HttpMethod.Post,
             path,
@@ -193,9 +293,14 @@ public sealed partial class DockerRunnerProvider : IRunnerProvider, IDisposable
 
     /// <inheritdoc />
     public async Task<RunnerResource> StartAsync(
-        RunnerResource resource,
-        CancellationToken cancellationToken = default)
+        RunnerResource resource, string? encodedJitConfig, CancellationToken cancellationToken = default)
     {
+        if (encodedJitConfig is not null && (string.IsNullOrWhiteSpace(encodedJitConfig) || encodedJitConfig.Any(char.IsControl)
+            || Encoding.UTF8.GetByteCount(encodedJitConfig) > MaximumJitConfigurationBytes))
+        {
+            throw new ArgumentException("JIT configuration must be nonempty, single-line, and at most 96 KiB.", nameof(encodedJitConfig));
+        }
+
         ThrowIfDisposed();
         ArgumentNullException.ThrowIfNull(resource);
         ValidateIdentity(resource.Identity);
@@ -205,7 +310,8 @@ public sealed partial class DockerRunnerProvider : IRunnerProvider, IDisposable
         RunnerResource? current = await InspectResourceAsync(
             resource.ProviderResourceId,
             resource.Identity,
-            cancellationToken).ConfigureAwait(false);
+            cancellationToken,
+            requireJitBootstrap: encodedJitConfig is not null).ConfigureAwait(false);
         if (current is null)
         {
             throw ProviderFailure("start-container", "resource-missing");
@@ -213,6 +319,11 @@ public sealed partial class DockerRunnerProvider : IRunnerProvider, IDisposable
 
         if (current.Status == RunnerResourceStatus.Running)
         {
+            if (encodedJitConfig is not null)
+            {
+                throw new DockerProviderException("start-container", "jit-handoff-unconfirmed", outcomeMayBeUnknown: true);
+            }
+
             return current;
         }
 
@@ -221,23 +332,70 @@ public sealed partial class DockerRunnerProvider : IRunnerProvider, IDisposable
             throw ProviderFailure("start-container", "resource-not-startable");
         }
 
+        if (encodedJitConfig is null)
+        {
+            throw ProviderFailure("start-container", "jit-handoff-required");
+        }
+
+        using var timeout = new CancellationTokenSource(TimeSpan.FromMilliseconds(_handoffCentiseconds * 10), _timeProvider);
+        using var budget = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeout.Token);
+        try
+        {
+            return await StartWithHandoffAsync(current, encodedJitConfig, budget.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (timeout.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
+        {
+            throw new DockerProviderException("start-container", "request-timeout", outcomeMayBeUnknown: true);
+        }
+    }
+
+    private async Task<RunnerResource> StartWithHandoffAsync(
+        RunnerResource current, string encodedJitConfig, CancellationToken cancellationToken)
+    {
         string path = $"v{_engine.ApiVersion}/containers/{Uri.EscapeDataString(current.ProviderResourceId)}/start";
-        _ = await _engine.SendJsonAsync<JsonElement>(
+        DockerApiResult<JsonElement> start = await _engine.SendJsonAsync<JsonElement>(
             HttpMethod.Post,
             path,
             "start-container",
             _options.RequestTimeout,
             [HttpStatusCode.NoContent, HttpStatusCode.NotModified],
             parseStatuses: [],
+            outcomeMayBeUnknown: true,
             cancellationToken: cancellationToken).ConfigureAwait(false);
+        if (start.StatusCode != HttpStatusCode.NoContent)
+        {
+            throw new DockerProviderException("start-container", "jit-handoff-unconfirmed", outcomeMayBeUnknown: true);
+        }
 
-        RunnerResource? started = await InspectResourceAsync(
-            current.ProviderResourceId,
-            current.Identity,
-            cancellationToken).ConfigureAwait(false);
+        await SendJitToBootstrapAsync(current.ProviderResourceId, encodedJitConfig, cancellationToken).ConfigureAwait(false);
+        RunnerResource? started;
+        try
+        {
+            started = await InspectResourceAsync(
+                current.ProviderResourceId,
+                current.Identity,
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (DockerProviderException exception) when (!exception.OutcomeMayBeUnknown)
+        {
+            throw new DockerProviderException(exception.Operation, exception.FailureCode, exception.StatusCode, outcomeMayBeUnknown: true);
+        }
+        catch (ArgumentException)
+        {
+            throw new DockerProviderException("start-container", "invalid-engine-response", outcomeMayBeUnknown: true);
+        }
+
         if (started is null)
         {
             throw new DockerProviderException("start-container", "resource-disappeared-after-start", outcomeMayBeUnknown: true);
+        }
+
+        bool running = started is { Status: RunnerResourceStatus.Running, StartedAt: not null };
+        bool terminal = started.Status is RunnerResourceStatus.Exited or RunnerResourceStatus.Dead
+            && started is { StartedAt: not null, FinishedAt: not null, ExitCode: not null };
+        if (!running && !terminal)
+        {
+            throw new DockerProviderException("start-container", "invalid-post-handoff-state", outcomeMayBeUnknown: true);
         }
 
         if (_logger is not null)
@@ -245,6 +403,55 @@ public sealed partial class DockerRunnerProvider : IRunnerProvider, IDisposable
             LogStartCompleted(_logger);
         }
         return started;
+    }
+
+    private async Task SendJitToBootstrapAsync(string containerId, string encodedJitConfig, CancellationToken cancellationToken)
+    {
+        string version = _engine.ApiVersion;
+        string execEndpoint = $"v{version}/exec";
+        var created = await _engine.SendJsonAsync<DockerContainerCreateResponse>(
+            HttpMethod.Post, $"v{version}/containers/{containerId}/exec", "jit-exec-create", _options.RequestTimeout,
+            [HttpStatusCode.Created], [HttpStatusCode.Created],
+            requestBody: new DockerExecCreateBody(["/bin/sh", "-c", JitHandoffScript, "scaleset-handoff", HandoffBudgetArgument], [$"SCALESET_JIT_CONFIG={encodedJitConfig}"]),
+            outcomeMayBeUnknown: true, cancellationToken: cancellationToken).ConfigureAwait(false);
+        if (!IsValidContainerId(created.Content?.Id))
+        {
+            throw new DockerProviderException("jit-exec-create", "invalid-engine-response", outcomeMayBeUnknown: true);
+        }
+
+        string execId = created.Content!.Id!;
+        _ = await _engine.SendJsonAsync<JsonElement>(
+            HttpMethod.Post, $"{execEndpoint}/{execId}/start", "jit-exec-start", _options.RequestTimeout,
+            [HttpStatusCode.OK], [], requestBody: new DockerExecStartBody(true), outcomeMayBeUnknown: true,
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+        while (true)
+        {
+            var inspected = await _engine.SendJsonAsync<DockerExecInspectResponse>(
+                HttpMethod.Get, $"{execEndpoint}/{execId}/json", "jit-exec-inspect", _options.RequestTimeout,
+                [HttpStatusCode.OK], [HttpStatusCode.OK], outcomeMayBeUnknown: true,
+                cancellationToken: cancellationToken).ConfigureAwait(false);
+            if (inspected.Content is not { } status || status.ContainerId != containerId || status.Running is null)
+            {
+                throw new DockerProviderException("jit-exec-inspect", "invalid-engine-response", outcomeMayBeUnknown: true);
+            }
+
+            if (!status.Running.Value)
+            {
+                if (status.ExitCode is null)
+                {
+                    throw new DockerProviderException("jit-exec-inspect", "invalid-engine-response", outcomeMayBeUnknown: true);
+                }
+
+                if (status.ExitCode != 0)
+                {
+                    throw new DockerProviderException("jit-exec-inspect", "jit-bootstrap-handoff-failed", outcomeMayBeUnknown: true);
+                }
+
+                return;
+            }
+
+            await Task.Delay(TimeSpan.FromMilliseconds(50), _timeProvider, cancellationToken).ConfigureAwait(false);
+        }
     }
 
     /// <inheritdoc />
@@ -287,7 +494,7 @@ public sealed partial class DockerRunnerProvider : IRunnerProvider, IDisposable
             throw ProviderFailure("remove-container", "resource-may-be-active");
         }
 
-        string forceQuery = force ? "?force=1" : string.Empty;
+        string forceQuery = force ? "?v=1&force=1" : "?v=1";
         string path = $"v{_engine.ApiVersion}/containers/{Uri.EscapeDataString(current.ProviderResourceId)}{forceQuery}";
         DockerApiResult<JsonElement> result = await _engine.SendJsonAsync<JsonElement>(
             HttpMethod.Delete,
@@ -307,16 +514,15 @@ public sealed partial class DockerRunnerProvider : IRunnerProvider, IDisposable
     /// <inheritdoc />
     public void Dispose()
     {
-        if (_disposed)
+        if (Interlocked.Exchange(ref _disposed, 1) != 0)
         {
             return;
         }
 
-        _disposed = true;
         _engine.Dispose();
     }
 
-    private async Task EnsureImageAvailableAsync(string platform, CancellationToken cancellationToken)
+    private async Task<DockerImageInspectResponse> EnsureImageAvailableAsync(string platform, CancellationToken cancellationToken)
     {
         string imagePath = $"v{_engine.ApiVersion}/images/{Uri.EscapeDataString(_profile.Image)}/json";
         DockerApiResult<DockerImageInspectResponse> image = await _engine.SendJsonAsync<DockerImageInspectResponse>(
@@ -327,19 +533,15 @@ public sealed partial class DockerRunnerProvider : IRunnerProvider, IDisposable
             [HttpStatusCode.OK, HttpStatusCode.NotFound],
             parseStatuses: [HttpStatusCode.OK],
             cancellationToken: cancellationToken).ConfigureAwait(false);
-        if (image.StatusCode == HttpStatusCode.OK)
+        if (image.StatusCode == HttpStatusCode.OK && MatchesImagePlatform(image.Content, platform))
         {
-            if (image.Content is null)
-            {
-                throw ProviderFailure("inspect-image", "invalid-engine-response");
-            }
-
-            return;
+            return image.Content!;
         }
 
         if (!_options.PullImageIfMissing)
         {
-            throw ProviderFailure("inspect-image", "pinned-image-not-available");
+            throw ProviderFailure("inspect-image", image.StatusCode == HttpStatusCode.OK
+                ? "pinned-image-platform-mismatch" : "pinned-image-not-available");
         }
 
         await _engine.PullImageAsync(_profile.Image, platform, _options, cancellationToken).ConfigureAwait(false);
@@ -351,16 +553,24 @@ public sealed partial class DockerRunnerProvider : IRunnerProvider, IDisposable
             [HttpStatusCode.OK, HttpStatusCode.NotFound],
             parseStatuses: [HttpStatusCode.OK],
             cancellationToken: cancellationToken).ConfigureAwait(false);
-        if (pulledImage.StatusCode != HttpStatusCode.OK || pulledImage.Content is null)
+        if (pulledImage.StatusCode != HttpStatusCode.OK || !MatchesImagePlatform(pulledImage.Content, platform))
         {
             throw ProviderFailure("inspect-image", "image-pull-not-confirmed");
         }
+
+        return pulledImage.Content!;
     }
+
+    private static bool MatchesImagePlatform(DockerImageInspectResponse? image, string platform) =>
+        image is not null
+        && string.Equals(image.Os, "linux", StringComparison.OrdinalIgnoreCase)
+        && string.Equals(MapDaemonArchitecture(image.Architecture), platform["linux/".Length..], StringComparison.Ordinal);
 
     private async Task<RunnerResource?> InspectResourceAsync(
         string providerResourceId,
         RunnerIdentity expectedIdentity,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool requireJitBootstrap = false)
     {
         string path = $"v{_engine.ApiVersion}/containers/{Uri.EscapeDataString(providerResourceId)}/json";
         DockerApiResult<DockerContainerInspectResponse> result = await _engine.SendJsonAsync<DockerContainerInspectResponse>(
@@ -378,19 +588,31 @@ public sealed partial class DockerRunnerProvider : IRunnerProvider, IDisposable
 
         DockerContainerInspectResponse inspected = result.Content
             ?? throw ProviderFailure("inspect-container", "invalid-engine-response");
-        IReadOnlyDictionary<string, string>? labels = inspected.Config?.Labels;
+        Dictionary<string, string>? labels = inspected.Config?.Labels;
         if (!TryMatchIdentityLabels(labels, expectedIdentity, out RunnerIdentity actualIdentity))
         {
             throw ProviderFailure("inspect-container", "resource-ownership-mismatch");
         }
 
-        string id = inspected.Id ?? providerResourceId;
-        if (!IsValidContainerId(id))
+        string? id = inspected.Id;
+        if (id is not { Length: 64 } || !IsValidContainerId(id))
         {
             throw ProviderFailure("inspect-container", "invalid-engine-response");
         }
 
-        return MapResource(id, actualIdentity, inspected.State, inspected.HostConfig);
+        if (IsValidContainerId(providerResourceId) && !id.StartsWith(providerResourceId, StringComparison.OrdinalIgnoreCase))
+        {
+            throw ProviderFailure("inspect-container", "resource-id-mismatch");
+        }
+
+        RunnerResource resource = MapResource(id, actualIdentity, inspected.State, inspected.HostConfig);
+        if (requireJitBootstrap && resource.Status == RunnerResourceStatus.Created
+            && (labels?.TryGetValue(JitBootstrapLabel, out string? bootstrap) != true || bootstrap != JitBootstrapVersion))
+        {
+            throw ProviderFailure("start-container", "jit-bootstrap-required");
+        }
+
+        return resource;
     }
 
     private static RunnerResource MapResource(
@@ -479,7 +701,7 @@ public sealed partial class DockerRunnerProvider : IRunnerProvider, IDisposable
         return labels;
     }
 
-    private static bool HasScopeLabels(IReadOnlyDictionary<string, string>? labels, RunnerOwnershipScope scope)
+    private static bool HasScopeLabels(Dictionary<string, string>? labels, RunnerOwnershipScope scope)
     {
         if (labels is null)
         {
@@ -498,7 +720,7 @@ public sealed partial class DockerRunnerProvider : IRunnerProvider, IDisposable
     }
 
     private static RunnerIdentity? CreateIdentityFromLabels(
-        IReadOnlyDictionary<string, string>? labels,
+        Dictionary<string, string>? labels,
         RunnerOwnershipScope expectedScope)
     {
         if (!HasScopeLabels(labels, expectedScope)
@@ -528,7 +750,7 @@ public sealed partial class DockerRunnerProvider : IRunnerProvider, IDisposable
     }
 
     private static bool TryMatchIdentityLabels(
-        IReadOnlyDictionary<string, string>? labels,
+        Dictionary<string, string>? labels,
         RunnerIdentity expected,
         out RunnerIdentity actual)
     {
@@ -591,31 +813,38 @@ public sealed partial class DockerRunnerProvider : IRunnerProvider, IDisposable
     private static void AppendHashField(StringBuilder builder, string value) =>
         builder.Append(value.Length.ToString(CultureInfo.InvariantCulture)).Append(':').Append(value);
 
-    private DockerContainerCreateBody CreateBody(RunnerCreateRequest request)
+    private DockerContainerCreateBody CreateBody(RunnerIdentity identity, ImmutableArray<string> entrypoint)
     {
-        Dictionary<string, string> labels = BuildIdentityLabels(request.Identity);
-        ImmutableArray<string> environment = ImmutableArray.Create(
-            $"ACTIONS_RUNNER_INPUT_JITCONFIG={request.EncodedJitConfig}");
+        Dictionary<string, string> labels = BuildIdentityLabels(identity);
+        labels.Add(JitBootstrapLabel, JitBootstrapVersion);
         ImmutableArray<string>? binds = _profile.DockerBuildMode == DockerBuildMode.HostSocket
             ? ImmutableArray.Create($"{_options.HostDockerSocketPath}:{ContainerSocketPath}")
             : null;
 
+        bool hardened = !_profile.Privileged && _options.HardenUnprivilegedContainers;
         DockerHostConfiguration hostConfiguration = new(
             _profile.NanoCpus,
             _profile.MemoryBytes,
             _profile.Privileged,
             false,
             binds,
-            _profile.Network);
+            _profile.Network,
+            hardened ? ["ALL"] : null,
+            hardened ? ["no-new-privileges:true"] : null,
+            !_profile.Privileged && _options.PidsLimit > 0 ? _options.PidsLimit : null,
+            hardened ? _profile.MemoryBytes : null,
+            new Dictionary<string, string>(StringComparer.Ordinal) { [JitMountPath] = "rw,nosuid,nodev,noexec,size=2m,mode=1777" });
         return new DockerContainerCreateBody(
             _profile.Image,
             _options.User,
-            _options.Command,
-            environment,
+            entrypoint.AddRange(_options.Command),
+            ["/bin/sh", "-c", BootstrapScript, "scaleset-init", HandoffBudgetArgument],
             labels,
             _options.WorkingDirectory,
             hostConfiguration);
     }
+
+    private string HandoffBudgetArgument => _handoffCentiseconds.ToString(CultureInfo.InvariantCulture);
 
     private static string GetPlatform(RunnerArchitecture architecture) => architecture switch
     {
@@ -678,11 +907,17 @@ public sealed partial class DockerRunnerProvider : IRunnerProvider, IDisposable
 
     private void ThrowIfDisposed()
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
     }
 
     private static DockerProviderException ProviderFailure(string operation, string failureCode) =>
         new(operation, failureCode);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Ignored a Docker container whose immutable labels do not identify a ScaleSet runner.")]
+    private static partial void LogInvalidContainerLabels(ILogger logger);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "The HostSocket runner profile gives jobs control of the host Docker daemon. Use this profile only for trusted jobs.")]
+    private static partial void LogHostSocketEnabled(ILogger logger);
 
     [LoggerMessage(Level = LogLevel.Debug, Message = "Docker runner container create reconciled an existing resource.")]
     private static partial void LogCreateReconciled(ILogger logger);
@@ -690,7 +925,7 @@ public sealed partial class DockerRunnerProvider : IRunnerProvider, IDisposable
     [LoggerMessage(Level = LogLevel.Debug, Message = "Docker runner container create completed.")]
     private static partial void LogCreateCompleted(ILogger logger);
 
-    [LoggerMessage(Level = LogLevel.Debug, Message = "Docker runner container start completed.")]
+    [LoggerMessage(Level = LogLevel.Debug, Message = "Docker runner container acknowledged the credential handoff.")]
     private static partial void LogStartCompleted(ILogger logger);
 
     [LoggerMessage(Level = LogLevel.Debug, Message = "Docker runner container remove completed with HTTP {StatusCode}.")]
@@ -702,7 +937,7 @@ public sealed partial class DockerRunnerProvider : IRunnerProvider, IDisposable
         [property: JsonPropertyName("Image")] string Image,
         [property: JsonPropertyName("User")] string User,
         [property: JsonPropertyName("Cmd")] ImmutableArray<string> Command,
-        [property: JsonPropertyName("Env")] ImmutableArray<string> Environment,
+        [property: JsonPropertyName("Entrypoint")] ImmutableArray<string> Entrypoint,
         [property: JsonPropertyName("Labels")] Dictionary<string, string> Labels,
         [property: JsonPropertyName("WorkingDir")] string? WorkingDirectory,
         [property: JsonPropertyName("HostConfig")] DockerHostConfiguration HostConfig);
@@ -713,7 +948,30 @@ public sealed partial class DockerRunnerProvider : IRunnerProvider, IDisposable
         [property: JsonPropertyName("Privileged")] bool Privileged,
         [property: JsonPropertyName("AutoRemove")] bool AutoRemove,
         [property: JsonPropertyName("Binds")] ImmutableArray<string>? Binds,
-        [property: JsonPropertyName("NetworkMode")] string? NetworkMode);
+        [property: JsonPropertyName("NetworkMode")] string? NetworkMode,
+        [property: JsonPropertyName("CapDrop")] ImmutableArray<string>? CapDrop,
+        [property: JsonPropertyName("SecurityOpt")] ImmutableArray<string>? SecurityOpt,
+        [property: JsonPropertyName("PidsLimit")] long? PidsLimit,
+        [property: JsonPropertyName("MemorySwap")] long? MemorySwap,
+        [property: JsonPropertyName("Tmpfs")] Dictionary<string, string> Tmpfs);
+
+    private sealed record DockerExecCreateBody(
+        [property: JsonPropertyName("Cmd")] ImmutableArray<string> Command,
+        [property: JsonPropertyName("Env")] ImmutableArray<string> Environment);
+
+    private sealed record DockerExecStartBody([property: JsonPropertyName("Detach")] bool Detach);
+
+    private sealed class DockerExecInspectResponse
+    {
+        [JsonPropertyName("ContainerID")]
+        public string? ContainerId { get; init; }
+
+        [JsonPropertyName("Running")]
+        public bool? Running { get; init; }
+
+        [JsonPropertyName("ExitCode")]
+        public int? ExitCode { get; init; }
+    }
 
     private sealed class DockerContainerCreateResponse
     {
@@ -723,8 +981,20 @@ public sealed partial class DockerRunnerProvider : IRunnerProvider, IDisposable
 
     private sealed class DockerImageInspectResponse
     {
-        [JsonPropertyName("Id")]
-        public string? Id { get; init; }
+        [JsonPropertyName("Os")]
+        public string? Os { get; init; }
+
+        [JsonPropertyName("Architecture")]
+        public string? Architecture { get; init; }
+
+        [JsonPropertyName("Config")]
+        public DockerImageConfigDto? Config { get; init; }
+    }
+
+    private sealed class DockerImageConfigDto
+    {
+        [JsonPropertyName("Entrypoint")]
+        public ImmutableArray<string>? Entrypoint { get; init; }
     }
 
     private sealed class DockerContainerSummaryDto

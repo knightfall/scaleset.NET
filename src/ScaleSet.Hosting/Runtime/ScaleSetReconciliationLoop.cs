@@ -36,7 +36,14 @@ internal sealed partial class ScaleSetReconciliationLoop(
         }
 
         await lifetime.CancelAsync().ConfigureAwait(false);
-        await Task.WhenAll(listener, reconciliation).ConfigureAwait(false);
+        try
+        {
+            await Task.WhenAll(listener, reconciliation).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (completed.IsCompletedSuccessfully && !cancellationToken.IsCancellationRequested)
+        {
+            // A clean child exit is reported by the supervisor. Its sibling was canceled above.
+        }
     }
 
     private async Task ReconcilePeriodicallyAsync(

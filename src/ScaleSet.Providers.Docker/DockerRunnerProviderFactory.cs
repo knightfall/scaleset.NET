@@ -6,10 +6,33 @@ using ScaleSet.Hosting.Providers;
 namespace ScaleSet.Providers.Docker;
 
 /// <summary>Registers Docker runner settings and creates a provider for an individual scale set.</summary>
-/// <param name="loggerFactory">Optional factory for the provider logger.</param>
-/// <param name="timeProvider">Optional clock for provider requests.</param>
-public sealed class DockerRunnerProviderFactory(ILoggerFactory? loggerFactory = null, TimeProvider? timeProvider = null) : IRunnerProviderFactory
+public sealed class DockerRunnerProviderFactory : IRunnerProviderFactory
 {
+    private readonly DockerProviderOptions _options;
+    private readonly ILoggerFactory? _loggerFactory;
+    private readonly TimeProvider? _timeProvider;
+
+    /// <summary>Creates a Docker provider factory with the default provider settings.</summary>
+    /// <param name="loggerFactory">Optional factory for the provider logger.</param>
+    /// <param name="timeProvider">Optional clock for provider requests.</param>
+    public DockerRunnerProviderFactory(ILoggerFactory? loggerFactory = null, TimeProvider? timeProvider = null)
+        : this(new DockerProviderOptions(), loggerFactory, timeProvider)
+    {
+    }
+
+    /// <summary>Creates a factory that applies the configured Docker provider settings.</summary>
+    /// <param name="options">Settings shared by Docker providers from this factory.</param>
+    /// <param name="loggerFactory">Optional factory for the provider logger.</param>
+    /// <param name="timeProvider">Optional clock for provider requests.</param>
+    public DockerRunnerProviderFactory(DockerProviderOptions options, ILoggerFactory? loggerFactory = null, TimeProvider? timeProvider = null)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+        _ = DockerProviderOptionsSnapshot.Capture(options, callerOwnsHttpClient: false);
+        _options = options;
+        _loggerFactory = loggerFactory;
+        _timeProvider = timeProvider;
+    }
+
     /// <inheritdoc />
     public string Name => "Docker";
 
@@ -40,6 +63,11 @@ public sealed class DockerRunnerProviderFactory(ILoggerFactory? loggerFactory = 
             errors.Add($"{path}.Privileged must be true for DockerInDocker.");
         }
 
+        if (profile.DockerBuildMode == DockerBuildMode.HostSocket && !_options.AllowHostSocket)
+        {
+            errors.Add($"{path}.DockerBuildMode requires Providers:Docker:AllowHostSocket=true.");
+        }
+
         if (profile.Network is not null && string.IsNullOrWhiteSpace(profile.Network))
         {
             errors.Add($"{path}.Network must not be empty when configured.");
@@ -54,8 +82,9 @@ public sealed class DockerRunnerProviderFactory(ILoggerFactory? loggerFactory = 
         ArgumentNullException.ThrowIfNull(scaleSet);
         return new DockerRunnerProvider(
             scaleSet.RunnerProfile,
-            logger: loggerFactory?.CreateLogger<DockerRunnerProvider>(),
-            timeProvider: timeProvider);
+            options: _options,
+            logger: _loggerFactory?.CreateLogger<DockerRunnerProvider>(),
+            timeProvider: _timeProvider);
     }
 
     /// <inheritdoc />

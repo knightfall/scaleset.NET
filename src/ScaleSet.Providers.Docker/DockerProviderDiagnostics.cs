@@ -86,6 +86,9 @@ internal static class DockerProviderDiagnostics
         "inspect-container" => "inspect-container",
         "create-container" => "create-container",
         "start-container" => "start-container",
+        "jit-exec-create" => "jit-exec-create",
+        "jit-exec-start" => "jit-exec-start",
+        "jit-exec-inspect" => "jit-exec-inspect",
         "remove-container" => "remove-container",
         _ => "other",
     };

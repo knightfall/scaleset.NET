@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using ScaleSet.Client;
+using ScaleSet.Client.Tests.Transport;
 using Xunit;
 
 namespace ScaleSet.Client.Tests.Authentication;
@@ -94,6 +95,219 @@ public sealed class GitHubAppSigningTests
             request => request.Uri.AbsolutePath == "/app/installations/73/access_tokens");
         Assert.Equal($"Bearer {appJwt}", installationRequest.Authorization);
         Assert.Equal(HttpMethod.Post, installationRequest.Method);
+    }
+
+    [Fact]
+    public async Task IdleReadinessCoalescesInstallationRefreshAndInvalidatesOnlyTheRejectedToken()
+    {
+        var token = TestContext.Current.CancellationToken;
+        var clock = new ManualTimeProvider(new DateTimeOffset(2026, 11, 1, 0, 0, 0, TimeSpan.Zero));
+        TaskCompletionSource refreshStarted = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        TaskCompletionSource completeRefresh = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        int installations = 0;
+        bool rejectCurrent = false;
+        using var wire = TestResponses.CreateConnectedHandler(clock.GetUtcNow().AddHours(2), async (request, cancellationToken) =>
+        {
+            string path = request.RequestUri!.AbsolutePath;
+            if (path.EndsWith("/access_tokens", StringComparison.Ordinal))
+            {
+                int issued = Interlocked.Increment(ref installations);
+                if (issued == 2)
+                {
+                    refreshStarted.SetResult();
+                    await completeRefresh.Task.WaitAsync(cancellationToken);
+                }
+
+                string expiry = clock.GetUtcNow().AddHours(1).ToString("O");
+                return TestResponses.Json(HttpStatusCode.Created, $$"""{"token":"installation-{{issued}}","expires_at":"{{expiry}}"}""");
+            }
+
+            if (path.EndsWith("/agents/31", StringComparison.Ordinal))
+            {
+                return TestResponses.Json(HttpStatusCode.OK, """{"id":31,"name":"runner-31","runnerScaleSetId":7}""");
+            }
+
+            Assert.EndsWith("/actions/runners/31", path, StringComparison.Ordinal);
+            return rejectCurrent
+                ? TestResponses.Json(HttpStatusCode.Unauthorized, "{}")
+                : TestResponses.Json(HttpStatusCode.OK, """{"id":31,"name":"runner-31","status":"online","busy":false}""");
+        });
+        using var http = new HttpClient(wire);
+        using var client = new ScaleSetClient(GitHubTarget.Parse("https://github.com/example-org/example-repo"),
+            ScaleSetCredentials.FromGitHubApp("app", 42, new RecordingJwtProvider("synthetic-jwt")), httpClient: http, timeProvider: clock);
+
+        Task<bool> CheckIdleAsync() => client.IsRunnerIdleAsync(7, 31, "runner-31", token);
+        Assert.True(await CheckIdleAsync());
+        Assert.Equal(1, installations);
+        clock.Advance(TimeSpan.FromMinutes(59) + TimeSpan.FromSeconds(30));
+        Task<bool> first = CheckIdleAsync();
+        await refreshStarted.Task.WaitAsync(TimeSpan.FromSeconds(5), token);
+        Task<bool> second = CheckIdleAsync();
+        completeRefresh.SetResult();
+        Assert.All(await Task.WhenAll(first, second), result => Assert.True(result));
+        Assert.Equal(2, installations);
+
+        rejectCurrent = true;
+        using (ScaleSetRequestRetry.Configure(options => options with { MaxRetries = 0 }))
+        {
+            var rejected = await Assert.ThrowsAsync<ScaleSetApiException>(() => CheckIdleAsync());
+            Assert.Equal((int)HttpStatusCode.Unauthorized, rejected.StatusCode);
+        }
+        Assert.Equal(2, installations);
+        rejectCurrent = false;
+        Assert.True(await CheckIdleAsync());
+        Assert.Equal(3, installations);
+        Assert.Equal(["Bearer installation-1", "Bearer installation-2", "Bearer installation-2", "Bearer installation-2", "Bearer installation-3"],
+            wire.Requests.Where(request => request.Uri.AbsolutePath.EndsWith("/actions/runners/31", StringComparison.Ordinal))
+                .Select(request => request.Authorization));
+    }
+
+    [Fact]
+    public async Task ConcurrentUnauthorizedReadinessRequestsShareOneFreshInstallationCredential()
+    {
+        var token = TestContext.Current.CancellationToken;
+        var now = new DateTimeOffset(2026, 11, 1, 0, 0, 0, TimeSpan.Zero);
+        int installations = 0;
+        int rejected = 0;
+        var bothRejected = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var handler = TestResponses.CreateConnectedHandler(now.AddHours(2), async (request, caller) =>
+        {
+            string path = request.RequestUri!.AbsolutePath;
+            if (path.EndsWith("/access_tokens", StringComparison.Ordinal))
+            {
+                int issued = Interlocked.Increment(ref installations);
+                return TestResponses.Json(HttpStatusCode.Created,
+                    $$"""{"token":"installation-{{issued}}","expires_at":"2026-11-01T01:00:00Z"}""");
+            }
+
+            if (path.EndsWith("/agents/31", StringComparison.Ordinal))
+            {
+                return TestResponses.Json(HttpStatusCode.OK, """{"id":31,"name":"runner-31","runnerScaleSetId":7}""");
+            }
+
+            if (!path.EndsWith("/actions/runners/31", StringComparison.Ordinal))
+            {
+                return TestResponses.Json(HttpStatusCode.OK, "null");
+            }
+
+            if (request.Headers.Authorization?.Parameter == "installation-1")
+            {
+                if (Interlocked.Increment(ref rejected) == 2)
+                {
+                    bothRejected.SetResult();
+                }
+
+                await bothRejected.Task.WaitAsync(TimeSpan.FromSeconds(5), caller);
+                return TestResponses.Json(HttpStatusCode.Unauthorized, "{}");
+            }
+
+            Assert.Equal("installation-2", request.Headers.Authorization?.Parameter);
+            return TestResponses.Json(HttpStatusCode.OK, """{"id":31,"name":"runner-31","status":"online","busy":false}""");
+        });
+        using var http = new HttpClient(handler);
+        var options = new ScaleSetClientOptions { Retry = new ScaleSetRetryOptions { WaitMin = TimeSpan.Zero, WaitMax = TimeSpan.Zero, MaxRetries = 1 } };
+        using var client = new ScaleSetClient(GitHubTarget.Parse("https://github.com/example-org/example-repo"),
+            ScaleSetCredentials.FromGitHubApp("app", 42, new RecordingJwtProvider("synthetic-jwt")), options, http,
+            timeProvider: new FixedTimeProvider(now));
+
+        Assert.Null(await client.GetScaleSetAsync(7, token));
+        bool[] results = await Task.WhenAll(client.IsRunnerIdleAsync(7, 31, "runner-31", token),
+            client.IsRunnerIdleAsync(7, 31, "runner-31", token));
+
+        Assert.All(results, result => Assert.True(result));
+        Assert.Equal(2, installations);
+        var attempts = handler.Requests.Where(call => call.Uri.AbsolutePath.EndsWith("/actions/runners/31", StringComparison.Ordinal)).ToArray();
+        Assert.Equal(4, attempts.Length);
+        Assert.Equal(2, attempts.Count(call => call.Authorization == "Bearer installation-2"));
+    }
+
+    [Theory]
+    [InlineData("refresh", 2, 2)]
+    [InlineData("twice", 2, 2)]
+    [InlineData("disabled", 1, 1)]
+    [InlineData("guarded", 1, 1)]
+    [InlineData("predicate", 1, 1)]
+    [InlineData("pat", 0, 1)]
+    [InlineData("cancel", 1, 1)]
+    [InlineData("expired", 1, 1)]
+    public async Task RegistrationTokenPostRetriesOnlyOneExplicitlyRejectedAppCredential(
+        string outcome, int expectedMints, int expectedRegistrationPosts)
+    {
+        var token = TestContext.Current.CancellationToken;
+        var now = new DateTimeOffset(2026, 11, 1, 0, 0, 0, TimeSpan.Zero);
+        var clock = new ManualTimeProvider(now);
+        using var request = CancellationTokenSource.CreateLinkedTokenSource(token);
+        int installations = 0;
+        int registrations = 0;
+        using var handler = new RecordingHttpMessageHandler((message, _) =>
+        {
+            string path = message.RequestUri!.AbsolutePath;
+            if (path.EndsWith("/access_tokens", StringComparison.Ordinal))
+            {
+                int minted = ++installations;
+                return Task.FromResult(TestResponses.Json(HttpStatusCode.Created,
+                    $$"""{"token":"installation-{{minted}}","expires_at":"2026-11-01T01:00:00Z"}"""));
+            }
+
+            if (path.EndsWith("/registration-token", StringComparison.Ordinal))
+            {
+                int sent = ++registrations;
+                Assert.Equal(outcome == "pat" ? "pat" : $"installation-{sent}", message.Headers.Authorization?.Parameter);
+                if (outcome == "refresh" && sent == 2)
+                {
+                    return Task.FromResult(TestResponses.Json(HttpStatusCode.Created, """{"token":"registration"}"""));
+                }
+
+                if (outcome == "expired")
+                {
+                    clock.Advance(TimeSpan.FromMinutes(2));
+                }
+                else if (outcome == "cancel")
+                {
+                    request.Cancel();
+                }
+
+                return Task.FromResult(TestResponses.Json(HttpStatusCode.Unauthorized, "{}"));
+            }
+
+            return Task.FromResult(path == "/actions/runner-registration"
+                ? TestResponses.Json(HttpStatusCode.OK,
+                    $$"""{"url":"https://actions-fixture.actions.githubusercontent.com","token":"{{TestResponses.CreateAdminToken(now.AddHours(2))}}"}""")
+                : TestResponses.Json(HttpStatusCode.OK, "null"));
+        });
+
+        var retry = new ScaleSetRetryOptions
+        {
+            MaxRetries = outcome == "disabled" ? 0 : 5,
+            WaitMin = TimeSpan.Zero,
+            WaitMax = TimeSpan.Zero,
+            Deadline = outcome == "expired" ? now.AddMinutes(1) : null,
+            ShouldRetry = outcome == "predicate" ? static (_, _) => ValueTask.FromResult(false) : null,
+        };
+        using var http = new HttpClient(handler);
+        var signer = new RecordingJwtProvider("synthetic-jwt");
+        using var client = new ScaleSetClient(GitHubTarget.Parse("https://github.com/example-org/example-repo"),
+            outcome == "pat" ? ScaleSetCredentials.FromPersonalAccessToken("pat") : ScaleSetCredentials.FromGitHubApp("app", 42, signer),
+            new ScaleSetClientOptions { Retry = retry }, http, timeProvider: clock);
+
+        using var mutationGuard = outcome == "guarded" ? ScaleSetRequestRetry.SuppressMutationReplay() : null;
+        var result = client.GetScaleSetAsync(7, request.Token);
+        if (outcome == "refresh")
+        {
+            Assert.Null(await result);
+        }
+        else if (outcome == "cancel")
+        {
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => result);
+        }
+        else
+        {
+            Assert.Equal(401, (await Assert.ThrowsAsync<ScaleSetApiException>(() => result)).StatusCode);
+        }
+
+        Assert.Equal(expectedMints, installations);
+        Assert.Equal(expectedMints, signer.Calls.Count);
+        Assert.Equal(expectedRegistrationPosts, registrations);
     }
 
     [Fact]
@@ -210,7 +424,7 @@ public sealed class GitHubAppSigningTests
 
     private sealed class RecordingHandler : HttpMessageHandler
     {
-        private const string ActionsServiceHost = "actions.example.test";
+        private const string ActionsServiceHost = "actions-fixture.actions.githubusercontent.com";
         private const string DiscoveryJwt = "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJleHAiOjQxMDI0NDQ4MDB9.";
         private readonly List<RecordedRequest> _requests = [];
 
@@ -274,13 +488,11 @@ public sealed class GitHubAppSigningTests
 
     private sealed class RecordingJwtProvider(string token) : IGitHubAppJwtProvider
     {
-        private readonly List<SignerCall> _calls = [];
-
-        public IReadOnlyList<SignerCall> Calls => _calls;
+        public List<SignerCall> Calls { get; } = [];
 
         public ValueTask<string> CreateJwtAsync(string clientId, DateTimeOffset now, CancellationToken cancellationToken)
         {
-            _calls.Add(new SignerCall(clientId, now, cancellationToken));
+            Calls.Add(new SignerCall(clientId, now, cancellationToken));
             return ValueTask.FromResult(token);
         }
     }

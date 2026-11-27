@@ -1,5 +1,6 @@
 using Microsoft.Extensions.Logging;
 using ScaleSet.Client;
+using ScaleSet.Hosting.Providers;
 
 namespace ScaleSet.Hosting.Runtime;
 
@@ -31,8 +32,22 @@ public interface IScaleSetRuntimeClient : IDisposable
     Task<IMessageSession> CreateMessageSessionAsync(long scaleSetId, string ownerName, CancellationToken cancellationToken);
 }
 
+/// <summary>Optional target-scoped lookup used to reconcile JIT requests with an unknown outcome.</summary>
+public interface IScaleSetRunnerNameLookup
+{
+    /// <summary>Looks up the exact runner name. Null represents an authoritative empty result.</summary>
+    Task<RunnerReference?> FindRunnerByNameAsync(string name, CancellationToken cancellationToken);
+}
+
+/// <summary>Optional point-in-time evidence for leaving an exact warm runner available during controller shutdown.</summary>
+public interface IScaleSetRunnerIdleLookup
+{
+    /// <summary>Checks the exact runner's scale-set membership and idle status.</summary>
+    Task<bool> IsRunnerIdleAsync(RunnerIdentity identity, CancellationToken cancellationToken);
+}
+
 /// <summary>Creates a production ScaleSet client adapter for runtime control-plane calls.</summary>
-public sealed class ScaleSetRuntimeClientAdapter : IScaleSetRuntimeClient
+public sealed class ScaleSetRuntimeClientAdapter : IScaleSetRuntimeClient, IScaleSetRunnerNameLookup, IScaleSetRunnerIdleLookup
 {
     private readonly ScaleSetClient _client;
 
@@ -60,6 +75,31 @@ public sealed class ScaleSetRuntimeClientAdapter : IScaleSetRuntimeClient
         _client.GetRunnerAsync(runnerId, cancellationToken);
 
     /// <inheritdoc />
+    public Task<RunnerReference?> FindRunnerByNameAsync(string name, CancellationToken cancellationToken) =>
+        _client.FindRunnerByNameAsync(name, cancellationToken);
+
+    /// <inheritdoc />
+    public async Task<bool> IsRunnerIdleAsync(RunnerIdentity identity, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(identity);
+        if (identity.GitHubRunnerId is not long runnerId)
+        {
+            return false;
+        }
+
+        try
+        {
+            return await _client.IsRunnerIdleAsync(identity.Scope.ScaleSetId, runnerId, identity.RunnerName, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (ScaleSetApiException)
+        {
+            // Authorization, throttling and missing data leave the runner protected.
+            return false;
+        }
+    }
+
+    /// <inheritdoc />
     public Task RemoveRunnerAsync(long runnerId, CancellationToken cancellationToken) =>
         _client.RemoveRunnerAsync(runnerId, cancellationToken);
 
@@ -68,7 +108,14 @@ public sealed class ScaleSetRuntimeClientAdapter : IScaleSetRuntimeClient
         long scaleSetId,
         RunnerScaleSetJitRunnerSetting runnerSetting,
         CancellationToken cancellationToken) =>
-        await _client.GenerateJitConfigAsync(scaleSetId, runnerSetting, cancellationToken).ConfigureAwait(false);
+        await GenerateJitConfigAsync(scaleSetId, runnerSetting, onDispatch: null, cancellationToken).ConfigureAwait(false);
+
+    internal async Task<RunnerScaleSetJitRunnerConfig?> GenerateJitConfigAsync(
+        long scaleSetId, RunnerScaleSetJitRunnerSetting setting, Action? onDispatch, CancellationToken cancellationToken)
+    {
+        using var retry = ScaleSetRequestRetry.SuppressMutationReplay();
+        return await _client.GenerateJitConfigAsync(scaleSetId, setting, onDispatch, cancellationToken).ConfigureAwait(false);
+    }
 
     /// <inheritdoc />
     public async Task<IMessageSession> CreateMessageSessionAsync(

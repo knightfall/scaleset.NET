@@ -34,6 +34,15 @@ public sealed class DockerProviderOptions
     /// <summary>Gets the maximum bytes accepted for one image-pull progress record.</summary>
     public int MaximumPullLineBytes { get; init; } = 64 * 1024;
 
+    /// <summary>Explicitly allows profiles that give jobs access to the host's Docker daemon.</summary>
+    public bool AllowHostSocket { get; init; }
+
+    /// <summary>Gets whether unprivileged runners drop capabilities, disallow gaining privileges, and disable swap.</summary>
+    public bool HardenUnprivilegedContainers { get; init; } = true;
+
+    /// <summary>Gets the unprivileged runner process limit. Zero uses the daemon's default.</summary>
+    public long PidsLimit { get; init; } = 1024;
+
     /// <summary>Gets the container user used to run the runner process.</summary>
     public string User { get; init; } = "runner";
 

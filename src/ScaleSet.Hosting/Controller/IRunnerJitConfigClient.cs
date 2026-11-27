@@ -16,8 +16,14 @@ public interface IRunnerJitConfigClient
         CancellationToken cancellationToken = default);
 }
 
+internal interface ITrackedRunnerJitConfigClient : IRunnerJitConfigClient
+{
+    Task<RunnerScaleSetJitRunnerConfig?> GenerateTrackedJitConfigAsync(
+        long scaleSetId, RunnerScaleSetJitRunnerSetting setting, Action onDispatch, CancellationToken cancellationToken);
+}
+
 /// <summary>Adapts the reusable ScaleSet client to the hosting provisioning seam.</summary>
-public sealed class ScaleSetRunnerJitConfigClient : IRunnerJitConfigClient
+public sealed class ScaleSetRunnerJitConfigClient : ITrackedRunnerJitConfigClient
 {
     private readonly ScaleSetClient _client;
 
@@ -33,6 +39,19 @@ public sealed class ScaleSetRunnerJitConfigClient : IRunnerJitConfigClient
     public async Task<RunnerScaleSetJitRunnerConfig?> GenerateJitConfigAsync(
         long scaleSetId,
         RunnerScaleSetJitRunnerSetting runnerSetting,
-        CancellationToken cancellationToken = default) =>
-        await _client.GenerateJitConfigAsync(scaleSetId, runnerSetting, cancellationToken).ConfigureAwait(false);
+        CancellationToken cancellationToken = default)
+    {
+        return await GenerateCoreAsync(scaleSetId, runnerSetting, null, cancellationToken).ConfigureAwait(false);
+    }
+
+    async Task<RunnerScaleSetJitRunnerConfig?> ITrackedRunnerJitConfigClient.GenerateTrackedJitConfigAsync(
+        long scaleSetId, RunnerScaleSetJitRunnerSetting setting, Action onDispatch, CancellationToken cancellationToken) =>
+        await GenerateCoreAsync(scaleSetId, setting, onDispatch, cancellationToken).ConfigureAwait(false);
+
+    private async Task<RunnerScaleSetJitRunnerConfig?> GenerateCoreAsync(
+        long scaleSetId, RunnerScaleSetJitRunnerSetting setting, Action? onDispatch, CancellationToken cancellationToken)
+    {
+        using var retry = ScaleSetRequestRetry.SuppressMutationReplay();
+        return await _client.GenerateJitConfigAsync(scaleSetId, setting, onDispatch, cancellationToken).ConfigureAwait(false);
+    }
 }

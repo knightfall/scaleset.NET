@@ -246,10 +246,9 @@ public sealed class AutoscalerTelemetryConfiguration
         var traceHeaders = traceHeaderText is null ? baseHeaders : ParseHeaders(traceHeaderText, "Telemetry:Otlp:Traces:Headers");
         var metricHeaders = metricHeaderText is null ? baseHeaders : ParseHeaders(metricHeaderText, "Telemetry:Otlp:Metrics:Headers");
 
-        var sensitiveValues = baseHeaders.Values
-            .Concat(logHeaders.Values)
-            .Concat(traceHeaders.Values)
-            .Concat(metricHeaders.Values)
+        var sensitiveValues = baseHeaders.Concat(logHeaders).Concat(traceHeaders).Concat(metricHeaders)
+            .Where(static header => SecretRedactor.IsSensitiveName(header.Key))
+            .Select(static header => header.Value)
             .Concat(ReadSensitiveConfigurationValues(configuration));
         var redactor = new SecretRedactor(sensitiveValues);
         var resource = TelemetryResourceIdentity.Create(configuration, redactor, serviceVersion, serviceInstanceId);

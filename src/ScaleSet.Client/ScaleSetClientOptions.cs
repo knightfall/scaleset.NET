@@ -59,6 +59,13 @@ public sealed record ScaleSetClientOptions
     /// </summary>
     public ScaleSetRetryOptions? Retry { get; init; }
 
+    /// <summary>Optional additional trust policy for discovered Actions service and queue HTTPS endpoints.</summary>
+    /// <remarks>
+    /// All transports require GitHub Actions DNS origins on port 443. For GHE.com targets, only the
+    /// configured tenant's Actions subdomains are eligible. Use this policy to further restrict eligible origins.
+    /// </remarks>
+    public Func<Uri, bool>? IsTrustedDiscoveredEndpoint { get; init; }
+
     internal void Validate()
     {
         if (ControlRequestTimeout <= TimeSpan.Zero || ControlRequestTimeout > MaximumTimerDuration)

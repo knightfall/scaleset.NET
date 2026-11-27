@@ -138,13 +138,16 @@ public sealed record RunnerResource
     public CapacityResourceQuantities? CapacityResources { get; }
 }
 
-/// <summary>Creates one runner resource using short-lived JIT configuration.</summary>
+/// <summary>Creates one runner resource, optionally supplying JIT configuration during creation.</summary>
 public sealed record RunnerCreateRequest
 {
-    public RunnerCreateRequest(RunnerIdentity identity, string encodedJitConfig)
+    public RunnerCreateRequest(RunnerIdentity identity, string? encodedJitConfig = null)
     {
         ArgumentNullException.ThrowIfNull(identity);
-        ArgumentException.ThrowIfNullOrWhiteSpace(encodedJitConfig);
+        if (encodedJitConfig is not null)
+        {
+            ArgumentException.ThrowIfNullOrWhiteSpace(encodedJitConfig);
+        }
 
         Identity = identity;
         EncodedJitConfig = encodedJitConfig;
@@ -153,7 +156,7 @@ public sealed record RunnerCreateRequest
     public RunnerIdentity Identity { get; }
 
     [JsonIgnore]
-    public string EncodedJitConfig { get; }
+    public string? EncodedJitConfig { get; }
 
     public override string ToString() =>
         $"{nameof(RunnerCreateRequest)} {{ Identity = {Identity}, EncodedJitConfig = <redacted> }}";
@@ -198,6 +201,9 @@ public sealed record RunnerProviderCapabilities
     public bool SupportsOwnershipScopedDiscovery { get; }
 
     public bool ProvidesTerminalStateEvidence { get; }
+
+    /// <summary>Whether JIT configuration must be delivered on first start instead of during creation.</summary>
+    public bool RequiresJitConfigurationAtStart { get; init; }
 }
 
 /// <summary>Manages runner resources for one immutable provider profile.</summary>
@@ -213,8 +219,11 @@ public interface IRunnerProvider
         RunnerCreateRequest request,
         CancellationToken cancellationToken = default);
 
+    /// <summary>Starts the exact resource, with the original JIT configuration if the provider requires it at start.</summary>
+    /// <remarks>A provider that receives credentials here must never replay the handoff during recovery.</remarks>
     Task<RunnerResource> StartAsync(
         RunnerResource resource,
+        string? encodedJitConfig,
         CancellationToken cancellationToken = default);
 
     Task<RunnerResource?> InspectAsync(

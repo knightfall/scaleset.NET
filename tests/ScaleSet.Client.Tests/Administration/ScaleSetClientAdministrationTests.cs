@@ -2,6 +2,7 @@ using System.Net;
 using System.Text;
 using System.Text.Json;
 using ScaleSet.Client;
+using ScaleSet.Client.Tests.Transport;
 using Xunit;
 
 namespace ScaleSet.Client.Tests.Administration;
@@ -161,7 +162,7 @@ public sealed class ScaleSetClientAdministrationTests
 
         Assert.Equal((int)HttpStatusCode.OK, exception.StatusCode);
         Assert.Equal("GET", exception.Method);
-        Assert.Equal("https://actions.example.test/_apis/runtime/runnerscalesets/18", exception.SafeUri);
+        Assert.Equal("https://actions-fixture.actions.githubusercontent.com/_apis/runtime/runnerscalesets/18", exception.SafeUri);
         Assert.Equal("activity-123", exception.ActivityId);
         Assert.Equal("request-456", exception.GitHubRequestId);
         Assert.NotNull(exception.BodyPreview);
@@ -420,6 +421,135 @@ public sealed class ScaleSetClientAdministrationTests
         Assert.Equal(7, result.RunnerScaleSetId);
     }
 
+    [Theory]
+    [InlineData(7, """{"id":31,"name":"runner-31","status":"online","busy":false}""", true)]
+    [InlineData(7, """{"id":31,"name":"runner-31","status":"online","busy":true}""", false)]
+    [InlineData(7, """{"id":31,"name":"runner-31","status":"online"}""", false)]
+    [InlineData(8, """{"id":31,"name":"runner-31","status":"online","busy":false}""", false)]
+    public async Task IsRunnerIdleAsync_RequiresExactMembershipAndPositiveIdleEvidence(
+        int membershipScaleSet, string availability, bool expected)
+    {
+        string membership = ScaleSetJson.Serialize(new RunnerReference
+        {
+            Id = 31, Name = "runner-31", RunnerScaleSetId = membershipScaleSet,
+        });
+        using ClientFixture fixture = new(HttpStatusCode.OK, membership, runnerAvailability: availability);
+
+        bool idle = await fixture.Client.IsRunnerIdleAsync(7, 31, "runner-31", TestContext.Current.CancellationToken);
+
+        Assert.Equal(expected, idle);
+        var availabilityRequests = fixture.Handler.Requests.Where(request =>
+            request.Uri.AbsolutePath.EndsWith("/actions/runners/31", StringComparison.Ordinal));
+        if (membershipScaleSet == 7)
+        {
+            Assert.Equal("Bearer synthetic-pat", Assert.Single(availabilityRequests).Authorization);
+        }
+        else
+        {
+            Assert.Empty(availabilityRequests);
+        }
+    }
+
+    [Theory]
+    [InlineData("membership", HttpStatusCode.NotFound, false)]
+    [InlineData("rest", HttpStatusCode.NotFound, false)]
+    [InlineData("membership", HttpStatusCode.Forbidden, true)]
+    [InlineData("rest", HttpStatusCode.Forbidden, true)]
+    [InlineData("registration", HttpStatusCode.NotFound, true)]
+    [InlineData("discovery", HttpStatusCode.NotFound, true)]
+    public async Task IsRunnerIdleAsync_ReturnsFalseOnlyForRunnerLookupAbsence(
+        string failingStage, HttpStatusCode status, bool throws)
+    {
+        using var handler = new RecordingHttpMessageHandler((message, _) =>
+        {
+            string path = message.RequestUri!.AbsolutePath;
+            string stage = path switch
+            {
+                "/actions/runner-registration" => "discovery",
+                var value when value.EndsWith("/registration-token", StringComparison.Ordinal) => "registration",
+                var value when value.EndsWith("/agents/31", StringComparison.Ordinal) => "membership",
+                var value when value.EndsWith("/actions/runners/31", StringComparison.Ordinal) => "rest",
+                _ => throw new InvalidOperationException("Unexpected request."),
+            };
+            if (stage == failingStage)
+            {
+                return Task.FromResult(TestResponses.Json(status, "{}"));
+            }
+
+            return Task.FromResult(stage switch
+            {
+                "registration" => TestResponses.Json(HttpStatusCode.Created, """{"token":"synthetic-registration-token"}"""),
+                "discovery" => TestResponses.Json(HttpStatusCode.OK,
+                    $$"""{"url":"https://actions-fixture.actions.githubusercontent.com","token":"{{RecordingHandler.DiscoveryJwt}}"}"""),
+                "membership" => TestResponses.Json(HttpStatusCode.OK, """{"id":31,"name":"runner-31","runnerScaleSetId":7}"""),
+                _ => throw new InvalidOperationException("The test should stop at the prescribed failure."),
+            });
+        });
+        using var http = new HttpClient(handler);
+        using var client = new ScaleSetClient(GitHubTarget.Parse("https://github.com/example-org/example-repo"),
+            ScaleSetCredentials.FromPersonalAccessToken("synthetic-pat"), httpClient: http);
+
+        var idle = client.IsRunnerIdleAsync(7, 31, "runner-31", TestContext.Current.CancellationToken);
+        if (throws)
+        {
+            Assert.Equal((int)status, (await Assert.ThrowsAsync<ScaleSetApiException>(() => idle)).StatusCode);
+        }
+        else
+        {
+            Assert.False(await idle);
+        }
+
+        Assert.Equal(failingStage == "rest" ? 1 : 0,
+            handler.Requests.Count(call => call.Uri.AbsolutePath.EndsWith("/actions/runners/31", StringComparison.Ordinal)));
+    }
+
+    [Fact]
+    public async Task IsRunnerIdleAsync_PropagatesCancellationDuringRestLookup()
+    {
+        CancellationToken token = TestContext.Current.CancellationToken;
+        using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(token);
+        var reachedRest = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var handler = TestResponses.CreateConnectedHandler(DateTimeOffset.UtcNow.AddHours(1), async (message, caller) =>
+        {
+            if (message.RequestUri!.AbsolutePath.EndsWith("/agents/31", StringComparison.Ordinal))
+            {
+                return TestResponses.Json(HttpStatusCode.OK, """{"id":31,"name":"runner-31","runnerScaleSetId":7}""");
+            }
+
+            reachedRest.SetResult();
+            await Task.Delay(Timeout.InfiniteTimeSpan, caller);
+            throw new InvalidOperationException("Cancellation should stop the request.");
+        });
+        using var http = new HttpClient(handler);
+        using var client = new ScaleSetClient(GitHubTarget.Parse("https://github.com/example-org/example-repo"),
+            ScaleSetCredentials.FromPersonalAccessToken("synthetic-pat"), httpClient: http);
+
+        var idle = client.IsRunnerIdleAsync(7, 31, "runner-31", cancellation.Token);
+        await reachedRest.Task.WaitAsync(TimeSpan.FromSeconds(5), token);
+        await cancellation.CancelAsync();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => idle);
+        Assert.Single(handler.Requests, call => call.Uri.AbsolutePath.EndsWith("/actions/runners/31", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("https://github.com/org/repo", "https://pipelines.actions.githubusercontent.com/", true)]
+    [InlineData("https://github.com/org/repo", "https://pipelines.actions.githubusercontent.com:8443/", false)]
+    [InlineData("https://github.com/org/repo", "https://unexpected.example.test/", false)]
+    [InlineData("https://tenant.ghe.com/org/repo", "https://pipelines.actions.tenant.ghe.com/", true)]
+    [InlineData("https://tenant.ghe.com/org/repo", "https://pipelines.actions.other.ghe.com/", false)]
+    [InlineData("https://tenant.ghe.com/org/repo", "https://pipelines.actions.githubusercontent.com/", false)]
+    public void OwnedAndInjectedTransportsRequireTheSameActionsOrigin(string target, string service, bool expected)
+    {
+        GitHubTarget parsed = GitHubTarget.Parse(target);
+        ScaleSetCredentials credentials = ScaleSetCredentials.FromPersonalAccessToken("synthetic-pat");
+        using var ownedClient = new ScaleSetClient(parsed, credentials);
+        using var transport = new HttpClient();
+        using var injectedClient = new ScaleSetClient(parsed, credentials,
+            new ScaleSetClientOptions { IsTrustedDiscoveredEndpoint = _ => true }, transport);
+        Assert.Equal(expected, ownedClient.TryValidateDiscoveredEndpoint(service, out _));
+        Assert.Equal(expected, injectedClient.TryValidateDiscoveredEndpoint(service, out _));
+    }
+
     [Fact]
     public async Task FindRunnerByNameAsyncEncodesNameAndReturnsNullForNoMatches()
     {
@@ -547,9 +677,10 @@ public sealed class ScaleSetClientAdministrationTests
         public ClientFixture(
             HttpStatusCode responseStatus,
             string responseBody,
-            IReadOnlyDictionary<string, string>? responseHeaders = null)
+            IReadOnlyDictionary<string, string>? responseHeaders = null,
+            string? runnerAvailability = null)
         {
-            Handler = new RecordingHandler(responseStatus, responseBody, responseHeaders);
+            Handler = new RecordingHandler(responseStatus, responseBody, responseHeaders, runnerAvailability);
             _httpClient = new HttpClient(Handler);
             Client = new ScaleSetClient(
                 GitHubTarget.Parse("https://github.com/example-org/example-repo"),
@@ -571,11 +702,12 @@ public sealed class ScaleSetClientAdministrationTests
     private sealed class RecordingHandler(
         HttpStatusCode responseStatus,
         string responseBody,
-        IReadOnlyDictionary<string, string>? responseHeaders) : HttpMessageHandler
+        IReadOnlyDictionary<string, string>? responseHeaders,
+        string? runnerAvailability) : HttpMessageHandler
     {
         public const string DiscoveryJwt = "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJleHAiOjQxMDI0NDQ4MDB9.";
 
-        private const string ActionsServiceHost = "actions.example.test";
+        private const string ActionsServiceHost = "actions-fixture.actions.githubusercontent.com";
 
         private readonly List<RecordedHttpRequest> _requests = [];
 
@@ -611,6 +743,11 @@ public sealed class ScaleSetClientAdministrationTests
                 return JsonResponse(
                     HttpStatusCode.OK,
                     $"{{\"url\":\"https://{ActionsServiceHost}\",\"token\":\"{DiscoveryJwt}\"}}");
+            }
+
+            if (requestUri.Host == "api.github.com" && runnerAvailability is not null)
+            {
+                return JsonResponse(HttpStatusCode.OK, runnerAvailability);
             }
 
             return JsonResponse(responseStatus, responseBody, responseHeaders);

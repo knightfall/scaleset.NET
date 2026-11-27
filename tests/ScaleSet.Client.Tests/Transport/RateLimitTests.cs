@@ -440,7 +440,7 @@ public sealed class RateLimitTests
                 }
 
                 string token = TestResponses.CreateAdminToken(BaseNow.AddMinutes(10));
-                return Task.FromResult(TestResponses.Json(HttpStatusCode.OK, $"{{\"url\":\"https://actions.example/tenant\",\"token\":\"{token}\"}}"));
+                return Task.FromResult(TestResponses.Json(HttpStatusCode.OK, $"{{\"url\":\"https://actions-fixture.actions.githubusercontent.com/tenant\",\"token\":\"{token}\"}}"));
             }
 
             return Task.FromResult(TestResponses.Json(HttpStatusCode.OK, "{\"id\":5}"));

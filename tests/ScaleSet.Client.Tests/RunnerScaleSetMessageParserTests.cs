@@ -13,7 +13,7 @@ public sealed class RunnerScaleSetMessageParserTests
     {
         const string body = """
             [
-              {"messageType":"JobAvailable","acquireJobUrl":"https://actions.example/acquire","runnerRequestId":8589934593,"repositoryName":"repo","ownerName":"org","jobId":"job-1","jobWorkflowRef":"org/repo/.github/workflows/ci.yml@refs/heads/main","jobDisplayName":"Build","workflowRunId":8589934594,"eventName":"push","requestLabels":["linux","x64"],"queueTime":"2026-10-01T02:03:04Z"},
+              {"messageType":"JobAvailable","acquireJobUrl":"https://actions-fixture.actions.githubusercontent.com/acquire","runnerRequestId":8589934593,"repositoryName":"repo","ownerName":"org","jobId":"job-1","jobWorkflowRef":"org/repo/.github/workflows/ci.yml@refs/heads/main","jobDisplayName":"Build","workflowRunId":8589934594,"eventName":"push","requestLabels":["linux","x64"],"queueTime":"2026-10-01T02:03:04Z"},
               {"messageType":"JobAssigned","runnerRequestId":8589934595},
               {"messageType":"JobStarted","runnerId":8589934596,"runnerName":"runner-1","runnerRequestId":8589934597},
               {"messageType":"JobCompleted","result":"Succeeded","runnerId":8589934598,"runnerName":"runner-2","runnerRequestId":8589934599}
@@ -33,7 +33,7 @@ public sealed class RunnerScaleSetMessageParserTests
         Assert.Single(parsed.JobCompletedMessages);
         Assert.Equal(8589934593, parsed.JobAvailableMessages[0].RunnerRequestId);
         Assert.Equal(8589934594, parsed.JobAvailableMessages[0].WorkflowRunId);
-        Assert.Equal("https://actions.example/acquire", parsed.JobAvailableMessages[0].AcquireJobUrl);
+        Assert.Equal("https://actions-fixture.actions.githubusercontent.com/acquire", parsed.JobAvailableMessages[0].AcquireJobUrl);
         Assert.Equal(
             "2026-10-01T02:03:04+00:00",
             parsed.JobAvailableMessages[0].QueueTime.ToString("yyyy-MM-dd'T'HH:mm:sszzz", CultureInfo.InvariantCulture));

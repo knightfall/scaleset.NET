@@ -64,7 +64,7 @@ public static partial class AutoscalerCommandRunner
         try
         {
             IConfigurationRoot configuration = AutoscalerApplicationConfiguration.BuildFromEnvironment();
-            _ = AutoscalerConfiguration.Bind(configuration, [new DockerRunnerProviderFactory()]);
+            _ = AutoscalerConfiguration.Bind(configuration, [GetDockerFactory(configuration)]);
             _ = AutoscalerTelemetryConfiguration.Bind(configuration);
             _ = GetHealthListenUrl(configuration);
             output.WriteLine("Configuration is valid.");
@@ -145,7 +145,8 @@ public static partial class AutoscalerCommandRunner
         IScaleSetRuntimeFactory? runtimeFactory = null)
     {
         ArgumentNullException.ThrowIfNull(configuration);
-        AutoscalerOptions options = AutoscalerConfiguration.Bind(configuration, [new DockerRunnerProviderFactory()]);
+        DockerRunnerProviderFactory dockerFactory = GetDockerFactory(configuration, out DockerProviderOptions dockerOptions);
+        AutoscalerOptions options = AutoscalerConfiguration.Bind(configuration, [dockerFactory]);
         AutoscalerTelemetryConfiguration telemetry = AutoscalerTelemetryConfiguration.Bind(configuration);
         string healthListenUrl = GetHealthListenUrl(configuration);
         WebApplicationBuilder builder = WebApplication.CreateBuilder(new WebApplicationOptions
@@ -157,7 +158,9 @@ public static partial class AutoscalerCommandRunner
         builder.Configuration.AddConfiguration(configuration);
         builder.Logging.ClearProviders();
         builder.WebHost.UseUrls(healthListenUrl);
-        builder.Services.AddScaleSetTelemetry(telemetry, options.ScaleSets.Select(static scaleSet => scaleSet.Key!));
+        builder.Services.AddScaleSetTelemetry(
+            telemetry, options.ScaleSets.Select(static scaleSet => scaleSet.Key!), ScaleSetTelemetryProvider.Docker);
+        builder.Services.AddSingleton(dockerOptions);
         builder.Services.AddSingleton<IRunnerProviderFactory, DockerRunnerProviderFactory>();
         if (runtimeFactory is not null)
         {
@@ -180,6 +183,22 @@ public static partial class AutoscalerCommandRunner
                 ? Results.Ok(new { status = "ready" })
                 : Results.StatusCode(StatusCodes.Status503ServiceUnavailable));
         return app;
+    }
+
+    private static DockerRunnerProviderFactory GetDockerFactory(IConfiguration configuration) =>
+        GetDockerFactory(configuration, out _);
+
+    private static DockerRunnerProviderFactory GetDockerFactory(IConfiguration configuration, out DockerProviderOptions options)
+    {
+        try
+        {
+            options = configuration.GetSection("Providers:Docker").Get<DockerProviderOptions>() ?? new DockerProviderOptions();
+            return new DockerRunnerProviderFactory(options, null, null);
+        }
+        catch (Exception exception) when (exception is InvalidOperationException or ArgumentException or FormatException or OverflowException)
+        {
+            throw new AutoscalerConfigurationException("Providers:Docker contains invalid Docker provider options.");
+        }
     }
 
     private static string GetHealthListenUrl(IConfiguration configuration)
@@ -234,19 +253,34 @@ public static partial class AutoscalerCommandRunner
 
     private static async Task<int> RunHealthProbeAsync()
     {
-        string address = Environment.GetEnvironmentVariable("SCALESET_HEALTH_URL")
-            ?? "http://127.0.0.1:8080/health/live";
-        if (!Uri.TryCreate(address, UriKind.Absolute, out Uri? uri)
-            || (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps))
-        {
-            return 1;
-        }
-
         try
         {
+            string? address = Environment.GetEnvironmentVariable("SCALESET_HEALTH_URL");
+            if (address is null)
+            {
+                IConfigurationRoot configuration = AutoscalerApplicationConfiguration.BuildFromEnvironment();
+                using var configurationLease = configuration as IDisposable;
+                var listener = new Uri(GetHealthListenUrl(configuration));
+                string host = listener.Host switch
+                {
+                    "0.0.0.0" => "127.0.0.1",
+                    "[::]" => "[::1]",
+                    _ => listener.Host,
+                };
+                address = new UriBuilder(listener.Scheme, host, listener.Port, "/health/live").Uri.AbsoluteUri;
+            }
+
+            if (!Uri.TryCreate(address, UriKind.Absolute, out Uri? uri)
+                || (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps)
+                || !uri.IsLoopback || uri.UserInfo.Length != 0 || address.Any(char.IsControl))
+            {
+                return 1;
+            }
+
             using CancellationTokenSource timeout = new(TimeSpan.FromSeconds(2));
-            using HttpClient client = new() { Timeout = TimeSpan.FromSeconds(2) };
-            using HttpResponseMessage response = await client.GetAsync(uri, timeout.Token).ConfigureAwait(false);
+            using HttpClient client = new(new SocketsHttpHandler { AllowAutoRedirect = false, UseProxy = false });
+            using HttpResponseMessage response = await client.GetAsync(
+                uri, HttpCompletionOption.ResponseHeadersRead, timeout.Token).ConfigureAwait(false);
             return response.IsSuccessStatusCode ? 0 : 1;
         }
         catch

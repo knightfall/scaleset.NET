@@ -54,11 +54,13 @@ public sealed record GitHubTarget
 
     /// <summary>REST path used to create the scoped runner registration token.</summary>
     /// <exception cref="InvalidOperationException">The target scope is unsupported.</exception>
-    public string RegistrationTokenPath => Scope switch
+    public string RegistrationTokenPath => RunnerApiPath + "/registration-token";
+
+    internal string RunnerApiPath => Scope switch
     {
-        GitHubTargetScope.Enterprise => $"/enterprises/{EscapePathSegment(Enterprise!)}/actions/runners/registration-token",
-        GitHubTargetScope.Organization => $"/orgs/{EscapePathSegment(Owner)}/actions/runners/registration-token",
-        GitHubTargetScope.Repository => $"/repos/{EscapePathSegment(Owner)}/{EscapePathSegment(Repository!)}/actions/runners/registration-token",
+        GitHubTargetScope.Enterprise => $"/enterprises/{EscapePathSegment(Enterprise!)}/actions/runners",
+        GitHubTargetScope.Organization => $"/orgs/{EscapePathSegment(Owner)}/actions/runners",
+        GitHubTargetScope.Repository => $"/repos/{EscapePathSegment(Owner)}/{EscapePathSegment(Repository!)}/actions/runners",
         _ => throw new InvalidOperationException($"Unsupported target scope '{Scope}'."),
     };
 

@@ -15,12 +15,16 @@ namespace ScaleSet.Autoscaler.Telemetry;
 public sealed class SecretRedactor
 {
     private static readonly Regex BearerCredential = new(
-        @"(?i)\b(Bearer|Basic)\s+[A-Za-z0-9._~+/-]+=*",
-        RegexOptions.CultureInvariant | RegexOptions.Compiled);
+        @"(?i)\b(Bearer|Basic|RemoteAuth)\s+[A-Za-z0-9._~+/-]+=*",
+        RegexOptions.CultureInvariant | RegexOptions.NonBacktracking);
 
     private static readonly Regex SerializedCredential = new(
-        @"(?i)([\""']?(?:access[_-]?token|refresh[_-]?token|token|password|passwd|secret|private[_-]?key|client[_-]?secret|authorization|api[_-]?key|jit[_-]?(?:config|payload)|credential)[\""']?\s*[:=]\s*)([\""']?)[^\s,;\]}]+",
-        RegexOptions.CultureInvariant | RegexOptions.Compiled);
+        """(?i)(\b[\w.-]*(?:token|password|passwd|secret|private[_-]?key|authorization|api[_-]?key|jit[_-]?(?:config|payload)|credential)["']?\s*[:=]\s*)(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|(?:(?:Bearer|Basic|RemoteAuth)\s+)?[^\s,;\]}]+)""",
+        RegexOptions.CultureInvariant | RegexOptions.NonBacktracking);
+
+    private static readonly Regex StandaloneCredential = new(
+        """(?i:-----BEGIN [A-Z0-9 -]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z0-9 -]*PRIVATE KEY-----|\z))|\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*|\b(?i:gh[porsu]_|github_pat_)[A-Za-z0-9_]+""",
+        RegexOptions.CultureInvariant | RegexOptions.NonBacktracking);
 
     private readonly ConcurrentDictionary<string, byte> _knownSecrets = new(StringComparer.Ordinal);
 
@@ -47,14 +51,14 @@ public sealed class SecretRedactor
     {
         ArgumentNullException.ThrowIfNull(value);
 
-        var redacted = value;
+        var redacted = StandaloneCredential.Replace(value, "[REDACTED]");
         foreach (var secret in _knownSecrets.Keys.OrderByDescending(static item => item.Length))
         {
             redacted = redacted.Replace(secret, "[REDACTED]", StringComparison.Ordinal);
         }
 
-        redacted = BearerCredential.Replace(redacted, "$1 [REDACTED]");
-        return SerializedCredential.Replace(redacted, "$1[REDACTED]");
+        redacted = SerializedCredential.Replace(redacted, "$1[REDACTED]");
+        return BearerCredential.Replace(redacted, "$1 [REDACTED]");
     }
 
     public static bool IsSensitiveName(string name)
@@ -153,9 +157,21 @@ internal sealed class RedactingLogEventSink : ILogEventSink, IDisposable
             _cancellation.Cancel();
         }
 
-        var disposeTask = Task.Run(() => (_exportLogger as IDisposable)?.Dispose());
+        var disposeTask = DisposeExporterAsync();
         _ = WaitWithinBudget(disposeTask, elapsed);
-        _cancellation.Dispose();
+    }
+
+    private async Task DisposeExporterAsync()
+    {
+        try
+        {
+            await _worker.ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing | ConfigureAwaitOptions.ForceYielding);
+            (_exportLogger as IDisposable)?.Dispose();
+        }
+        finally
+        {
+            _cancellation.Dispose();
+        }
     }
 
     private async Task ExportAsync()
@@ -210,7 +226,7 @@ internal sealed class RedactingLogEventSink : ILogEventSink, IDisposable
 
         return value switch
         {
-            ScalarValue scalar when scalar.Value is string text => new ScalarValue(_redactor.Redact(text)),
+            ScalarValue scalar => RedactScalar(scalar),
             StructureValue structure => new StructureValue(
                 structure.Properties.Select(property => new LogEventProperty(
                     property.Name,
@@ -219,10 +235,21 @@ internal sealed class RedactingLogEventSink : ILogEventSink, IDisposable
             SequenceValue sequence => new SequenceValue(sequence.Elements.Select(element => RedactValue(element, propertyName))),
             DictionaryValue dictionary => new DictionaryValue(dictionary.Elements.Select(entry =>
                 new KeyValuePair<ScalarValue, LogEventPropertyValue>(
-                    entry.Key,
+                    RedactScalar(entry.Key),
                     RedactValue(entry.Value, entry.Key.Value?.ToString() ?? propertyName)))),
             _ => value,
         };
+    }
+
+    private ScalarValue RedactScalar(ScalarValue scalar)
+    {
+        if (scalar.Value?.ToString() is not { } text)
+        {
+            return scalar;
+        }
+
+        string redacted = _redactor.Redact(text);
+        return redacted == text ? scalar : new ScalarValue(redacted);
     }
 
     private bool WaitWithinBudget(Task task, Stopwatch elapsed)

@@ -53,10 +53,38 @@ checks the build job in that run and requires the original artifact to be
 available. Candidate artifacts have a 30-day retention period.
 
 Existing package versions are checked against the original candidate before
-duplicate pushes are accepted. Existing release assets must match byte for
-byte. Preserve the original candidate and draft release during recovery. If
-the candidate is unavailable or the existing package payloads conflict, stop
-and investigate before choosing a new version.
+duplicate pushes are accepted. The publish job attaches each original symbol
+archive to the candidate's draft immediately after NuGet acknowledges the
+upload. On retry, the draft manifest and symbol archive must match byte for
+byte before the job can skip that symbol push.
+
+If an upload succeeds without a recorded acknowledgement, the next push can
+return a conflict. The registry does not expose the original symbol archive
+for comparison, so this case requires investigation. Preserve the original
+candidate and draft release during recovery. If the candidate is unavailable
+or the existing package payloads conflict, investigate before choosing a new
+version.
+
+## Compatibility notes for the next prerelease
+
+Custom Hosting providers implement `IRunnerProvider.StartAsync(RunnerResource,
+string?, CancellationToken)`. Providers that deliver JIT at startup opt in
+with `RunnerProviderCapabilities.RequiresJitConfigurationAtStart`. Hosting
+passes those providers a null `RunnerCreateRequest.EncodedJitConfig` and
+supplies the original credential to the first start. Recovery reconciles the
+exact operation without resending that credential. Providers that consume JIT
+during resource creation receive a null start argument.
+
+`Knightfall.ScaleSet.Hosting` now uses `Microsoft.Data.Sqlite` and its packaged
+native SQLite runtime assets. Keep the native library selected for the target
+runtime when trimming deployment files or copying a publish output. The AWS
+controller consumes Client and Listener independently. Its DynamoDB-backed
+state does not require the Hosting package.
+
+The file journal imports v1 JSON state into SQLite and installs a downgrade
+barrier. Back up the entire state directory before upgrading and keep the
+database, marker, and ownership identity together. See the
+[Docker state upgrade instructions](../implementation/DOCKER-DEPLOYMENT.md#upgrading-runner-state).
 
 ## Verify release artifacts
 

@@ -5,11 +5,33 @@ namespace ScaleSet.Hosting.Controller;
 
 public sealed partial class ScaleSetMessageHandler
 {
+    internal static async Task<IReadOnlyList<RunnerOperationState>> ReadTrackedOperationsAsync(
+        IRunnerStateJournal journal, ScaleSetDemandRegistry registry, CancellationToken cancellationToken)
+    {
+        var active = await journal.ReadActiveAsync(cancellationToken).ConfigureAwait(false);
+        Guid[] trackedIds = registry.GetTrackedOperationIds(journal.Scope.ScaleSetKey);
+        if (trackedIds.Length == 0)
+        {
+            return active;
+        }
+
+        HashSet<Guid> activeIds = active.Select(static operation => operation.Identity.OperationId).ToHashSet();
+        var operations = active.ToBuilder();
+        foreach (Guid id in trackedIds)
+        {
+            if (!activeIds.Contains(id) && await journal.FindAsync(id, cancellationToken).ConfigureAwait(false) is { } operation)
+            {
+                operations.Add(operation);
+            }
+        }
+
+        return operations.ToImmutable();
+    }
+
     private async Task ReconcileCompletedOperationsAsync(CancellationToken cancellationToken)
     {
-        IReadOnlyList<RunnerOperationState> operations = await _journal
-            .ReadAllAsync(cancellationToken)
-            .ConfigureAwait(false);
+        IReadOnlyList<RunnerOperationState> operations = await ReadTrackedOperationsAsync(
+            _journal, _capacity.DemandRegistry, cancellationToken).ConfigureAwait(false);
 
         foreach (RunnerOperationState operation in operations)
         {

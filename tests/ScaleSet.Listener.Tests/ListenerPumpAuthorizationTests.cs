@@ -441,7 +441,7 @@ public sealed class ListenerPumpAuthorizationTests
         var h = new EngineFixture();
         h.Session.Session = h.Session.Session with
         {
-            MessageQueueUrl = "https://secret-queue.example/secret",
+            MessageQueueUrl = "https://secret-queue-fixture.actions.githubusercontent.com/secret",
             MessageQueueAccessToken = "sensitive-queue-token",
         };
         var clock = new ListenerTestClock();

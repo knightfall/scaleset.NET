@@ -35,7 +35,7 @@ public sealed partial class ScaleSetClient
                 this,
                 scaleSetId,
                 ownerName,
-                MessageSessionClient.ParseAndValidateSession(response, ownerName))).ConfigureAwait(false);
+                MessageSessionClient.ParseAndValidateSession(response, ownerName, this))).ConfigureAwait(false);
     }
 
     /// <summary>Retires the exact message session identified by a journaled scale-set ID and session GUID.</summary>
@@ -59,16 +59,18 @@ public sealed partial class ScaleSetClient
             throw new ArgumentException("A nonempty message session ID is required.", nameof(sessionId));
         }
 
-        using IDisposable retry = ScaleSetRequestRetry.Configure(static options => options with { MaxRetries = 0 });
         await DeleteMessageSessionCoreAsync(scaleSetId, sessionId, cancellationToken).ConfigureAwait(false);
     }
 
-    internal Task DeleteMessageSessionCoreAsync(long scaleSetId, Guid sessionId, CancellationToken cancellationToken) =>
-        SendActionsAsync(
+    internal async Task DeleteMessageSessionCoreAsync(long scaleSetId, Guid sessionId, CancellationToken cancellationToken)
+    {
+        using IDisposable retry = ScaleSetRequestRetry.SuppressMutationReplay();
+        await SendActionsAsync(
             HttpMethod.Delete,
             $"{ScaleSetSessionsPath}/{FormatIdentifier(scaleSetId)}/sessions/{sessionId:D}",
             body: null,
             query: null,
             expectedStatus: 204,
-            cancellationToken);
+            cancellationToken).ConfigureAwait(false);
+    }
 }

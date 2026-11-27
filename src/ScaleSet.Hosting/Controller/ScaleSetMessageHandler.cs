@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using ScaleSet.Client;
@@ -60,6 +61,8 @@ public sealed class ScaleSetCapacityContext
 /// Handles one scale set's queue messages, acquiring offered jobs before
 /// provisioning and applying only matching GitHub activity evidence.
 /// </summary>
+[SuppressMessage("Design", "CA1001:Types that own disposable fields should be disposable",
+    Justification = "The callback gate uses only managed asynchronous waits and must remain releasable by in-flight callbacks.")]
 public sealed partial class ScaleSetMessageHandler : IScaleSetMessageHandler
 {
     private readonly RunnerOwnershipScope _scope;
@@ -69,6 +72,7 @@ public sealed partial class ScaleSetMessageHandler : IScaleSetMessageHandler
     private readonly IRunnerStateJournal _journal;
     private readonly ILogger<ScaleSetMessageHandler> _logger;
     private readonly ScaleSetCapacityContext _capacity;
+    private readonly SemaphoreSlim _callbackGate = new(1, 1);
     private int _latestAssignedJobs = -1;
 
     /// <summary>Creates a message handler bound to one ownership scope, its durable journal, and the host capacity ledger.</summary>
@@ -124,6 +128,19 @@ public sealed partial class ScaleSetMessageHandler : IScaleSetMessageHandler
     public async Task HandleAsync(RunnerScaleSetMessage? message, CancellationToken cancellationToken)
     {
         using IDisposable callbackLease = EnterCallback();
+        await _callbackGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await HandleSerializedAsync(message, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            _callbackGate.Release();
+        }
+    }
+
+    private async Task HandleSerializedAsync(RunnerScaleSetMessage? message, CancellationToken cancellationToken)
+    {
         if (message?.Statistics is { } statistics)
         {
             if (statistics.TotalAssignedJobs < 0 || statistics.TotalIdleRunners < 0)
@@ -135,6 +152,5 @@ public sealed partial class ScaleSetMessageHandler : IScaleSetMessageHandler
         }
 
         await HandleCapacityAwareAsync(message, cancellationToken).ConfigureAwait(false);
-        await ReconcileCompletedOperationsAsync(cancellationToken).ConfigureAwait(false);
     }
 }

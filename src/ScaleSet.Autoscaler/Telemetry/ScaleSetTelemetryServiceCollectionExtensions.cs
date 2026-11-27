@@ -38,7 +38,8 @@ public static partial class ScaleSetTelemetryServiceCollectionExtensions
     public static IServiceCollection AddScaleSetTelemetry(
         this IServiceCollection services,
         AutoscalerTelemetryConfiguration configuration,
-        IEnumerable<string>? configuredScaleSetKeys = null)
+        IEnumerable<string>? configuredScaleSetKeys = null,
+        ScaleSetTelemetryProvider capacityProvider = ScaleSetTelemetryProvider.Other)
     {
         ArgumentNullException.ThrowIfNull(services);
         ArgumentNullException.ThrowIfNull(configuration);
@@ -54,7 +55,7 @@ public static partial class ScaleSetTelemetryServiceCollectionExtensions
             serviceProvider.GetRequiredService<IMeterFactory>(),
             configuredScaleSetKeys,
             serviceProvider.GetService<HostCapacityCoordinator>(),
-            ScaleSetTelemetryProvider.Docker));
+            capacityProvider));
         services.AddOpenTelemetry()
             .ConfigureResource(resource =>
             {
@@ -67,7 +68,7 @@ public static partial class ScaleSetTelemetryServiceCollectionExtensions
             {
                 tracing.AddSource(SourceAndMeterNames)
                     .SetSampler(CreateSampler(configuration))
-                    .AddHttpClientInstrumentation()
+                    // Client and provider sources emit sanitized request spans.
                     .AddOtlpExporter(options =>
                     {
                         ConfigureExporter(options, configuration.Traces);
@@ -141,7 +142,11 @@ public static partial class ScaleSetTelemetryServiceCollectionExtensions
                 options.BatchingOptions.QueueLimit = configuration.LogQueueLimit;
                 options.BatchingOptions.RetryTimeLimit = TimeSpan.FromMilliseconds(configuration.Logs.TimeoutMilliseconds);
                 options.HttpMessageHandler = new TimeoutDelegatingHandler(
-                    new HttpClientHandler(),
+                    new SocketsHttpHandler
+                    {
+                        AllowAutoRedirect = false,
+                        PooledConnectionLifetime = TimeSpan.FromMinutes(5),
+                    },
                     TimeSpan.FromMilliseconds(configuration.Logs.TimeoutMilliseconds));
                 options.OnBeginSuppressInstrumentation = SuppressInstrumentationScope.Begin;
             }, ignoreEnvironment: true)

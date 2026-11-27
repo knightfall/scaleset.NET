@@ -14,7 +14,6 @@ namespace ScaleSet.Docker.Tests;
 public sealed class DockerRunnerProviderTests
 {
     private static readonly string[] SleepCommand = ["/bin/sh", "-c", "sleep 30"];
-    private static readonly string[] SyntheticJitEnvironment = ["ACTIONS_RUNNER_INPUT_JITCONFIG=synthetic-jit"];
     private static readonly string[] HostSocketBind = ["/custom/docker.sock:/var/run/docker.sock"];
 
     [Fact]
@@ -192,7 +191,7 @@ public sealed class DockerRunnerProviderTests
     }
 
     [Fact]
-    public async Task DiscoverAsync_RejectsMalformedIdentityLabelsForOwnedResource()
+    public async Task DiscoverAsync_IgnoresContainersThatLackAnOwnershipIdentity()
     {
         RunnerIdentity identity = DockerProviderTestContext.CreateIdentity();
         Dictionary<string, string> labels = DockerProviderTestContext.CreateLabels(identity);
@@ -203,10 +202,9 @@ public sealed class DockerRunnerProviderTests
                 ? DockerTestHttpMessageHandler.Json(HttpStatusCode.OK, DockerProviderTestContext.CreateListJson((containerId, labels)))
                 : DockerTestHttpMessageHandler.Json(HttpStatusCode.NotFound, "{}"))));
 
-        DockerProviderException exception = await Assert.ThrowsAsync<DockerProviderException>(
-            () => context.Provider.DiscoverAsync(identity.Scope, TestContext.Current.CancellationToken));
+        var resources = await context.Provider.DiscoverAsync(identity.Scope, TestContext.Current.CancellationToken);
 
-        Assert.Equal("invalid-owned-container-labels", exception.FailureCode);
+        Assert.Empty(resources);
         Assert.DoesNotContain(context.Handler.Requests, request =>
             request.Uri.AbsolutePath.StartsWith("/v1.47/containers/", StringComparison.Ordinal)
             && request.Uri.AbsolutePath.EndsWith("/json", StringComparison.Ordinal)
@@ -290,7 +288,7 @@ public sealed class DockerRunnerProviderTests
             (request, _) => Task.FromResult(request.Uri.AbsolutePath switch
             {
                 var path when path.Contains("/images/", StringComparison.Ordinal) && path.EndsWith("/json", StringComparison.Ordinal) =>
-                    DockerTestHttpMessageHandler.Json(HttpStatusCode.OK, "{\"Id\":\"sha256:test\"}"),
+                    DockerTestHttpMessageHandler.Json(HttpStatusCode.OK, """{"Id":"sha256:test","Os":"linux","Architecture":"arm64","Config":{"Entrypoint":["/image-init","--"]}}"""),
                 "/v1.47/containers/create" when Interlocked.Increment(ref createCount) == 1 =>
                     DockerTestHttpMessageHandler.Json(HttpStatusCode.Created, $"{{\"Id\":\"{containerId}\"}}"),
                 "/v1.47/containers/create" => DockerTestHttpMessageHandler.Json(HttpStatusCode.Conflict, "{}"),
@@ -327,9 +325,13 @@ public sealed class DockerRunnerProviderTests
         JsonElement root = body.RootElement;
         Assert.Equal("ghcr.io/example/runner:2.324.0", root.GetProperty("Image").GetString());
         Assert.Equal("runner", root.GetProperty("User").GetString());
-        Assert.Equal("/home/runner/run.sh", root.GetProperty("Cmd")[0].GetString());
-        string[] environment = root.GetProperty("Env").EnumerateArray().Select(static item => item.GetString()!).ToArray();
-        Assert.Equal(new[] { $"ACTIONS_RUNNER_INPUT_JITCONFIG={jit}" }, environment);
+        Assert.Equal(["/image-init", "--", "/home/runner/run.sh"],
+            root.GetProperty("Cmd").EnumerateArray().Select(argument => argument.GetString()));
+        Assert.Contains("mode=1777", root.GetProperty("HostConfig").GetProperty("Tmpfs")
+            .GetProperty("/run/scaleset-jit").GetString(), StringComparison.Ordinal);
+        Assert.False(root.TryGetProperty("Env", out _));
+        Assert.DoesNotContain(jit, createRequests[0].Body, StringComparison.Ordinal);
+        Assert.Equal("/bin/sh", root.GetProperty("Entrypoint")[0].GetString());
         JsonElement labels = root.GetProperty("Labels");
         Assert.Equal("scaleset.net", labels.GetProperty(DockerProviderLabels.Product).GetString());
         Assert.Equal("controller-a", labels.GetProperty(DockerProviderLabels.ControllerId).GetString());
@@ -361,7 +363,7 @@ public sealed class DockerRunnerProviderTests
             {
                 if (request.Uri.AbsolutePath.Contains("/images/", StringComparison.Ordinal))
                 {
-                    return Task.FromResult(DockerTestHttpMessageHandler.Json(HttpStatusCode.OK, "{\"Id\":\"sha256:test\"}"));
+                    return Task.FromResult(DockerTestHttpMessageHandler.Json(HttpStatusCode.OK, "{\"Id\":\"sha256:test\",\"Os\":\"linux\",\"Architecture\":\"arm64\"}"));
                 }
 
                 if (request.Uri.AbsolutePath == "/v1.47/containers/create")
@@ -399,7 +401,7 @@ public sealed class DockerRunnerProviderTests
                     int count = Interlocked.Increment(ref imageInspections);
                     return Task.FromResult(DockerTestHttpMessageHandler.Json(
                         count == 1 ? HttpStatusCode.NotFound : HttpStatusCode.OK,
-                        count == 1 ? "{}" : "{\"Id\":\"sha256:pinned\"}"));
+                        count == 1 ? "{}" : "{\"Id\":\"sha256:pinned\",\"Os\":\"linux\",\"Architecture\":\"arm64\"}"));
                 }
 
                 if (path == "/v1.47/images/create")
@@ -540,7 +542,7 @@ public sealed class DockerRunnerProviderTests
             (request, _) => Task.FromResult(request.Uri.AbsolutePath switch
             {
                 var path when path.Contains("/images/", StringComparison.Ordinal) && path.EndsWith("/json", StringComparison.Ordinal) =>
-                    DockerTestHttpMessageHandler.Json(HttpStatusCode.OK, "{\"Id\":\"sha256:test\"}"),
+                    DockerTestHttpMessageHandler.Json(HttpStatusCode.OK, "{\"Id\":\"sha256:test\",\"Os\":\"linux\",\"Architecture\":\"arm64\"}"),
                 "/v1.47/containers/create" => DockerTestHttpMessageHandler.Json(HttpStatusCode.Created, $"{{\"Id\":\"{new string('1', 64)}\"}}"),
                 _ => DockerTestHttpMessageHandler.Json(HttpStatusCode.NotFound, "{}"),
             })),
@@ -560,9 +562,7 @@ public sealed class DockerRunnerProviderTests
             SleepCommand,
             body.RootElement.GetProperty("Cmd").EnumerateArray().Select(static item => item.GetString()!).ToArray());
         Assert.Equal("/tmp/runner-work", body.RootElement.GetProperty("WorkingDir").GetString());
-        Assert.Equal(
-            SyntheticJitEnvironment,
-            body.RootElement.GetProperty("Env").EnumerateArray().Select(static item => item.GetString()!).ToArray());
+        Assert.False(body.RootElement.TryGetProperty("Env", out _));
     }
 
     [Fact]
@@ -575,7 +575,7 @@ public sealed class DockerRunnerProviderTests
             (request, _) => Task.FromResult(request.Uri.AbsolutePath switch
             {
                 var path when path.Contains("/images/", StringComparison.Ordinal) =>
-                    DockerTestHttpMessageHandler.Json(HttpStatusCode.OK, "{\"Id\":\"sha256:test\"}"),
+                    DockerTestHttpMessageHandler.Json(HttpStatusCode.OK, "{\"Id\":\"sha256:test\",\"Os\":\"linux\",\"Architecture\":\"arm64\"}"),
                 "/v1.47/containers/create" =>
                     DockerTestHttpMessageHandler.Json(HttpStatusCode.Created, $"{{\"Id\":\"{new string('2', 64)}\"}}"),
                 _ => DockerTestHttpMessageHandler.Json(HttpStatusCode.NotFound, "{}"),
@@ -599,17 +599,18 @@ public sealed class DockerRunnerProviderTests
 
         RunnerProfileOptions socketProfile = DockerProviderTestContext.CreateProfile();
         socketProfile.DockerBuildMode = DockerBuildMode.HostSocket;
+        Assert.Throws<ArgumentException>(() => new DockerRunnerProvider(socketProfile));
         using DockerProviderTestContext socketContext = new(new DockerTestHttpMessageHandler(
             (request, _) => Task.FromResult(request.Uri.AbsolutePath switch
             {
                 var path when path.Contains("/images/", StringComparison.Ordinal) =>
-                    DockerTestHttpMessageHandler.Json(HttpStatusCode.OK, "{\"Id\":\"sha256:test\"}"),
+                    DockerTestHttpMessageHandler.Json(HttpStatusCode.OK, "{\"Id\":\"sha256:test\",\"Os\":\"linux\",\"Architecture\":\"arm64\"}"),
                 "/v1.47/containers/create" =>
                     DockerTestHttpMessageHandler.Json(HttpStatusCode.Created, $"{{\"Id\":\"{new string('3', 64)}\"}}"),
                 _ => DockerTestHttpMessageHandler.Json(HttpStatusCode.NotFound, "{}"),
             })),
             profile: socketProfile,
-            options: new DockerProviderOptions { HostDockerSocketPath = "/custom/docker.sock" });
+            options: new DockerProviderOptions { AllowHostSocket = true, HostDockerSocketPath = "/custom/docker.sock" });
 
         _ = await socketContext.Provider.CreateAsync(new RunnerCreateRequest(
             DockerProviderTestContext.CreateIdentity(),
@@ -650,7 +651,7 @@ public sealed class DockerRunnerProviderTests
             (request, _) => Task.FromResult(request.Uri.AbsolutePath switch
             {
                 var path when path.Contains("/images/", StringComparison.Ordinal) && path.EndsWith("/json", StringComparison.Ordinal) =>
-                    DockerTestHttpMessageHandler.Json(HttpStatusCode.OK, "{\"Id\":\"sha256:test\"}"),
+                    DockerTestHttpMessageHandler.Json(HttpStatusCode.OK, "{\"Id\":\"sha256:test\",\"Os\":\"linux\",\"Architecture\":\"arm64\"}"),
                 var path when path.EndsWith("/containers/create", StringComparison.Ordinal) =>
                     DockerTestHttpMessageHandler.Json(HttpStatusCode.Created, $"{{\"Id\":\"{new string('d', 64)}\"}}"),
                 _ => DockerTestHttpMessageHandler.Json(HttpStatusCode.NotFound, "{}"),
@@ -681,11 +682,19 @@ public sealed class DockerRunnerProviderTests
         Assert.DoesNotContain("platform=", createRequest.Uri.Query, StringComparison.Ordinal);
     }
 
-    [Fact]
-    public async Task StartAsync_RequiresOwnershipAndStartsCreatedContainer()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task StartAsync_AlreadyAcceptedStartHasUnconfirmedHandoff(bool alreadyRunning)
     {
         RunnerIdentity identity = DockerProviderTestContext.CreateIdentity(22);
         int inspectCount = 0;
+        string ObserveStatus()
+        {
+            inspectCount++;
+            return alreadyRunning ? "running" : "created";
+        }
+
         string containerId = new('4', 64);
         using DockerProviderTestContext context = new(new DockerTestHttpMessageHandler(
             (request, _) => Task.FromResult(request.Uri.AbsolutePath switch
@@ -693,22 +702,90 @@ public sealed class DockerRunnerProviderTests
                 var path when path == $"/v1.47/containers/{containerId}/json" =>
                     DockerTestHttpMessageHandler.Json(HttpStatusCode.OK, DockerProviderTestContext.CreateInspectJson(
                         identity,
-                        state: Interlocked.Increment(ref inspectCount) == 1 ? "created" : "running",
+                        state: ObserveStatus(),
                         id: containerId)),
                 var path when path == $"/v1.47/containers/{containerId}/start" => new HttpResponseMessage(HttpStatusCode.NotModified),
                 _ => DockerTestHttpMessageHandler.Json(HttpStatusCode.NotFound, "{}"),
             })));
 
-        RunnerResource started = await context.Provider.StartAsync(
+        DockerProviderException failure = await Assert.ThrowsAsync<DockerProviderException>(() => context.Provider.StartAsync(
             new RunnerResource(containerId, identity, RunnerResourceStatus.Created),
-            TestContext.Current.CancellationToken);
+            "synthetic-jit",
+            TestContext.Current.CancellationToken));
 
-        Assert.Equal(RunnerResourceStatus.Running, started.Status);
-        Assert.Equal(2, inspectCount);
-        Assert.Single(
-            context.Handler.Requests,
-            request => request.Method == "POST" && request.Uri.AbsolutePath.EndsWith("/start", StringComparison.Ordinal));
-        Assert.DoesNotContain(context.Handler.Requests, request => request.Method == "POST" && request.Uri.AbsolutePath.EndsWith("/create", StringComparison.Ordinal));
+        Assert.Equal("jit-handoff-unconfirmed", failure.FailureCode);
+        Assert.True(failure.OutcomeMayBeUnknown);
+        Assert.Equal(1, inspectCount);
+        Assert.Equal(alreadyRunning ? 0 : 1,
+            context.Handler.Requests.Count(request =>
+                request.Method == "POST" && request.Uri.AbsolutePath.EndsWith("/start", StringComparison.Ordinal)));
+        Assert.DoesNotContain(context.Handler.Requests, request => request.Uri.AbsolutePath.Contains("/exec", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData(null, "running", "invalid-engine-response")]
+    [InlineData(125, "running", "jit-bootstrap-handoff-failed")]
+    [InlineData(0, "missing", "resource-disappeared-after-start")]
+    [InlineData(0, "created", "invalid-post-handoff-state")]
+    [InlineData(0, "paused", "invalid-post-handoff-state")]
+    [InlineData(0, "exited", null)]
+    [InlineData(0, "running", null)]
+    public async Task StartAsync_ValidatesStoppedExecAndPostHandoffContainer(int? exitCode, string state, string? failureCode)
+    {
+        RunnerIdentity identity = DockerProviderTestContext.CreateIdentity(22);
+        string container = new('a', 64);
+        string exec = new('b', 64);
+        string containerPath = $"/v1.47/containers/{container}";
+        string execPath = $"/v1.47/exec/{exec}";
+        int containerInspects = 0;
+        using DockerProviderTestContext context = new(new DockerTestHttpMessageHandler((request, _) =>
+        {
+            string path = request.Uri.AbsolutePath;
+            if (path == $"{containerPath}/json")
+            {
+                if (++containerInspects == 1)
+                {
+                    return Task.FromResult(DockerTestHttpMessageHandler.Json(HttpStatusCode.OK,
+                        DockerProviderTestContext.CreateInspectJson(identity, id: container)));
+                }
+
+                return Task.FromResult(state == "missing"
+                    ? new HttpResponseMessage(HttpStatusCode.NotFound)
+                    : DockerTestHttpMessageHandler.Json(HttpStatusCode.OK, DockerProviderTestContext.CreateInspectJson(
+                        identity, state, startedAt: "2026-11-27T00:00:00Z",
+                        finishedAt: "2026-11-27T00:00:01Z", id: container)));
+            }
+
+            return Task.FromResult(path switch
+            {
+                var value when value == $"{containerPath}/start" => new HttpResponseMessage(HttpStatusCode.NoContent),
+                var value when value == $"{containerPath}/exec" => DockerTestHttpMessageHandler.Json(HttpStatusCode.Created,
+                    JsonSerializer.Serialize(new { Id = exec })),
+                var value when value == $"{execPath}/start" => new HttpResponseMessage(HttpStatusCode.OK),
+                var value when value == $"{execPath}/json" => DockerTestHttpMessageHandler.Json(HttpStatusCode.OK,
+                    JsonSerializer.Serialize(new { ContainerID = container, Running = false, ExitCode = exitCode })),
+                _ => throw new InvalidOperationException("Unexpected Engine request."),
+            });
+        }));
+
+        Task<RunnerResource> start = context.Provider.StartAsync(new RunnerResource(container, identity, RunnerResourceStatus.Created),
+            "synthetic-jit", TestContext.Current.CancellationToken);
+        if (failureCode is not null)
+        {
+            var exception = await Assert.ThrowsAsync<DockerProviderException>(() => start);
+            Assert.Equal(failureCode, exception.FailureCode);
+            Assert.True(exception.OutcomeMayBeUnknown);
+        }
+        else
+        {
+            RunnerResource result = await start;
+            Assert.Equal(state == "exited" ? RunnerResourceStatus.Exited : RunnerResourceStatus.Running, result.Status);
+        }
+
+        Assert.Equal(exitCode == 0 ? 2 : 1, containerInspects);
+        Assert.Single(context.Handler.Requests, request => request.Uri.AbsolutePath == $"{execPath}/json");
+        Assert.Single(context.Handler.Requests, request => request.Uri.AbsolutePath == $"{containerPath}/exec");
+        Assert.Single(context.Handler.Requests, request => request.Uri.AbsolutePath == $"{containerPath}/start");
     }
 
     [Fact]
@@ -723,6 +800,7 @@ public sealed class DockerRunnerProviderTests
 
         RunnerResource running = await context.Provider.StartAsync(
             new RunnerResource(containerId, identity, RunnerResourceStatus.Created),
+            encodedJitConfig: null,
             TestContext.Current.CancellationToken);
 
         Assert.Equal(RunnerResourceStatus.Running, running.Status);
@@ -742,6 +820,7 @@ public sealed class DockerRunnerProviderTests
         DockerProviderException exception = await Assert.ThrowsAsync<DockerProviderException>(
             () => context.Provider.StartAsync(
                 new RunnerResource(containerId, identity, RunnerResourceStatus.Created),
+                encodedJitConfig: null,
                 TestContext.Current.CancellationToken));
 
         Assert.Equal("resource-not-startable", exception.FailureCode);
@@ -765,6 +844,7 @@ public sealed class DockerRunnerProviderTests
         DockerProviderException exception = await Assert.ThrowsAsync<DockerProviderException>(
             () => context.Provider.StartAsync(
                 new RunnerResource(containerId, expectedIdentity, RunnerResourceStatus.Created),
+                encodedJitConfig: null,
                 TestContext.Current.CancellationToken));
 
         Assert.Equal("resource-ownership-mismatch", exception.FailureCode);
@@ -798,10 +878,11 @@ public sealed class DockerRunnerProviderTests
                 : DockerTestHttpMessageHandler.Json(HttpStatusCode.NotFound, "{}"))));
 
         RunnerResource? inspected = await context.Provider.InspectAsync(
-            new RunnerResource(containerId, identity, RunnerResourceStatus.Unknown),
+            new RunnerResource(containerId[..12], identity, RunnerResourceStatus.Unknown),
             TestContext.Current.CancellationToken);
 
         Assert.NotNull(inspected);
+        Assert.Equal(containerId, inspected.ProviderResourceId);
         Assert.Equal(expectedStatus, inspected.Status);
         Assert.Equal(expectedTerminal ? 9 : null, inspected.ExitCode);
         Assert.Equal(new DateTimeOffset(2026, 10, 1, 0, 0, 0, TimeSpan.Zero), inspected.StartedAt);
@@ -883,7 +964,7 @@ public sealed class DockerRunnerProviderTests
             cancellationToken: TestContext.Current.CancellationToken);
 
         RecordedDockerRequest removeRequest = Assert.Single(context.Handler.Requests, request => request.Method == "DELETE");
-        Assert.Empty(removeRequest.Uri.Query);
+        Assert.Equal("?v=1", removeRequest.Uri.Query);
     }
 
     [Theory]
@@ -928,7 +1009,7 @@ public sealed class DockerRunnerProviderTests
             cancellationToken: TestContext.Current.CancellationToken);
 
         RecordedDockerRequest removeRequest = Assert.Single(context.Handler.Requests, request => request.Method == "DELETE");
-        Assert.Equal("?force=1", removeRequest.Uri.Query);
+        Assert.Equal("?v=1&force=1", removeRequest.Uri.Query);
     }
 
     [Fact]
@@ -963,7 +1044,7 @@ public sealed class DockerRunnerProviderTests
             {
                 if (request.Uri.AbsolutePath.Contains("/images/", StringComparison.Ordinal))
                 {
-                    return Task.FromResult(DockerTestHttpMessageHandler.Json(HttpStatusCode.OK, "{\"Id\":\"sha256:test\"}"));
+                    return Task.FromResult(DockerTestHttpMessageHandler.Json(HttpStatusCode.OK, "{\"Id\":\"sha256:test\",\"Os\":\"linux\",\"Architecture\":\"arm64\"}"));
                 }
 
                 if (request.Uri.AbsolutePath == "/v1.47/containers/create")
@@ -1097,7 +1178,7 @@ public sealed class DockerRunnerProviderTests
         DockerTestHttpMessageHandler handler = new((request, _) => Task.FromResult(request.Uri.AbsolutePath switch
         {
             var path when path.Contains("/images/", StringComparison.Ordinal) && path.EndsWith("/json", StringComparison.Ordinal) =>
-                DockerTestHttpMessageHandler.Json(HttpStatusCode.OK, "{\"Id\":\"sha256:test\"}"),
+                DockerTestHttpMessageHandler.Json(HttpStatusCode.OK, "{\"Id\":\"sha256:test\",\"Os\":\"linux\",\"Architecture\":\"arm64\"}"),
             "/v1.47/containers/create" => DockerTestHttpMessageHandler.Json(HttpStatusCode.Created, $"{{\"Id\":\"{new string('c', 64)}\"}}"),
             _ => DockerTestHttpMessageHandler.Json(HttpStatusCode.NotFound, "{}"),
         }));

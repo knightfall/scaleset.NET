@@ -2,6 +2,7 @@ using System.Net;
 using System.Diagnostics;
 using System.Reflection;
 using System.Text;
+using System.Text.Json;
 using ScaleSet.Client;
 using Xunit;
 
@@ -16,7 +17,7 @@ public sealed class ScaleSetClientTransportTests
     public async Task ActionsRequestMergesBasePathExistingQueriesAndApiVersion()
     {
         var handler = CreateConnectedHandler((_, _) => Task.FromResult(TestResponses.Json(HttpStatusCode.OK, "done")),
-            "https://actions.example/tenant?trace=base&api-version=7.0");
+            "https://actions-fixture.actions.githubusercontent.com/tenant?trace=base&api-version=7.0");
         using var httpClient = new HttpClient(handler);
         using var client = CreateClient(httpClient);
 
@@ -29,7 +30,7 @@ public sealed class ScaleSetClientTransportTests
             TestContext.Current.CancellationToken);
 
         Assert.Equal("done", Encoding.UTF8.GetString(response));
-        var request = handler.Requests.Single(request => request.Uri.Host == "actions.example");
+        var request = handler.Requests.Single(request => request.Uri.Host == "actions-fixture.actions.githubusercontent.com");
         Assert.Equal("/tenant/_apis/runtime/items", request.Uri.AbsolutePath);
         var query = ParseQuery(request.Uri.Query);
         Assert.Equal("base", query["trace"]);
@@ -42,7 +43,7 @@ public sealed class ScaleSetClientTransportTests
     public async Task RootRelativeActionsRouteIsJoinedToTheDiscoveredServicePath()
     {
         var handler = CreateConnectedHandler((_, _) => Task.FromResult(TestResponses.Json(HttpStatusCode.OK, "{}")),
-            "https://actions.example/tenant");
+            "https://actions-fixture.actions.githubusercontent.com/tenant");
         using var httpClient = new HttpClient(handler);
         using var client = CreateClient(httpClient);
 
@@ -54,7 +55,7 @@ public sealed class ScaleSetClientTransportTests
             expectedStatus: 200,
             TestContext.Current.CancellationToken);
 
-        var request = handler.Requests.Single(request => request.Uri.Host == "actions.example");
+        var request = handler.Requests.Single(request => request.Uri.Host == "actions-fixture.actions.githubusercontent.com");
         Assert.Equal("/tenant/_apis/runtime/runnerscalesets", request.Uri.AbsolutePath);
     }
 
@@ -173,7 +174,7 @@ public sealed class ScaleSetClientTransportTests
 
                 return Task.FromResult(TestResponses.Json(
                     HttpStatusCode.OK,
-                    CreateDiscoveryResponse("https://actions.example/tenant", DateTimeOffset.UtcNow.AddMinutes(10))));
+                    CreateDiscoveryResponse("https://actions-fixture.actions.githubusercontent.com/tenant", DateTimeOffset.UtcNow.AddMinutes(10))));
             }
 
             return Task.FromResult(TestResponses.Json(HttpStatusCode.OK, "ok"));
@@ -283,7 +284,7 @@ public sealed class ScaleSetClientTransportTests
         using var httpClient = new HttpClient(new RecordingHttpMessageHandler((_, _) =>
             Task.FromResult(TestResponses.Json(HttpStatusCode.OK, "payload"))));
         using var client = CreateClient(httpClient);
-        var queueUrl = new Uri("https://queue.example/poll?cursor=old&sig=queue-secret");
+        var queueUrl = new Uri("https://queue-fixture.actions.githubusercontent.com/poll?cursor=old&sig=queue-secret");
 
         var response = await client.SendQueueAsync(
             HttpMethod.Get,
@@ -309,7 +310,7 @@ public sealed class ScaleSetClientTransportTests
 
         var exception = await Assert.ThrowsAsync<ScaleSetApiException>(() => client.SendQueueAsync(
             HttpMethod.Get,
-            new Uri($"https://queue.example/{pathSecret}/poll?sig=queue"),
+            new Uri($"https://queue-fixture.actions.githubusercontent.com/{pathSecret}/poll?sig=queue"),
             "queue-token",
             body: null,
             headers: null,
@@ -318,7 +319,7 @@ public sealed class ScaleSetClientTransportTests
 
         Assert.Equal((int)HttpStatusCode.Unauthorized, exception.StatusCode);
         Assert.Equal(ScaleSetDomainError.MessageQueueTokenExpired, exception.DomainError);
-        Assert.Equal("https://queue.example/", exception.SafeUri);
+        Assert.Equal("https://queue-fixture.actions.githubusercontent.com/", exception.SafeUri);
         Assert.DoesNotContain(pathSecret, exception.SafeUri, StringComparison.Ordinal);
         Assert.DoesNotContain("sig=", exception.SafeUri, StringComparison.Ordinal);
         Assert.DoesNotContain("queue-secret", exception.BodyPreview, StringComparison.Ordinal);
@@ -336,7 +337,7 @@ public sealed class ScaleSetClientTransportTests
 
         var exception = await Assert.ThrowsAsync<ScaleSetApiException>(() => client.SendQueueAsync(
             HttpMethod.Get,
-            new Uri($"https://queue.example/{pathSecret}/poll?sig=queue"),
+            new Uri($"https://queue-fixture.actions.githubusercontent.com/{pathSecret}/poll?sig=queue"),
             "queue-token",
             body: null,
             headers: null,
@@ -344,7 +345,7 @@ public sealed class ScaleSetClientTransportTests
             TestContext.Current.CancellationToken));
 
         Assert.Null(exception.StatusCode);
-        Assert.Equal("https://queue.example/", exception.SafeUri);
+        Assert.Equal("https://queue-fixture.actions.githubusercontent.com/", exception.SafeUri);
         Assert.DoesNotContain(pathSecret, exception.SafeUri, StringComparison.Ordinal);
         Assert.DoesNotContain("sig=", exception.SafeUri, StringComparison.Ordinal);
     }
@@ -360,7 +361,7 @@ public sealed class ScaleSetClientTransportTests
 
         var exception = await Assert.ThrowsAsync<ScaleSetApiException>(() => client.SendQueueAsync<string>(
             HttpMethod.Get,
-            new Uri($"https://queue.example/{pathSecret}/poll?sessionId=unused"),
+            new Uri($"https://queue-fixture.actions.githubusercontent.com/{pathSecret}/poll?sessionId=unused"),
             "queue-token",
             body: null,
             headers: null,
@@ -369,7 +370,7 @@ public sealed class ScaleSetClientTransportTests
             static _ => throw new System.Text.Json.JsonException("invalid message")));
 
         Assert.Equal((int)HttpStatusCode.OK, exception.StatusCode);
-        Assert.Equal("https://queue.example/", exception.SafeUri);
+        Assert.Equal("https://queue-fixture.actions.githubusercontent.com/", exception.SafeUri);
         Assert.DoesNotContain(pathSecret, exception.SafeUri, StringComparison.Ordinal);
         Assert.DoesNotContain("sessionId=", exception.SafeUri, StringComparison.Ordinal);
     }
@@ -391,7 +392,7 @@ public sealed class ScaleSetClientTransportTests
 
         var exception = await Assert.ThrowsAnyAsync<ScaleSetApiException>(() => client.SendQueueAsync(
             HttpMethod.Get,
-            new Uri("https://queue.example/poll"),
+            new Uri("https://queue-fixture.actions.githubusercontent.com/poll"),
             "queue-token",
             body: null,
             headers: null,
@@ -508,6 +509,53 @@ public sealed class ScaleSetClientTransportTests
         Assert.True(exception.BodyPreview!.Length <= 1024);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task HttpErrorRedactsStandaloneGitHubTokensAndKeepsContext(bool json)
+    {
+        const string message = "upstream refused gHp_syntheticPassword github_pat_syntheticFineGrained and GHS_syntheticInstall after lookup";
+        using var handler = CreateConnectedHandler((_, _) => Task.FromResult(new HttpResponseMessage(HttpStatusCode.BadRequest)
+        {
+            Content = new StringContent(json ? JsonSerializer.Serialize(new { message }) : message, Encoding.UTF8,
+                json ? "application/json" : "text/plain"),
+        }));
+        using var http = new HttpClient(handler);
+        using var client = CreateClient(http);
+        var exception = await Assert.ThrowsAsync<ScaleSetApiException>(() => client.SendActionsAsync(
+            HttpMethod.Get, "/_apis/runtime/error", null, null, 200, TestContext.Current.CancellationToken));
+
+        Assert.Contains("upstream refused", exception.BodyPreview, StringComparison.Ordinal);
+        Assert.Contains("after lookup", exception.BodyPreview, StringComparison.Ordinal);
+        Assert.DoesNotContain("synthetic", exception.BodyPreview, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("synthetic", exception.ToString(), StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ErrorPreviewBoundsRepeatedUnclosedPemAndMalformedTextAtReadCap(bool json)
+    {
+        const string prefix = "diagnostic context";
+        const string opening = "-----begin device-bound private key-----";
+        string malformed = (json ? "{\"message\":\"" : "") + prefix + " " + opening + " synthetic-PEM "
+            + string.Concat(Enumerable.Repeat(opening, (ScaleSetClientDiagnostics.MaximumErrorBodyBytes / opening.Length) + 1));
+        using var handler = CreateConnectedHandler((_, _) => Task.FromResult(new HttpResponseMessage(HttpStatusCode.BadRequest)
+        {
+            Content = new StringContent(malformed, Encoding.UTF8, json ? "application/json" : "text/plain"),
+        }));
+        using var http = new HttpClient(handler);
+        using var client = CreateClient(http);
+        var exception = await Assert.ThrowsAsync<ScaleSetApiException>(() => client.SendActionsAsync(
+            HttpMethod.Get, "/_apis/runtime/error", null, null, 200, TestContext.Current.CancellationToken));
+
+        Assert.Contains(prefix, exception.BodyPreview, StringComparison.Ordinal);
+        Assert.Contains("[REDACTED-PRIVATE-KEY]", exception.BodyPreview, StringComparison.Ordinal);
+        Assert.Contains("[truncated]", exception.BodyPreview, StringComparison.Ordinal);
+        Assert.DoesNotContain("synthetic-PEM", exception.BodyPreview, StringComparison.Ordinal);
+        Assert.DoesNotContain(opening, exception.BodyPreview, StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task MalformedTruncatedQuotedTokenFieldIsRedacted()
     {
@@ -539,8 +587,8 @@ public sealed class ScaleSetClientTransportTests
             HttpStatusCode.BadGateway,
             System.Text.Json.JsonSerializer.Serialize(new
             {
-                message = $"queue URL https://{userInfo}@queue.example/poll?sig={signature}",
-                messageQueueUrl = $"https://queue.example/poll?sig={signature}",
+                message = $"queue URL https://{userInfo}@queue-fixture.actions.githubusercontent.com/poll?sig={signature}",
+                messageQueueUrl = $"https://queue-fixture.actions.githubusercontent.com/poll?sig={signature}",
             }))));
         using var httpClient = new HttpClient(handler);
         using var client = CreateClient(httpClient);
@@ -555,7 +603,7 @@ public sealed class ScaleSetClientTransportTests
 
         Assert.DoesNotContain(userInfo, exception.BodyPreview, StringComparison.Ordinal);
         Assert.DoesNotContain(signature, exception.BodyPreview, StringComparison.Ordinal);
-        Assert.DoesNotContain("queue.example", exception.BodyPreview, StringComparison.Ordinal);
+        Assert.DoesNotContain("queue-fixture.actions.githubusercontent.com", exception.BodyPreview, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -587,7 +635,7 @@ public sealed class ScaleSetClientTransportTests
         Assert.Equal((int)HttpStatusCode.Created, exception.StatusCode);
         Assert.DoesNotContain(unsafeToken, exception.ToString(), StringComparison.Ordinal);
         Assert.DoesNotContain("Injected", exception.BodyPreview, StringComparison.Ordinal);
-        Assert.DoesNotContain(handler.Requests, request => request.Uri.Host == "actions.example");
+        Assert.DoesNotContain(handler.Requests, request => request.Uri.Host == "actions-fixture.actions.githubusercontent.com");
     }
 
     [Fact]
@@ -606,7 +654,7 @@ public sealed class ScaleSetClientTransportTests
             {
                 return Task.FromResult(TestResponses.Json(HttpStatusCode.OK, System.Text.Json.JsonSerializer.Serialize(new
                 {
-                    url = "https://actions.example/tenant",
+                    url = "https://actions-fixture.actions.githubusercontent.com/tenant",
                     token = unsafeToken,
                 })));
             }
@@ -627,7 +675,7 @@ public sealed class ScaleSetClientTransportTests
         Assert.Equal((int)HttpStatusCode.OK, exception.StatusCode);
         Assert.DoesNotContain("Injected", exception.BodyPreview, StringComparison.Ordinal);
         Assert.DoesNotContain(unsafeToken, exception.ToString(), StringComparison.Ordinal);
-        Assert.DoesNotContain(handler.Requests, request => request.Uri.Host == "actions.example");
+        Assert.DoesNotContain(handler.Requests, request => request.Uri.Host == "actions-fixture.actions.githubusercontent.com");
     }
 
     [Fact]
@@ -640,7 +688,7 @@ public sealed class ScaleSetClientTransportTests
 
         await Assert.ThrowsAsync<ArgumentException>(() => client.SendQueueAsync(
             HttpMethod.Get,
-            new Uri("https://queue.example/poll"),
+            new Uri("https://queue-fixture.actions.githubusercontent.com/poll"),
             "queue-token\r\nInjected: true",
             body: null,
             headers: null,
@@ -776,7 +824,7 @@ public sealed class ScaleSetClientTransportTests
         var createRequest = typeof(ScaleSetClient).GetMethod("CreateRequest", BindingFlags.Instance | BindingFlags.NonPublic);
         using var request = Assert.IsType<HttpRequestMessage>(createRequest!.Invoke(
             client,
-            [HttpMethod.Get, new Uri("https://actions.example/test"), null, "Bearer synthetic-token", null, null, "queue"]));
+            [HttpMethod.Get, new Uri("https://actions-fixture.actions.githubusercontent.com/test"), null, "Bearer synthetic-token", null, null, "queue"]));
         Assert.Equal(HttpVersion.Version20, request.Version);
         Assert.Equal(HttpVersionPolicy.RequestVersionOrLower, request.VersionPolicy);
     }
@@ -800,7 +848,7 @@ public sealed class ScaleSetClientTransportTests
 
         _ = await client.SendQueueAsync(
             HttpMethod.Get,
-            new Uri("https://queue.example/poll"),
+            new Uri("https://queue-fixture.actions.githubusercontent.com/poll"),
             "queue-token",
             body: null,
             headers: null,
@@ -905,7 +953,7 @@ public sealed class ScaleSetClientTransportTests
         HttpContent? actionContent = null;
         var handler = new RecordingHttpMessageHandler((request, _) =>
         {
-            if (request.RequestUri!.Host == "actions.example")
+            if (request.RequestUri!.Host == "actions-fixture.actions.githubusercontent.com")
             {
                 actionContent = request.Content;
             }
@@ -920,7 +968,7 @@ public sealed class ScaleSetClientTransportTests
             {
                 return Task.FromResult(TestResponses.Json(
                     HttpStatusCode.OK,
-                    CreateDiscoveryResponse("https://actions.example/tenant", DateTimeOffset.UtcNow.AddMinutes(10))));
+                    CreateDiscoveryResponse("https://actions-fixture.actions.githubusercontent.com/tenant", DateTimeOffset.UtcNow.AddMinutes(10))));
             }
 
             return Task.FromResult(TestResponses.Json(HttpStatusCode.OK, "ok"));
@@ -949,7 +997,7 @@ public sealed class ScaleSetClientTransportTests
 
     private static RecordingHttpMessageHandler CreateConnectedHandler(
         Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>> actionsHandler,
-        string serviceUrl = "https://actions.example/tenant") =>
+        string serviceUrl = "https://actions-fixture.actions.githubusercontent.com/tenant") =>
         new(async (request, cancellationToken) =>
         {
             var path = request.RequestUri!.AbsolutePath;
