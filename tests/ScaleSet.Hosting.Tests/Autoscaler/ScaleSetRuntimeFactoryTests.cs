@@ -156,8 +156,10 @@ public sealed partial class ScaleSetRuntimeFactoryTests
         Assert.True(File.Exists(Path.Combine(statePath, "runner-state.json")));
     }
 
-    [Fact]
-    public async Task InitializeAsync_PendingIdentityWithoutRemoteScaleSetFailsClosedWithoutSecondCreate()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task InitializeAsync_PendingIdentityWithoutRemoteScaleSetFailsClosedWithoutSecondCreate(bool emptyJournalPlaceholder)
     {
         using TemporaryStateDirectory directory = new();
         (AutoscalerOptions options, ScaleSetOptions scaleSet) = CreateOptions(directory.Path);
@@ -194,6 +196,12 @@ public sealed partial class ScaleSetRuntimeFactoryTests
             Path.Combine(setStateDirectory, "scale-set-identity.json"),
             TestContext.Current.CancellationToken);
         Assert.DoesNotContain(CredentialSentinel, pendingIdentityJson, StringComparison.Ordinal);
+        if (emptyJournalPlaceholder)
+        {
+            await File.WriteAllBytesAsync(Path.Combine(setStateDirectory, "runner-state.sqlite3"), [],
+                TestContext.Current.CancellationToken);
+        }
+
         FakeScaleSetRuntimeClient restartClient = new();
         FakeRunnerProvider restartProvider = new();
         ScaleSetRuntimeFactory restartFactory = CreateFactory(options, restartClient, restartProvider);
@@ -449,6 +457,7 @@ public sealed partial class ScaleSetRuntimeFactoryTests
             MessageId = 10,
             Statistics = new RunnerScaleSetStatistic { TotalAssignedJobs = 1 },
             JobAvailableMessages = [new JobAvailableMessage { RunnerRequestId = 800 }],
+            JobAssignedMessages = [new JobAssignedMessage { RunnerRequestId = 800 }],
         }, token);
         Assert.Equal(10, await acknowledgmentAttempts.Reader.ReadAsync(deadline.Token));
 
@@ -633,6 +642,141 @@ public sealed partial class ScaleSetRuntimeFactoryTests
         Assert.Equal(1, capacity.CaptureSnapshot().Usage.RunnerCount);
     }
 
+    [Fact]
+    public async Task RunAsync_ReconnectRetainsUnprovenAssignmentCapacityUntilMatchingActivity()
+    {
+        using TemporaryStateDirectory directory = new();
+        (AutoscalerOptions options, ScaleSetOptions scaleSet) = CreateRecoveryOptions(directory.Path);
+        scaleSet.Scaling.MaxRunners = 2;
+        const string peerKey = "peer";
+        options.ScaleSets.Add(new ScaleSetOptions
+        {
+            Key = peerKey,
+            RunnerProfile = scaleSet.RunnerProfile,
+            Scaling = new ScalingOptions { Policy = ScalingPolicy.SpareCapacity, MaxRunners = 3 },
+        });
+        options.HostCapacity.MaxTotalRunners = 3;
+        HostCapacityCoordinator capacity = new(options.HostCapacity, options.ScaleSets);
+        CancellationToken token = TestContext.Current.CancellationToken;
+        using var testDeadline = CancellationTokenSource.CreateLinkedTokenSource(token);
+        testDeadline.CancelAfter(TimeSpan.FromSeconds(10));
+        BackoffClock clock = new();
+        Channel<long> acknowledgments = Channel.CreateUnbounded<long>();
+        Channel<RunnerScaleSetMessage?> deliveries = Channel.CreateUnbounded<RunnerScaleSetMessage?>();
+        TaskCompletionSource replacementPolling = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        ConcurrentQueue<long> acquisitions = new();
+        const long pendingId = 801;
+        const long runnerId = 915;
+        var aggregate = new RunnerScaleSetStatistic { TotalAssignedJobs = 1 };
+        int initialPolls = 0;
+        FakeRuntimeSession initial = new()
+        {
+            Poll = _ => Interlocked.Increment(ref initialPolls) == 1
+                ? Task.FromResult<RunnerScaleSetMessage?>(new RunnerScaleSetMessage
+                {
+                    MessageId = 51,
+                    Statistics = aggregate,
+                    JobAvailableMessages = [new JobAvailableMessage { RunnerRequestId = pendingId }],
+                })
+                : throw new HttpRequestException(HttpRequestError.ConnectionError, "Synthetic disconnected queue."),
+            Acquire = AcquireAsync,
+            Acknowledge = (id, ct) => acknowledgments.Writer.WriteAsync(id, ct).AsTask(),
+            Close = _ => Task.CompletedTask,
+        };
+        FakeRuntimeSession replacement = new()
+        {
+            Session = new RunnerScaleSetSession { SessionId = Guid.NewGuid(), Statistics = aggregate },
+            Poll = ct =>
+            {
+                replacementPolling.TrySetResult();
+                return deliveries.Reader.ReadAsync(ct).AsTask();
+            },
+            Acquire = AcquireAsync,
+            Acknowledge = (id, ct) => acknowledgments.Writer.WriteAsync(id, ct).AsTask(),
+            Close = _ => Task.CompletedTask,
+        };
+        int jitCalls = 0;
+        FakeScaleSetRuntimeClient client = new()
+        {
+            OnOpen = (attempt, _) => Task.FromResult<IMessageSession>(attempt == 1 ? initial : replacement),
+            OnGenerateJit = setting =>
+            {
+                Interlocked.Increment(ref jitCalls);
+                return new RunnerScaleSetJitRunnerConfig
+                {
+                    Runner = new RunnerReference { Id = runnerId, Name = setting.Name },
+                    EncodedJitConfig = "synthetic-jit",
+                };
+            },
+        };
+        FakeRunnerProvider provider = new() { AllowProvisioning = true };
+        await using IScaleSetRuntime runtime = await CreateFactory(options, client, provider, timeProvider: clock)
+            .CreateAsync(scaleSet, capacity, token);
+        await runtime.InitializeAsync(token);
+        Task run = runtime.RunAsync(testDeadline.Token);
+        Assert.Equal(51, await acknowledgments.Reader.ReadAsync(testDeadline.Token));
+        Action reconnect = await clock.WaitForDelayAsync(TimeSpan.FromSeconds(1), testDeadline.Token);
+        CapacityReservationLease retained = Assert.Single(capacity.DemandRegistry.GetAdmissionPermits(scaleSet.Key!));
+        Assert.Equal(2, capacity.CaptureSnapshot().Usage.RunnerCount);
+        reconnect();
+        await replacementPolling.Task.WaitAsync(testDeadline.Token);
+        Assert.Equal(1, initial.CloseCount);
+        Assert.Same(retained, Assert.Single(capacity.DemandRegistry.GetAdmissionPermits(scaleSet.Key!)));
+
+        await deliveries.Writer.WriteAsync(new RunnerScaleSetMessage
+        {
+            MessageId = 52,
+            Statistics = aggregate,
+            JobAvailableMessages = [new JobAvailableMessage { RunnerRequestId = 802 }],
+        }, token);
+        Assert.Equal(52, await acknowledgments.Reader.ReadAsync(testDeadline.Token));
+        Assert.Equal(pendingId, Assert.Single(acquisitions));
+        Assert.Equal(2, capacity.CaptureSnapshot().Usage.RunnerCount);
+        Assert.Equal(1, capacity.CreatePlan().GetScaleSet(peerKey).ReservableAdditionalRunners);
+
+        RunnerResource runner = Assert.IsType<RunnerResource>(provider.Current);
+        await deliveries.Writer.WriteAsync(new RunnerScaleSetMessage
+        {
+            MessageId = 53,
+            Statistics = aggregate,
+            JobStartedMessages = [new JobStartedMessage { RunnerRequestId = pendingId, RunnerId = runnerId, RunnerName = runner.Identity.RunnerName }],
+        }, token);
+        Assert.Equal(53, await acknowledgments.Reader.ReadAsync(testDeadline.Token));
+        Assert.Empty(capacity.DemandRegistry.GetAdmissionPermits(scaleSet.Key!));
+        Assert.Null(capacity.DemandRegistry.GetCapacityLease(retained.Handle.Identity.OperationId));
+        Assert.Equal(1, capacity.CaptureSnapshot().Usage.StateCounts[CapacityOccupancyState.Busy]);
+        Assert.Equal(1, capacity.CaptureSnapshot().Usage.RunnerCount);
+
+        provider.Current = new RunnerResource(runner.ProviderResourceId, runner.Identity, RunnerResourceStatus.Exited, exitCode: 0);
+        await deliveries.Writer.WriteAsync(new RunnerScaleSetMessage
+        {
+            MessageId = 54,
+            Statistics = new RunnerScaleSetStatistic(),
+            JobCompletedMessages = [new JobCompletedMessage { RunnerRequestId = pendingId, RunnerId = runnerId, RunnerName = runner.Identity.RunnerName }],
+        }, token);
+        Assert.Equal(54, await acknowledgments.Reader.ReadAsync(testDeadline.Token));
+        Assert.Null(provider.Current);
+        Assert.Equal(0, capacity.CaptureSnapshot().Usage.RunnerCount);
+        Assert.Equal(2, capacity.CreatePlan().GetScaleSet(peerKey).ReservableAdditionalRunners);
+        Assert.Equal(1, jitCalls);
+        Assert.Equal(pendingId, Assert.Single(acquisitions));
+        await runtime.DrainAsync(token);
+        await runtime.StopAsync(token);
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => run);
+        Assert.Equal(2, client.SessionCreateCount);
+        Assert.Equal(1, replacement.CloseCount);
+
+        Task<IReadOnlyList<long>> AcquireAsync(IReadOnlyList<long> requests, CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            foreach (long requestId in requests)
+            {
+                acquisitions.Enqueue(requestId);
+            }
+            return Task.FromResult(requests);
+        }
+    }
+
     [Theory]
     [InlineData(409, false, 4)]
     [InlineData(409, true, 1)]
@@ -674,13 +818,65 @@ public sealed partial class ScaleSetRuntimeFactoryTests
     }
 
     [Fact]
+    public async Task RunAsync_WaitsBeforeClosingAndRetriesTheSameSessionAfterTransientCloseFailure()
+    {
+        using TemporaryStateDirectory directory = new();
+        (AutoscalerOptions options, ScaleSetOptions scaleSet) = CreateOptions(directory.Path);
+        scaleSet.Lifecycle.CleanupTimeout = TimeSpan.FromSeconds(5);
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+        deadline.CancelAfter(TimeSpan.FromSeconds(10));
+        var token = deadline.Token;
+        BackoffClock clock = new();
+        int closeAttempts = 0;
+        FakeRuntimeSession failed = new()
+        {
+            Poll = _ => throw new ScaleSetApiException("Synthetic queue outage.", statusCode: 503),
+            Close = _ => ++closeAttempts == 1
+                ? throw new ScaleSetApiException("Synthetic close outage.", statusCode: 503)
+                : Task.CompletedTask,
+        };
+        TaskCompletionSource replacementPolling = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        FakeRuntimeSession replacement = new()
+        {
+            Poll = async cancellationToken =>
+            {
+                replacementPolling.TrySetResult();
+                await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+                return null;
+            },
+            Close = _ => Task.CompletedTask,
+        };
+        FakeScaleSetRuntimeClient client = new()
+        {
+            OnOpen = (attempt, _) => Task.FromResult<IMessageSession>(attempt == 1 ? failed : replacement),
+        };
+        await using IScaleSetRuntime runtime = await CreateFactory(options, client, new FakeRunnerProvider(), timeProvider: clock)
+            .CreateAsync(scaleSet, new HostCapacityCoordinator(options.HostCapacity, options.ScaleSets), token);
+        await runtime.InitializeAsync(token);
+        Task run = runtime.RunAsync(token);
+
+        Action firstDelay = await clock.WaitForDelayAsync(TimeSpan.FromSeconds(1), token);
+        Assert.Equal(0, failed.CloseCount);
+        firstDelay();
+        Action closeDelay = await clock.WaitForDelayAsync(TimeSpan.FromSeconds(2), token);
+        Assert.Equal(1, failed.CloseCount);
+        Assert.Equal(1, client.SessionCreateCount);
+        closeDelay();
+        await replacementPolling.Task.WaitAsync(token);
+        Assert.Equal(2, failed.CloseCount);
+        Assert.Equal(2, client.SessionCreateCount);
+        await runtime.StopAsync(token);
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => run);
+    }
+
+    [Fact]
     public async Task RunAsync_UnconfirmedClosePreventsOpeningAReplacementSession()
     {
         using TemporaryStateDirectory directory = new();
         (AutoscalerOptions options, ScaleSetOptions scaleSet) = CreateOptions(directory.Path);
         CancellationToken token = TestContext.Current.CancellationToken;
         HttpRequestException pollFailure = new(HttpRequestError.ConnectionError, "synthetic queue failure");
-        ScaleSetApiException closeFailure = new("synthetic close failure", statusCode: 503);
+        ScaleSetApiException closeFailure = new("synthetic close failure", statusCode: 403);
         int closeAttempts = 0;
         FakeRuntimeSession session = new()
         {
@@ -697,6 +893,113 @@ public sealed partial class ScaleSetRuntimeFactoryTests
         Assert.Equal(1, client.SessionCreateCount);
         await runtime.StopAsync(token);
         Assert.Equal(2, session.CloseCount);
+    }
+
+    [Theory]
+    [InlineData("release")]
+    [InlineData("release error")]
+    [InlineData("timeout")]
+    public async Task StopAsync_JoinsOrReportsQueuedProvisioningReleaseBeforeDisposal(string outcome)
+    {
+        using TemporaryStateDirectory directory = new();
+        (AutoscalerOptions options, ScaleSetOptions scaleSet) = CreateOptions(directory.Path);
+        options.HostCapacity.CreationConcurrency = 1;
+        CancellationToken token = TestContext.Current.CancellationToken;
+        using var testDeadline = CancellationTokenSource.CreateLinkedTokenSource(token);
+        testDeadline.CancelAfter(TimeSpan.FromSeconds(10));
+        BackoffClock clock = new();
+        FakeRuntimeSession session = new()
+        {
+            Session = new RunnerScaleSetSession
+            {
+                SessionId = Guid.NewGuid(),
+                Statistics = new RunnerScaleSetStatistic { TotalAssignedJobs = 1 },
+            },
+            Poll = _ => throw new InvalidOperationException("Initial provisioning must wait for creation capacity."),
+            Close = _ => Task.CompletedTask,
+        };
+        FakeScaleSetRuntimeClient client = new() { RuntimeSession = session };
+        FakeRunnerProvider provider = new();
+        HostCapacityCoordinator coordinator = new(options.HostCapacity, options.ScaleSets);
+        var registry = coordinator.DemandRegistry;
+        IScaleSetRuntime runtime = await CreateFactory(options, client, provider, timeProvider: clock)
+            .CreateAsync(scaleSet, coordinator, token);
+        await runtime.InitializeAsync(token);
+        await using var heldCreation = await coordinator.CreationConcurrencyGate.AcquireAsync(token);
+        var scope = new RunnerOwnershipScope(options.Controller.Identity, scaleSet.Key!, 987);
+        var resources = CapacityResourceQuantities.FromRunnerProfile(scaleSet.RunnerProfile);
+        Guid operationId = Guid.NewGuid();
+        var identity = new RunnerIdentity(scope, operationId, "reserved-runner", capacityResources: resources);
+        var attempted = coordinator.TryReserve(coordinator.CreatePlan(new Dictionary<string, int> { [scope.ScaleSetKey] = 1 }),
+            new CapacityReservationRequest(identity, resources));
+        Assert.Equal(CapacityReservationStatus.Reserved, attempted.Status);
+        CapacityReservationLease permit = new(Assert.IsType<CapacityReservationHandle>(attempted.Handle), attempted.Revision);
+        registry.StoreCapacityLease(permit, isAdmissionPermit: true);
+        Task running = runtime.RunAsync(testDeadline.Token);
+        while (registry.GetAdmissionPermits(scope.ScaleSetKey).Count != 0)
+        {
+            await Task.Delay(TimeSpan.FromMilliseconds(10), testDeadline.Token);
+        }
+
+        Assert.Same(permit, registry.GetCapacityLease(operationId));
+        SemaphoreSlim gate = registry.PlanningGate;
+        await gate.WaitAsync(testDeadline.Token);
+        Task stop;
+        long version;
+        try
+        {
+            stop = runtime.StopAsync(token);
+            Assert.Same(stop, runtime.StopAsync(token));
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => running.WaitAsync(testDeadline.Token));
+            Action expireSettlement = await clock.WaitForDelayAsync(TimeSpan.FromSeconds(1), testDeadline.Token);
+            Assert.False(stop.IsCompleted);
+            Assert.Equal(0, session.CloseCount);
+            Assert.Equal(0, provider.DisposeCount);
+            if (outcome == "release error")
+            {
+                Assert.Equal(CapacityStateUpdateStatus.Updated,
+                    coordinator.TryUpdateState(permit.Handle, permit.Revision, CapacityOccupancyState.JitIssued).Status);
+            }
+            version = coordinator.CaptureSnapshot().Version;
+
+            if (outcome == "timeout")
+            {
+                expireSettlement();
+                await Assert.ThrowsAsync<TimeoutException>(() => stop.WaitAsync(testDeadline.Token));
+                Assert.Equal(1, session.CloseCount);
+            }
+        }
+        finally
+        {
+            gate.Release();
+        }
+
+        await runtime.DrainAsync(token);
+        await runtime.DrainAsync(token);
+        Task disposal = runtime.DisposeAsync().AsTask();
+        Assert.Same(disposal, runtime.DisposeAsync().AsTask());
+        if (outcome == "release")
+        {
+            await stop.WaitAsync(testDeadline.Token);
+            await disposal.WaitAsync(testDeadline.Token);
+        }
+        else
+        {
+            Exception? stopFailure = await Record.ExceptionAsync(() => stop.WaitAsync(testDeadline.Token));
+            if (outcome == "release error")
+            {
+                Assert.Contains("current revision", Assert.IsType<InvalidOperationException>(stopFailure).Message, StringComparison.Ordinal);
+            }
+            Assert.Same(stopFailure, await Record.ExceptionAsync(() => disposal.WaitAsync(testDeadline.Token)));
+        }
+
+        Assert.Equal(1, session.CloseCount);
+        Assert.Equal(1, provider.DisposeCount);
+        Assert.Equal(1, client.DisposeCount);
+        Assert.Null(provider.Current);
+        Assert.Same(outcome == "release" ? null : permit, registry.GetCapacityLease(operationId));
+        Assert.Equal(version + (outcome == "release" ? 1 : 0), coordinator.CaptureSnapshot().Version);
+        Assert.Equal(outcome == "release" ? 0 : 1, coordinator.CaptureSnapshot().Usage.RunnerCount);
     }
 
     [Theory]
@@ -843,7 +1146,7 @@ public sealed partial class ScaleSetRuntimeFactoryTests
         return Path.Combine(Path.GetFullPath(stateRoot), Convert.ToHexString(digest).ToLowerInvariant());
     }
 
-    private sealed class FakeScaleSetRuntimeClient : IScaleSetRuntimeClient
+    private class FakeScaleSetRuntimeClient : IScaleSetRuntimeClient
     {
         private int _createCount;
         private int _sessionCreateCount;
@@ -924,7 +1227,7 @@ public sealed partial class ScaleSetRuntimeFactoryTests
         public Func<long, CancellationToken, Task>? Acknowledge { get; init; }
         public int CloseCount { get; private set; }
 
-        public RunnerScaleSetSession Session { get; } = new()
+        public RunnerScaleSetSession Session { get; init; } = new()
         {
             SessionId = Guid.NewGuid(),
             Statistics = new RunnerScaleSetStatistic(),
@@ -976,7 +1279,7 @@ public sealed partial class ScaleSetRuntimeFactoryTests
             return Task.FromResult(Current);
         }
 
-        public Task<RunnerResource> StartAsync(RunnerResource resource, CancellationToken cancellationToken = default)
+        public Task<RunnerResource> StartAsync(RunnerResource resource, string? encodedJitConfig, CancellationToken cancellationToken = default)
         {
             Assert.Equal(Current, resource);
             Current = new RunnerResource(resource.ProviderResourceId, resource.Identity, RunnerResourceStatus.Running);
@@ -1077,7 +1380,7 @@ public sealed partial class ScaleSetRuntimeFactoryTests
 
             if (path == "/actions/runner-registration")
             {
-                return Json(HttpStatusCode.OK, $$"""{"url":"https://actions.example.test/tenant/123/","token":"{{DiscoveryJwt}}"}""");
+                return Json(HttpStatusCode.OK, $$"""{"url":"https://actions-fixture.actions.githubusercontent.com/tenant/123/","token":"{{DiscoveryJwt}}"}""");
             }
 
             if (request.Method == HttpMethod.Post && path.EndsWith("/sessions", StringComparison.Ordinal))
@@ -1092,7 +1395,7 @@ public sealed partial class ScaleSetRuntimeFactoryTests
                 {
                     SessionId = first ? FirstSessionId : ReplacementSessionId,
                     OwnerName = owner,
-                    MessageQueueUrl = first ? "https://queue.example.test/first" : "https://queue.example.test/replacement",
+                    MessageQueueUrl = first ? "https://queue-fixture.actions.githubusercontent.com/first" : "https://queue-fixture.actions.githubusercontent.com/replacement",
                     MessageQueueAccessToken = "synthetic-queue-token",
                     Statistics = new RunnerScaleSetStatistic(),
                 }));

@@ -1,5 +1,6 @@
 using ScaleSet.Client;
 using ScaleSet.Hosting.Capacity;
+using ScaleSet.Hosting.Controller;
 using ScaleSet.Hosting.Providers;
 using ScaleSet.Hosting.State;
 
@@ -12,7 +13,8 @@ public sealed partial class ScaleSetRuntimeFactory
         private async Task ReconcileSteadyStateAsync(CancellationToken cancellationToken)
         {
             FileRunnerStateJournal journal = _journal!;
-            var operations = await journal.ReadAllAsync(cancellationToken).ConfigureAwait(false);
+            var operations = await ScaleSetMessageHandler.ReadTrackedOperationsAsync(
+                journal, _capacityCoordinator.DemandRegistry, cancellationToken).ConfigureAwait(false);
             if (_handler?.IsDraining == true)
             {
                 foreach (RunnerOperationState operation in operations)
@@ -32,10 +34,12 @@ public sealed partial class ScaleSetRuntimeFactory
             Dictionary<Guid, RunnerOperationState> byOperation = operations.ToDictionary(static operation => operation.Identity.OperationId);
             foreach (RunnerResource resource in inventory.Values)
             {
-                if (byOperation.TryGetValue(resource.Identity.OperationId, out RunnerOperationState? previous))
+                RunnerOperationState? previous = byOperation.GetValueOrDefault(resource.Identity.OperationId)
+                    ?? await journal.FindAsync(resource.Identity.OperationId, cancellationToken).ConfigureAwait(false);
+                if (previous is not null)
                 {
                     EnsureResourceMatchesJournal(resource, previous, journal.Scope);
-                    if (previous.Stage == RunnerLifecycleStage.Gone)
+                    if (IRunnerStateJournal.IsTerminal(previous))
                     {
                         throw new InvalidDataException("Scoped inventory contradicts a durable runner absence.");
                     }
@@ -152,7 +156,8 @@ public sealed partial class ScaleSetRuntimeFactory
                 return false;
             }
 
-            RegistrationState registration = await ReadRegistrationAsync(operation.Identity, cancellationToken).ConfigureAwait(false);
+            (RegistrationState registration, RunnerReference? reference) = await ReadRegistrationAsync(
+                operation.Identity, cancellationToken).ConfigureAwait(false);
             if (registration == RegistrationState.Present)
             {
                 if (canRetryStart)
@@ -163,7 +168,15 @@ public sealed partial class ScaleSetRuntimeFactory
                     return false;
                 }
 
-                if (!await TryRemoveInactiveRegistrationAsync(operation.Identity.GitHubRunnerId!.Value, cancellationToken).ConfigureAwait(false))
+                if (operation.Identity.GitHubRunnerId is null)
+                {
+                    var identity = operation.Identity;
+                    operation = await _lifecycle!.AssociateRecoveredGitHubRunnerAsync(
+                        new RunnerIdentity(identity.Scope, identity.OperationId, identity.RunnerName, reference!.Id, identity.CapacityResources),
+                        cancellationToken).ConfigureAwait(false);
+                }
+
+                if (!await TryRemoveInactiveRegistrationAsync(reference!.Id, cancellationToken).ConfigureAwait(false))
                 {
                     return false;
                 }
@@ -187,37 +200,42 @@ public sealed partial class ScaleSetRuntimeFactory
             return true;
         }
 
-        private async Task<RegistrationState> ReadRegistrationAsync(RunnerIdentity identity, CancellationToken cancellationToken)
+        private async Task<(RegistrationState State, RunnerReference? Reference)> ReadRegistrationAsync(
+            RunnerIdentity identity, CancellationToken cancellationToken)
         {
-            if (identity.GitHubRunnerId is not long runnerId)
+            if (identity.GitHubRunnerId is null && _client is not IScaleSetRunnerNameLookup)
             {
-                return RegistrationState.Unconfirmed;
+                return (RegistrationState.Unconfirmed, null);
             }
 
             RunnerReference? registration;
             try
             {
-                registration = await _client.GetRunnerAsync(runnerId, cancellationToken).ConfigureAwait(false);
+                registration = identity.GitHubRunnerId is { } runnerId
+                    ? await _client.GetRunnerAsync(runnerId, cancellationToken).ConfigureAwait(false)
+                    : await ((IScaleSetRunnerNameLookup)_client).FindRunnerByNameAsync(identity.RunnerName, cancellationToken)
+                        .ConfigureAwait(false);
             }
-            catch (ScaleSetApiException exception) when (RegistrationNotFound(exception))
+            catch (ScaleSetApiException exception) when (identity.GitHubRunnerId is not null && RegistrationNotFound(exception))
             {
-                return RegistrationState.Absent;
+                return (RegistrationState.Absent, null);
             }
 
             if (registration is null)
             {
-                return RegistrationState.Absent;
+                return (RegistrationState.Absent, null);
             }
 
-            if (registration.Id != runnerId || !string.Equals(registration.Name, identity.RunnerName, StringComparison.Ordinal)
+            if (registration.Id <= 0 || (identity.GitHubRunnerId is { } expectedId && registration.Id != expectedId)
+                || !string.Equals(registration.Name, identity.RunnerName, StringComparison.Ordinal)
                 || (registration.RunnerScaleSetId > 0 && registration.RunnerScaleSetId != identity.Scope.ScaleSetId))
             {
                 throw new InvalidDataException("GitHub returned a runner registration that conflicts with its durable identity.");
             }
 
-            return registration.RunnerScaleSetId == identity.Scope.ScaleSetId
+            return (registration.RunnerScaleSetId == identity.Scope.ScaleSetId
                 ? RegistrationState.Present
-                : RegistrationState.Unconfirmed;
+                : RegistrationState.Unconfirmed, registration);
         }
 
         private async Task<bool> TryRemoveInactiveRegistrationAsync(long runnerId, CancellationToken cancellationToken)

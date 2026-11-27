@@ -7,11 +7,11 @@ public sealed class AutoscalerHealthState
     private int _failed;
     private int _stopping;
 
-    /// <summary>Gets whether the worker has not faulted or entered shutdown.</summary>
-    public bool IsLive => Volatile.Read(ref _failed) == 0 && Volatile.Read(ref _stopping) == 0;
+    /// <summary>Gets whether the worker has not faulted.</summary>
+    public bool IsLive => Volatile.Read(ref _failed) == 0;
 
     /// <summary>Gets whether all configured scale sets completed initial reconciliation.</summary>
-    public bool IsReady => Volatile.Read(ref _ready) == 1;
+    public bool IsReady => Volatile.Read(ref _ready) == 1 && Volatile.Read(ref _stopping) == 0 && IsLive;
 
     /// <summary>Marks the process ready after every runtime has initialized successfully.</summary>
     public void MarkReady() => Interlocked.Exchange(ref _ready, 1);
@@ -26,10 +26,10 @@ public sealed class AutoscalerHealthState
         Interlocked.Exchange(ref _failed, 1);
     }
 
-    /// <summary>Marks normal host shutdown so liveness and readiness stop succeeding.</summary>
+    /// <summary>Marks normal host shutdown so readiness stops succeeding during the drain.</summary>
     public void MarkStopping()
     {
-        MarkNotReady();
         Interlocked.Exchange(ref _stopping, 1);
+        MarkNotReady();
     }
 }

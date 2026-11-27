@@ -1,3 +1,4 @@
+using System.Runtime.ExceptionServices;
 using Microsoft.Extensions.Logging;
 using ScaleSet.Client;
 using ScaleSet.Hosting.Capacity;
@@ -24,68 +25,93 @@ public sealed partial class ScaleSetMessageHandler
                 ? GetUnacquiredOffers(message.JobAvailableMessages)
                 : Array.Empty<long>();
 
-            IReadOnlyList<CapacityReservationLease> reservations;
-            await capacity.DemandRegistry.PlanningGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            bool primaryFailed = false;
             try
             {
-                if (statistics is not null)
+                CapacityReservationLease[] reservations;
+                int maximumAcquisitions;
+                await capacity.DemandRegistry.PlanningGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+                try
                 {
-                    capacity.DemandRegistry.Update(
-                        _scope.ScaleSetKey,
-                        statistics.TotalAssignedJobs,
-                        statistics.TotalIdleRunners);
+                    if (statistics is not null)
+                    {
+                        capacity.DemandRegistry.Update(
+                            _scope.ScaleSetKey,
+                            statistics.TotalAssignedJobs,
+                            statistics.TotalIdleRunners);
+                    }
+
+                    if (message is not null)
+                    {
+                        RecordAssignments(message.JobAssignedMessages);
+                    }
+
+                    (reservations, maximumAcquisitions) = PlanAndReserveCapacity(capacity, admitted, offers.Length);
+                }
+                finally
+                {
+                    capacity.DemandRegistry.PlanningGate.Release();
                 }
 
-                reservations = PlanAndReserveCapacity(capacity, admitted, offers.Length);
+                // Match the external listener contract: acquire offered work before
+                // consuming activity events, and only while this callback has a
+                // fresh statistics snapshot and the controller admits new work.
+                // Capacity reservations above are internal permits; JIT generation
+                // and provider work remain after acquisition and activity handling.
+                if (admitted && statistics is not null && message is not null)
+                {
+                    int availableRequests = Math.Min(maximumAcquisitions, GetAvailableAdmissionCount(statistics.TotalAssignedJobs));
+                    await AcquireCapacityJobsAsync(
+                        offers,
+                        availableRequests,
+                        cancellationToken).ConfigureAwait(false);
+                }
+
+                if (message is not null)
+                {
+                    RecordAssignments(message.JobAssignedMessages);
+                    foreach (JobAssignedMessage assigned in message.JobAssignedMessages)
+                    {
+                        LogJobAssignedWithoutRunner(_logger, assigned.RunnerRequestId, _scope.ScaleSetKey);
+                    }
+
+                    foreach (JobStartedMessage started in message.JobStartedMessages)
+                    {
+                        await ApplyCapacityActivityAsync(
+                            started.RunnerRequestId,
+                            started.RunnerId,
+                            started.RunnerName,
+                            RunnerActivityEvidence.JobAssigned,
+                            cancellationToken).ConfigureAwait(false);
+                    }
+
+                    foreach (JobCompletedMessage completed in message.JobCompletedMessages)
+                    {
+                        await ApplyCapacityActivityAsync(
+                            completed.RunnerRequestId,
+                            completed.RunnerId,
+                            completed.RunnerName,
+                            RunnerActivityEvidence.JobCompleted,
+                            cancellationToken).ConfigureAwait(false);
+                    }
+                }
+
+                await ProvisionCapacityReservationsAsync(capacity, reservations, cancellationToken).ConfigureAwait(false);
+                await ReconcileCompletedOperationsAsync(cancellationToken).ConfigureAwait(false);
+            }
+            catch
+            {
+                primaryFailed = true;
+                throw;
             }
             finally
             {
-                capacity.DemandRegistry.PlanningGate.Release();
-            }
-
-            // Match the external listener contract: acquire offered work before
-            // consuming activity events, and only while this callback has a
-            // fresh statistics snapshot and the controller admits new work.
-            // Capacity reservations above are internal permits; JIT generation
-            // and provider work remain after acquisition and activity handling.
-            if (admitted && statistics is not null && message is not null)
-            {
-                int availableRequests = GetAvailableAdmissionCount(statistics.TotalAssignedJobs);
-                await AcquireCapacityJobsAsync(
-                    offers,
-                    availableRequests,
-                    cancellationToken).ConfigureAwait(false);
-            }
-
-            if (message is not null)
-            {
-                foreach (JobAssignedMessage assigned in message.JobAssignedMessages)
+                if (admitted)
                 {
-                    LogJobAssignedWithoutRunner(_logger, assigned.RunnerRequestId, _scope.ScaleSetKey);
-                }
-
-                foreach (JobStartedMessage started in message.JobStartedMessages)
-                {
-                    await ApplyCapacityActivityAsync(
-                        started.RunnerRequestId,
-                        started.RunnerId,
-                        started.RunnerName,
-                        RunnerActivityEvidence.JobAssigned,
-                        cancellationToken).ConfigureAwait(false);
-                }
-
-                foreach (JobCompletedMessage completed in message.JobCompletedMessages)
-                {
-                    await ApplyCapacityActivityAsync(
-                        completed.RunnerRequestId,
-                        completed.RunnerId,
-                        completed.RunnerName,
-                        RunnerActivityEvidence.JobCompleted,
-                        cancellationToken).ConfigureAwait(false);
+                    admissionLease?.Dispose();
+                    FinishAdmission(primaryFailed);
                 }
             }
-
-            await ProvisionCapacityReservationsAsync(capacity, reservations, cancellationToken).ConfigureAwait(false);
         }
     }
 
@@ -114,7 +140,7 @@ public sealed partial class ScaleSetMessageHandler
         RecordAcquiredRequests(acquiredIds);
     }
 
-    private CapacityReservationLease[] PlanAndReserveCapacity(
+    private (CapacityReservationLease[] Reservations, int MaximumAcquisitions) PlanAndReserveCapacity(
         ScaleSetCapacityContext capacity,
         bool admitted,
         int offeredJobCount)
@@ -126,7 +152,7 @@ public sealed partial class ScaleSetMessageHandler
             if (!admitted)
             {
                 SetListenerMaximumIfChanged(capacity, 0);
-                return Array.Empty<CapacityReservationLease>();
+                return ([], 0);
             }
 
             long existingPermits = capacity.DemandRegistry.GetAdmissionPermits(_scope.ScaleSetKey).Count;
@@ -135,8 +161,11 @@ public sealed partial class ScaleSetMessageHandler
             long knownCapacity = GetKnownCapacityCount(plan, _scope.ScaleSetKey);
             long currentlyAdvertisedRequests = Math.Max(0L, (long)scaleSetPlan.AdvertisedMaximum - scaleSetPlan.AssignedJobs);
             long offerCapacity = Math.Min(offeredJobCount, currentlyAdvertisedRequests);
-            long knownFreeRequests = Math.Max(0L, knownCapacity - scaleSetPlan.AssignedJobs);
-            long permitsNeededForOffers = Math.Max(0L, offerCapacity - knownFreeRequests);
+            long uncommittedDemand = GetUncommittedDemand(plan, scaleSetPlan.AssignedJobs);
+            long knownFreeRequests = Math.Max(0L, knownCapacity - uncommittedDemand);
+            long permitsNeededForOffers = offerCapacity == 0
+                ? 0
+                : Math.Max(0L, uncommittedDemand + offerCapacity - knownCapacity);
             long permitsNeededForDemand = Math.Max(0L, desiredToProvision - existingPermits);
             long requestedCount = Math.Min(
                 scaleSetPlan.ReservableAdditionalRunners,
@@ -145,7 +174,8 @@ public sealed partial class ScaleSetMessageHandler
             if (requestedCount <= 0)
             {
                 SetListenerMaximumIfChanged(capacity, scaleSetPlan.AdvertisedMaximum);
-                return SelectPermitsToProvision(capacity, desiredToProvision);
+                return (SelectPermitsToProvision(capacity, desiredToProvision),
+                    checked((int)Math.Min(offerCapacity, knownFreeRequests)));
             }
 
             int reservationCount = checked((int)requestedCount);
@@ -171,12 +201,123 @@ public sealed partial class ScaleSetMessageHandler
             SetListenerMaximumIfChanged(
                 capacity,
                 updatedPlan.GetScaleSet(_scope.ScaleSetKey).AdvertisedMaximum);
-            return SelectPermitsToProvision(capacity, desiredToProvision);
+            long updatedFreeRequests = Math.Max(0L, GetKnownCapacityCount(updatedPlan, _scope.ScaleSetKey)
+                - GetUncommittedDemand(updatedPlan, scaleSetPlan.AssignedJobs));
+            return (SelectPermitsToProvision(capacity, desiredToProvision),
+                checked((int)Math.Min(offerCapacity, updatedFreeRequests)));
         }
 
         LogStalePlan(_logger, _scope.ScaleSetKey, MaximumStalePlanAttempts);
         throw new InvalidOperationException(
             $"The host capacity plan remained stale after {MaximumStalePlanAttempts} reservation attempts for scale set '{_scope.ScaleSetKey}'.");
+    }
+
+    private void FinishAdmission(bool primaryFailed)
+    {
+        SemaphoreSlim gate = _capacity.DemandRegistry.PlanningGate;
+        // After primary work completes, gate contention or shutdown must not prevent acknowledgment.
+        if (!gate.Wait(0))
+        {
+            lock (_drainSync)
+            {
+                _admissionTrimPending = true;
+                StartDeferredSettlementUnderLock();
+            }
+
+            return;
+        }
+
+        try
+        {
+            lock (_drainSync)
+            {
+                _admissionTrimPending = true;
+                SettleAdmissionTrimUnderGate();
+            }
+        }
+        catch (Exception exception) when (primaryFailed)
+        {
+            LogAdmissionTrimFailed(_logger, _scope.ScaleSetKey, exception.GetType().Name);
+        }
+        finally
+        {
+            gate.Release();
+        }
+    }
+
+    private void TrimUnneededAdmissionPermitsUnderGate()
+    {
+        var registry = _capacity.DemandRegistry;
+        IReadOnlyList<CapacityReservationLease> permits = registry.GetAdmissionPermits(_scope.ScaleSetKey);
+        if (permits.Count == 0)
+        {
+            return;
+        }
+
+        int needed = 0;
+        if (!_drainStarted)
+        {
+            CapacityPlan plan = _capacity.Coordinator.CreatePlan(registry.Snapshot());
+            long materializedCapacity = Math.Max(0, GetKnownCapacityCount(plan, _scope.ScaleSetKey) - permits.Count);
+            long demand = GetUncommittedDemand(plan, plan.GetScaleSet(_scope.ScaleSetKey).AssignedJobs);
+            needed = (int)Math.Clamp(demand - materializedCapacity, 0, permits.Count);
+        }
+
+        foreach (CapacityReservationLease permit in permits.Skip(needed))
+        {
+            ReleaseKnownUnusedPermit(permit, retainTombstone: false);
+        }
+    }
+
+    private long GetUncommittedDemand(CapacityPlan plan, int assignedJobs)
+    {
+        long busyRunners = plan.Snapshot.ScaleSets.TryGetValue(_scope.ScaleSetKey, out var occupancy)
+            ? occupancy.Usage.StateCounts.GetValueOrDefault(CapacityOccupancyState.Busy)
+            : 0;
+        long uncommittedAssignments = Math.Max(0L, assignedJobs - busyRunners);
+        lock (_drainSync)
+        {
+            // Only a matching assignment event proves that an acquisition is already in aggregate demand.
+            long overlap = Math.Min(uncommittedAssignments, _assignedAcquiredRequests.Count);
+            return uncommittedAssignments + _pendingAcquiredRequests.Count - overlap;
+        }
+    }
+
+    private void ReleaseKnownUnusedPermit(CapacityReservationLease initialLease, bool retainTombstone)
+    {
+        var registry = _capacity.DemandRegistry;
+        Guid operationId = initialLease.Handle.Identity.OperationId;
+        CapacityReservationLease? previousAttempt = null;
+        for (int attempt = 0; attempt < MaximumStalePlanAttempts; attempt++)
+        {
+            CapacityReservationLease? lease = registry.GetCapacityLease(operationId);
+            if (lease is null || lease.Handle.Generation != initialLease.Handle.Generation)
+            {
+                return;
+            }
+
+            if (lease == previousAttempt)
+            {
+                break;
+            }
+
+            CapacityReleaseStatus status = retainTombstone
+                ? registry.TryReleaseConfirmedAbsent(_capacity.Coordinator, lease)
+                : registry.ReleaseUnusedPermit(_capacity.Coordinator, lease);
+            if (status is CapacityReleaseStatus.Released or CapacityReleaseStatus.AlreadyReleased)
+            {
+                return;
+            }
+
+            if (status is not (CapacityReleaseStatus.StaleHandle or CapacityReleaseStatus.StaleRevision))
+            {
+                throw new InvalidOperationException($"The capacity ledger could not release an unused reservation: {status}.");
+            }
+
+            previousAttempt = lease;
+        }
+
+        throw new InvalidOperationException("The capacity lease changed without an available current revision.");
     }
 
     private CapacityReservationLease[] SelectPermitsToProvision(
@@ -248,22 +389,36 @@ public sealed partial class ScaleSetMessageHandler
         Exception? firstFailure = null;
         foreach (CapacityReservationLease reservation in reservations)
         {
+            bool invokedProvisioner = false;
             try
             {
+                _ = capacity.DemandRegistry.MarkCapacityLeaseProvisioning(reservation);
                 await using CreationConcurrencyLease creationLease =
                     await capacity.Coordinator.CreationConcurrencyGate.AcquireAsync(cancellationToken).ConfigureAwait(false);
-                _ = capacity.DemandRegistry.MarkCapacityLeaseProvisioning(reservation);
                 SetCapacityLeaseState(capacity, reservation, CapacityOccupancyState.JitIssued);
-                _ = await _provisioner.ProvisionAsync(
+                invokedProvisioner = true;
+                RunnerProvisioningResult result = await _provisioner.ProvisionAsync(
                     reservation.Handle.Identity,
                     cancellationToken).ConfigureAwait(false);
-                SetCapacityLeaseState(capacity, reservation, CapacityOccupancyState.Starting);
+                SetCapacityLeaseState(capacity, reservation, result.Stage == RunnerLifecycleStage.Starting
+                    ? CapacityOccupancyState.Starting
+                    : CapacityOccupancyState.Unknown);
             }
             catch (Exception exception)
             {
                 try
                 {
-                    SetCapacityLeaseState(capacity, reservation, CapacityOccupancyState.Unknown);
+                    RunnerOperationState? durable = invokedProvisioner
+                        ? await _journal.FindAsync(reservation.Handle.Identity.OperationId, CancellationToken.None).ConfigureAwait(false)
+                        : null;
+                    if (durable is null or { Stage: RunnerLifecycleStage.Failed, ProviderResourceId: null })
+                    {
+                        ReleaseOrDeferUnusedPermit(reservation, retainTombstone: durable is not null);
+                    }
+                    else
+                    {
+                        SetCapacityLeaseState(capacity, reservation, CapacityOccupancyState.Unknown);
+                    }
                 }
                 catch (Exception stateException)
                 {
@@ -280,7 +435,31 @@ public sealed partial class ScaleSetMessageHandler
 
         if (firstFailure is not null)
         {
-            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(firstFailure).Throw();
+            ExceptionDispatchInfo.Throw(firstFailure);
+        }
+    }
+
+    private void ReleaseOrDeferUnusedPermit(CapacityReservationLease reservation, bool retainTombstone)
+    {
+        SemaphoreSlim gate = _capacity.DemandRegistry.PlanningGate;
+        if (!gate.Wait(0))
+        {
+            DeferPermitRelease(reservation, retainTombstone);
+            return;
+        }
+
+        try
+        {
+            ReleaseKnownUnusedPermit(reservation, retainTombstone);
+        }
+        catch
+        {
+            DeferPermitRelease(reservation, retainTombstone);
+            throw;
+        }
+        finally
+        {
+            gate.Release();
         }
     }
 
@@ -347,6 +526,11 @@ public sealed partial class ScaleSetMessageHandler
         RunnerActivityEvidence evidence,
         CancellationToken cancellationToken)
     {
+        if (evidence == RunnerActivityEvidence.JobCompleted)
+        {
+            RecordJobCompleted(runnerRequestId);
+        }
+
         RunnerOperationState? operation = await ResolveCapacityActivityAsync(
             runnerRequestId,
             runnerId,
@@ -380,10 +564,6 @@ public sealed partial class ScaleSetMessageHandler
         {
             RecordJobStarted(runnerRequestId);
         }
-        else if (updated.Stage == RunnerLifecycleStage.Completed && evidence == RunnerActivityEvidence.JobCompleted)
-        {
-            RecordJobCompleted(runnerRequestId);
-        }
     }
 
     private async Task<RunnerOperationState?> ResolveCapacityActivityAsync(
@@ -398,7 +578,7 @@ public sealed partial class ScaleSetMessageHandler
             return null;
         }
 
-        IReadOnlyList<RunnerOperationState> operations = await _journal.ReadAllAsync(cancellationToken).ConfigureAwait(false);
+        IReadOnlyList<RunnerOperationState> operations = await _journal.ReadActiveAsync(cancellationToken).ConfigureAwait(false);
         RunnerOperationState[] idMatches = operations
             .Where(operation => operation.Identity.Scope == _scope && operation.Identity.GitHubRunnerId == runnerId)
             .ToArray();
@@ -450,7 +630,7 @@ public sealed partial class ScaleSetMessageHandler
     [LoggerMessage(
         EventId = 2,
         Level = LogLevel.Debug,
-        Message = "Ignored JobAssigned activity without runner identity for request {RunnerRequestId} in scale set {ScaleSetKey}.")]
+        Message = "Observed JobAssigned activity without runner identity for request {RunnerRequestId} in scale set {ScaleSetKey}.")]
     private static partial void LogJobAssignedWithoutRunner(ILogger logger, long runnerRequestId, string scaleSetKey);
 
     [LoggerMessage(
@@ -479,6 +659,12 @@ public sealed partial class ScaleSetMessageHandler
         Guid operationId,
         string scaleSetKey,
         string failureType);
+
+    [LoggerMessage(
+        EventId = 20,
+        Level = LogLevel.Warning,
+        Message = "Could not settle admission permits for scale set {ScaleSetKey}. Failure type {ExceptionType}.")]
+    private static partial void LogAdmissionTrimFailed(ILogger logger, string scaleSetKey, string exceptionType);
 
     [LoggerMessage(
         EventId = 6,

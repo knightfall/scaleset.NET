@@ -1,4 +1,5 @@
 using System.Collections.Immutable;
+using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Logging.Abstractions;
 using ScaleSet.Hosting.Configuration;
 using ScaleSet.Hosting.Providers;
@@ -25,7 +26,17 @@ public sealed class RunnerLifecycleManagerTests
         RunnerIdentity linkedIdentity = new(scope, identity.OperationId, identity.RunnerName, 701);
         RunnerOperationState associated = await manager.AssociateGitHubRunnerAsync(linkedIdentity, cancellationToken: TestContext.Current.CancellationToken);
         RunnerOperationState createIntent = await manager.TransitionAsync(linkedIdentity, RunnerLifecycleStage.Creating, cancellationToken: TestContext.Current.CancellationToken);
-        string persistedJson = await File.ReadAllTextAsync(Path.Combine(directory.Path, "runner-state.json"), cancellationToken: TestContext.Current.CancellationToken);
+        await using var persistedDb = new SqliteConnection(new SqliteConnectionStringBuilder
+        {
+            DataSource = Path.Combine(directory.Path, "runner-state.sqlite3"),
+            Mode = SqliteOpenMode.ReadOnly,
+            Pooling = false,
+        }.ToString());
+        await persistedDb.OpenAsync(TestContext.Current.CancellationToken);
+        await using var selectPayload = persistedDb.CreateCommand();
+        selectPayload.CommandText = "SELECT payload FROM operations";
+        string persistedJson = Assert.IsType<string>(await selectPayload.ExecuteScalarAsync(TestContext.Current.CancellationToken));
+        Assert.Contains(identity.RunnerName, persistedJson, StringComparison.Ordinal);
 
         Assert.Equal(RunnerLifecycleStage.Reserved, reserved.Stage);
         Assert.Equal(0L, reserved.Revision);

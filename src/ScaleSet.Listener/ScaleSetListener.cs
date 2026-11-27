@@ -110,7 +110,7 @@ public sealed partial class ScaleSetListener
                     continue;
                 }
 
-                lastMessageId = message.MessageId;
+                lastMessageId = Math.Max(lastMessageId, message.MessageId);
                 using var acknowledgment = new CancellationTokenSource(_acknowledgmentTimeout, _timeProvider);
                 // A successful handler commits work even if shutdown has since cancelled its token.
                 await _client.DeleteMessageAsync(message.MessageId, acknowledgment.Token).ConfigureAwait(false);

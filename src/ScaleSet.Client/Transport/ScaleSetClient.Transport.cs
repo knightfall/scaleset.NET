@@ -11,6 +11,7 @@ namespace ScaleSet.Client;
 
 public sealed partial class ScaleSetClient
 {
+    private const int MaximumSuccessBodyBytes = 32 * 1024 * 1024;
     private const string ApiVersion = "6.0-preview";
     private static readonly TimeSpan MaximumTimerDelay = TimeSpan.FromMilliseconds(uint.MaxValue - 1d);
     private static readonly Action<ILogger, string, string, int?, string?, string?, Exception?> LogRequestFailure =
@@ -19,37 +20,15 @@ public sealed partial class ScaleSetClient
             new EventId(1, "ScaleSetRequestFailure"),
             "ScaleSet HTTP {Method} request to {Host} failed with status {StatusCode}; activity {ActivityId}, request {GitHubRequestId}.");
 
-    internal async Task<byte[]> SendActionsAsync(
+    internal Task<byte[]> SendActionsAsync(
         HttpMethod method,
         string path,
         byte[]? body,
         IReadOnlyDictionary<string, string>? query,
         int expectedStatus,
         CancellationToken cancellationToken,
-        string? bearerTokenOverride = null)
-    {
-        var snapshot = await GetAdminSnapshotAsync(cancellationToken).ConfigureAwait(false);
-        var uri = BuildActionsRequestUri(snapshot.ServiceUri, path, query);
-        var bearerToken = bearerTokenOverride ?? snapshot.AdminToken;
-        ValidateAuthenticationToken(bearerToken);
-        var response = await SendHttpAsync(
-            method,
-            uri,
-            body,
-            $"Bearer {bearerToken}",
-            contentType: "application/json",
-            headers: null,
-            dependency: "actions",
-            expectedStatus,
-            allowAccepted: false,
-            timeout: _options.ControlRequestTimeout,
-            queueTokenOnUnauthorized: bearerTokenOverride is not null,
-            retryDiscoveryAuthentication: false,
-            static bytes => bytes,
-            cancellationToken).ConfigureAwait(false);
-
-        return response!;
-    }
+        string? bearerTokenOverride = null) =>
+        SendActionsAsync(method, path, body, query, expectedStatus, cancellationToken, static bytes => bytes, bearerTokenOverride);
 
     [SuppressMessage("Design", "CA1068:CancellationToken parameters must come last", Justification = "Keeps the shared partial-client helper argument order stable for API and session slices.")]
     internal async Task<T> SendActionsAsync<T>(
@@ -60,30 +39,42 @@ public sealed partial class ScaleSetClient
         int expectedStatus,
         CancellationToken cancellationToken,
         Func<byte[], T> decode,
-        string? bearerTokenOverride = null)
+        string? bearerTokenOverride = null,
+        Action? onDispatch = null,
+        bool returnDefaultOnNotFound = false)
     {
         ArgumentNullException.ThrowIfNull(decode);
         var snapshot = await GetAdminSnapshotAsync(cancellationToken).ConfigureAwait(false);
         var uri = BuildActionsRequestUri(snapshot.ServiceUri, path, query);
         var bearerToken = bearerTokenOverride ?? snapshot.AdminToken;
         ValidateAuthenticationToken(bearerToken);
-        var response = await SendHttpAsync(
-            method,
-            uri,
-            body,
-            $"Bearer {bearerToken}",
-            contentType: "application/json",
-            headers: null,
-            dependency: "actions",
-            expectedStatus,
-            allowAccepted: false,
-            timeout: _options.ControlRequestTimeout,
-            queueTokenOnUnauthorized: bearerTokenOverride is not null,
-            retryDiscoveryAuthentication: false,
-            decode,
-            cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var response = await SendHttpAsync(
+                method,
+                uri,
+                body,
+                $"Bearer {bearerToken}",
+                contentType: "application/json",
+                headers: null,
+                dependency: "actions",
+                expectedStatus,
+                allowAccepted: false,
+                timeout: _options.ControlRequestTimeout,
+                queueTokenOnUnauthorized: bearerTokenOverride is not null,
+                retryDiscoveryAuthentication: false,
+                decode,
+                cancellationToken,
+                onDispatch,
+                returnDefaultOnNotFound: returnDefaultOnNotFound).ConfigureAwait(false);
 
-        return response!;
+            return response!;
+        }
+        catch (ScaleSetApiException exception) when (bearerTokenOverride is null && exception.StatusCode == 401)
+        {
+            _ = Interlocked.CompareExchange(ref _adminSnapshot, null, snapshot);
+            throw;
+        }
     }
 
     internal Task<byte[]?> SendQueueAsync(
@@ -196,6 +187,9 @@ public sealed partial class ScaleSetClient
         int expectedStatus,
         Func<byte[], T> decode,
         bool retryDiscoveryAuthentication,
+        InstallationAccessToken? installationToken,
+        BoundedDeadlineScope? deadline,
+        ElapsedRequestBudget? elapsedBudget,
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(decode);
@@ -214,11 +208,15 @@ public sealed partial class ScaleSetClient
             queueTokenOnUnauthorized: false,
             retryDiscoveryAuthentication,
             decode,
-            cancellationToken).ConfigureAwait(false);
+            cancellationToken,
+            installationToken: installationToken,
+            sharedDeadline: deadline,
+            outerElapsedBudget: elapsedBudget).ConfigureAwait(false);
         return response!;
     }
 
-    [SuppressMessage("Design", "CA1068:CancellationToken parameters must come last", Justification = "CancellationToken position follows the agreed shared internal transport contract.")]
+    [SuppressMessage("Design", "CA1068:CancellationToken parameters must come last",
+        Justification = "Existing transport callers supply the cancellation token before the optional dispatch observer.")]
     private async Task<T?> SendHttpAsync<T>(
         HttpMethod method,
         Uri uri,
@@ -233,7 +231,12 @@ public sealed partial class ScaleSetClient
         bool queueTokenOnUnauthorized,
         bool retryDiscoveryAuthentication,
         Func<byte[], T> decode,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Action? onDispatch = null,
+        InstallationAccessToken? installationToken = null,
+        bool returnDefaultOnNotFound = false,
+        BoundedDeadlineScope? sharedDeadline = null,
+        ElapsedRequestBudget? outerElapsedBudget = null)
     {
         ThrowIfDisposed();
         ArgumentNullException.ThrowIfNull(method);
@@ -241,8 +244,9 @@ public sealed partial class ScaleSetClient
         ArgumentNullException.ThrowIfNull(decode);
 
         bool hasExplicitRetryPolicy;
-        ScaleSetRetryOptions retryOptions = ResolveRetryOptions(out hasExplicitRetryPolicy);
         bool readOnly = method == HttpMethod.Get || method == HttpMethod.Head;
+        ScaleSetRetryOptions retryOptions = ResolveRetryOptions(
+            protectMutation: !readOnly && !retryDiscoveryAuthentication, out hasExplicitRetryPolicy);
         bool allowDefaultRetry = dependency != "queue" && (readOnly || retryOptions.RetryAllReplayableRequests);
         string[] knownSecrets = CollectKnownSecrets(authorization, uri);
         string safeUri = ScaleSetClientDiagnostics.CreateSafeUri(
@@ -254,12 +258,27 @@ public sealed partial class ScaleSetClient
             ? configuredMaxElapsed
             : null;
         long requestStartTimestamp = maxElapsed is not null ? _timeProvider.GetTimestamp() : 0;
-        using CancellationTokenSource? maxElapsedSource = maxElapsed is { } elapsedBudget
+        ElapsedRequestBudget? inheritedElapsedBudget = outerElapsedBudget is { } outer
+            && (maxElapsed is null || outer.Limit - _timeProvider.GetElapsedTime(outer.StartTimestamp) <= maxElapsed.Value)
+            ? outer : null;
+        using CancellationTokenSource? maxElapsedSource = inheritedElapsedBudget is null && maxElapsed is { } elapsedBudget
             ? new CancellationTokenSource(elapsedBudget, _timeProvider)
             : null;
-        CancellationToken maxElapsedToken = maxElapsedSource?.Token ?? CancellationToken.None;
+        if (inheritedElapsedBudget is { } inherited)
+        {
+            maxElapsed = inherited.Limit;
+            requestStartTimestamp = inherited.StartTimestamp;
+        }
+        CancellationToken maxElapsedToken = inheritedElapsedBudget?.Token ?? maxElapsedSource?.Token ?? CancellationToken.None;
 
-        using BoundedDeadlineScope? deadlineScope = BoundedDeadlineScope.Create(retryOptions.Deadline, _timeProvider);
+        DateTimeOffset? requestDeadline = retryOptions.Deadline;
+        if (sharedDeadline is not null && (requestDeadline is null || sharedDeadline.Deadline < requestDeadline))
+        {
+            requestDeadline = sharedDeadline.Deadline;
+        }
+        using BoundedDeadlineScope? localDeadline = sharedDeadline?.Deadline == requestDeadline
+            ? null : BoundedDeadlineScope.Create(requestDeadline, _timeProvider);
+        BoundedDeadlineScope? deadlineScope = localDeadline ?? sharedDeadline;
         CancellationToken deadlineToken = deadlineScope?.Token ?? CancellationToken.None;
 
         int maxDiscoveryAuthRetries = hasExplicitRetryPolicy
@@ -269,14 +288,12 @@ public sealed partial class ScaleSetClient
         int retryAttempt = 0;
         int rateLimitRetries = 0;
         int discoveryAuthRetries = 0;
+        bool installationAuthRetried = false;
 
         while (true)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            if (deadlineToken.IsCancellationRequested)
-            {
-                throw new OperationCanceledException("The ScaleSet request exceeded its configured deadline.", deadlineToken);
-            }
+            deadlineScope?.ThrowIfExpired(cancellationToken);
 
             if (maxElapsedToken.IsCancellationRequested)
             {
@@ -296,6 +313,9 @@ public sealed partial class ScaleSetClient
 
             try
             {
+                deadlineScope?.ThrowIfExpired(cancellationToken);
+                linkedSource.Token.ThrowIfCancellationRequested();
+                onDispatch?.Invoke();
                 response = await _httpClient.SendAsync(
                     request,
                     HttpCompletionOption.ResponseHeadersRead,
@@ -303,24 +323,12 @@ public sealed partial class ScaleSetClient
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
-                activity?.SetTag("error.type", "caller_canceled");
-                activity?.SetStatus(ActivityStatusCode.Error, "caller canceled request");
-                ScaleSetClientDiagnostics.RecordAttempt(
-                    dependency,
-                    method.Method,
-                    statusCode: null,
-                    _timeProvider.GetElapsedTime(startTimestamp).TotalSeconds);
+                RecordAttemptCancellation(byCaller: true);
                 throw new OperationCanceledException("The ScaleSet request was canceled by the caller.", cancellationToken);
             }
             catch (OperationCanceledException) when (deadlineToken.IsCancellationRequested)
             {
-                activity?.SetTag("error.type", "deadline_exceeded");
-                activity?.SetStatus(ActivityStatusCode.Error, "deadline exceeded");
-                ScaleSetClientDiagnostics.RecordAttempt(
-                    dependency,
-                    method.Method,
-                    statusCode: null,
-                    _timeProvider.GetElapsedTime(startTimestamp).TotalSeconds);
+                RecordAttemptCancellation(byCaller: false);
                 throw new OperationCanceledException("The ScaleSet request exceeded its configured deadline.", deadlineToken);
             }
             catch (OperationCanceledException) when (maxElapsedToken.IsCancellationRequested)
@@ -369,7 +377,7 @@ public sealed partial class ScaleSetClient
                     deadlineToken,
                     cancellationToken).ConfigureAwait(false);
                 if (delay is { } retryDelay &&
-                    !WouldWaitOutlastBudget(retryDelay, maxElapsed, requestStartTimestamp, retryOptions.Deadline))
+                    !WouldWaitOutlastBudget(retryDelay, maxElapsed, requestStartTimestamp, requestDeadline))
                 {
                     retryAttempt++;
                     ScaleSetClientDiagnostics.RecordRetry(dependency, method.Method, "transient");
@@ -425,7 +433,7 @@ public sealed partial class ScaleSetClient
                     deadlineToken,
                     cancellationToken).ConfigureAwait(false);
                 if (delay is { } retryDelay &&
-                    !WouldWaitOutlastBudget(retryDelay, maxElapsed, requestStartTimestamp, retryOptions.Deadline))
+                    !WouldWaitOutlastBudget(retryDelay, maxElapsed, requestStartTimestamp, requestDeadline))
                 {
                     retryAttempt++;
                     ScaleSetClientDiagnostics.RecordRetry(dependency, method.Method, "transient");
@@ -447,12 +455,21 @@ public sealed partial class ScaleSetClient
             TimeSpan? nextDelay = null;
             string? nextRetryKind = null;
             bool countAsRateLimitRetry = false;
+            bool refreshInstallationToken = false;
             bool countAsDiscoveryRetry = false;
 
             using (response)
             {
                 int statusCode = (int)response.StatusCode;
                 activity?.SetTag("http.response.status_code", statusCode);
+                if (returnDefaultOnNotFound && response.StatusCode == HttpStatusCode.NotFound)
+                {
+                    ScaleSetClientDiagnostics.RecordAttempt(
+                        dependency, method.Method, statusCode, _timeProvider.GetElapsedTime(startTimestamp).TotalSeconds);
+                    activity?.SetStatus(ActivityStatusCode.Ok);
+                    return default;
+                }
+
                 bool expected = IsExpectedStatus(response.StatusCode, expectedStatus) ||
                     (allowAccepted && response.StatusCode == HttpStatusCode.Accepted);
 
@@ -468,14 +485,7 @@ public sealed partial class ScaleSetClient
                         return default;
                     }
 
-                    ScaleSetClientDiagnostics.ResponseBodyReadResult bodyRead =
-                        await ScaleSetClientDiagnostics.ReadResponseBytesAsync(
-                            response,
-                            int.MaxValue,
-                            cancellationToken,
-                            maxElapsedToken,
-                            deadlineToken,
-                            linkedSource.Token).ConfigureAwait(false);
+                    var bodyRead = await ReadBodyAsync(response, MaximumSuccessBodyBytes).ConfigureAwait(false);
 
                     if (bodyRead.Failure == ScaleSetClientDiagnostics.ResponseBodyReadFailure.MaxElapsed)
                     {
@@ -543,7 +553,7 @@ public sealed partial class ScaleSetClient
                                 deadlineToken,
                                 cancellationToken).ConfigureAwait(false);
                             if (retryDelay is { } approvedDelay &&
-                                !WouldWaitOutlastBudget(approvedDelay, maxElapsed, requestStartTimestamp, retryOptions.Deadline))
+                                !WouldWaitOutlastBudget(approvedDelay, maxElapsed, requestStartTimestamp, requestDeadline))
                             {
                                 nextDelay = approvedDelay;
                                 nextRetryKind = "transient";
@@ -558,6 +568,18 @@ public sealed partial class ScaleSetClient
                     }
                     else
                     {
+                        if (bodyRead.Truncated)
+                        {
+                            activity?.SetTag("error.type", "response_too_large");
+                            activity?.SetStatus(ActivityStatusCode.Error, "response body exceeds the size limit");
+                            ScaleSetClientDiagnostics.RecordAttempt(
+                                dependency, method.Method, statusCode, _timeProvider.GetElapsedTime(startTimestamp).TotalSeconds);
+                            throw CreateResponseException(
+                                response, method, safeUri, [], truncated: true, queueTokenOnUnauthorized: false,
+                                knownSecrets, ScaleSetResponseSnapshot.FromHttpResponse(response, ReadOnlyMemory<byte>.Empty, false, true),
+                                message: "ScaleSet response body exceeds the 32 MiB size limit.");
+                        }
+
                         ScaleSetClientDiagnostics.RecordAttempt(
                             dependency,
                             method.Method,
@@ -565,8 +587,8 @@ public sealed partial class ScaleSetClient
                             _timeProvider.GetElapsedTime(startTimestamp).TotalSeconds);
                         try
                         {
-                            byte[] decodedInput = ScaleSetClientDiagnostics.TrimUtf8Bom(bodyRead.RawBytes).ToArray();
-                            return decode(decodedInput);
+                            ReadOnlySpan<byte> input = ScaleSetClientDiagnostics.TrimUtf8Bom(bodyRead.RawBytes);
+                            return decode(input.Length == bodyRead.RawBytes.Length ? bodyRead.RawBytes : input.ToArray());
                         }
                         catch (Exception exception) when (IsDecodeFailure(exception))
                         {
@@ -594,14 +616,7 @@ public sealed partial class ScaleSetClient
                 }
                 else
                 {
-                    ScaleSetClientDiagnostics.ResponseBodyReadResult bodyRead =
-                        await ScaleSetClientDiagnostics.ReadResponseBytesAsync(
-                            response,
-                            ScaleSetClientDiagnostics.MaximumErrorBodyBytes,
-                            cancellationToken,
-                            maxElapsedToken,
-                            deadlineToken,
-                            linkedSource.Token).ConfigureAwait(false);
+                    var bodyRead = await ReadBodyAsync(response, ScaleSetClientDiagnostics.MaximumErrorBodyBytes).ConfigureAwait(false);
 
                     ScaleSetResponseSnapshot snapshot = ScaleSetResponseSnapshot.FromHttpResponse(
                         response,
@@ -635,6 +650,13 @@ public sealed partial class ScaleSetClient
                             bodyRead.IsIncomplete,
                             now);
 
+                    bool rejectedInstallation = installationToken is not null && response.StatusCode == HttpStatusCode.Unauthorized;
+                    if (rejectedInstallation)
+                    {
+                        // Invalidate only the rejected snapshot. Concurrent requests may already have replaced it.
+                        Interlocked.CompareExchange(ref _installationAccessToken, null, installationToken);
+                    }
+
                     bool canRetryDiscoveryAuth = retryDiscoveryAuthentication &&
                         discoveryAuthRetries < maxDiscoveryAuthRetries &&
                         (!hasExplicitRetryPolicy || retryAttempt < retryOptions.MaxRetries);
@@ -653,7 +675,9 @@ public sealed partial class ScaleSetClient
 
                         if (canRetryDiscoveryAuth &&
                             response.StatusCode == HttpStatusCode.Forbidden &&
-                            retryOptions.OnRateLimit is null)
+                            retryOptions.OnRateLimit is null &&
+                            (retryOptions.MaxRetryAfterDelay is not { } maxDiscoveryWait
+                                || rateLimit.RetryAfter <= maxDiscoveryWait))
                         {
                             TimeSpan candidateDelay = ComputeBackoffDelay(
                                 retryOptions,
@@ -661,7 +685,7 @@ public sealed partial class ScaleSetClient
                                 snapshot,
                                 rateLimit.RetryAfterHeaderDelay,
                                 response.StatusCode);
-                            if (!WouldWaitOutlastBudget(candidateDelay, maxElapsed, requestStartTimestamp, retryOptions.Deadline))
+                            if (!WouldWaitOutlastBudget(candidateDelay, maxElapsed, requestStartTimestamp, requestDeadline))
                             {
                                 nextDelay = candidateDelay;
                                 nextRetryKind = "discovery-auth";
@@ -687,7 +711,7 @@ public sealed partial class ScaleSetClient
                                 deadlineToken,
                                 cancellationToken).ConfigureAwait(false);
                             if (candidateDelay is { } approvedDelay &&
-                                !WouldWaitOutlastBudget(approvedDelay, maxElapsed, requestStartTimestamp, retryOptions.Deadline))
+                                !WouldWaitOutlastBudget(approvedDelay, maxElapsed, requestStartTimestamp, requestDeadline))
                             {
                                 nextDelay = approvedDelay;
                                 nextRetryKind = "rate-limit";
@@ -712,7 +736,7 @@ public sealed partial class ScaleSetClient
                             snapshot,
                             retryAfterHeaderDelay: null,
                             response.StatusCode);
-                        if (!WouldWaitOutlastBudget(candidateDelay, maxElapsed, requestStartTimestamp, retryOptions.Deadline))
+                        if (!WouldWaitOutlastBudget(candidateDelay, maxElapsed, requestStartTimestamp, requestDeadline))
                         {
                             nextDelay = candidateDelay;
                             nextRetryKind = "discovery-auth";
@@ -747,29 +771,33 @@ public sealed partial class ScaleSetClient
                         TimeSpan? retryAfterHeaderDelay = response.StatusCode == HttpStatusCode.ServiceUnavailable
                             ? ScaleSetClientDiagnostics.ParseRetryAfter(response, now)
                             : null;
-                        TimeSpan? candidateDelay = await EvaluateStandardFailureRetryAsync(
-                            retryOptions,
-                            response,
-                            method,
-                            safeUri,
-                            retryAttempt,
-                            readOnly: allowDefaultRetry,
-                            isCertificateError: false,
-                            response.StatusCode,
-                            snapshot,
-                            failure,
-                            retryAfterHeaderDelay,
-                            maxElapsed,
-                            knownSecrets,
-                            maxElapsedToken,
-                            deadlineToken,
-                            cancellationToken).ConfigureAwait(false);
+                        TimeSpan? candidateDelay = rejectedInstallation && installationAuthRetried
+                            ? null
+                            : await EvaluateStandardFailureRetryAsync(
+                                retryOptions,
+                                response,
+                                method,
+                                safeUri,
+                                retryAttempt,
+                                readOnly: allowDefaultRetry,
+                                isCertificateError: false,
+                                response.StatusCode,
+                                snapshot,
+                                failure,
+                                retryAfterHeaderDelay,
+                                maxElapsed,
+                                knownSecrets,
+                                maxElapsedToken,
+                                deadlineToken,
+                                cancellationToken,
+                                rejectedInstallation).ConfigureAwait(false);
 
                         if (candidateDelay is { } approvedDelay &&
-                            !WouldWaitOutlastBudget(approvedDelay, maxElapsed, requestStartTimestamp, retryOptions.Deadline))
+                            !WouldWaitOutlastBudget(approvedDelay, maxElapsed, requestStartTimestamp, requestDeadline))
                         {
                             nextDelay = approvedDelay;
-                            nextRetryKind = "transient";
+                            refreshInstallationToken = rejectedInstallation;
+                            nextRetryKind = rejectedInstallation ? "installation-auth" : "transient";
                         }
                         else
                         {
@@ -809,10 +837,60 @@ public sealed partial class ScaleSetClient
                 maxElapsedToken,
                 deadlineToken,
                 cancellationToken).ConfigureAwait(false);
+
+            if (refreshInstallationToken)
+            {
+                installationAuthRetried = true;
+                ElapsedRequestBudget? refreshBudget = maxElapsed is { } limit
+                    ? new ElapsedRequestBudget(limit, requestStartTimestamp, maxElapsedToken) : null;
+                try
+                {
+                    installationToken = await GetInstallationAccessTokenAsync(
+                        (GitHubAppCredentials)_credentials, deadlineScope, refreshBudget, cancellationToken).ConfigureAwait(false);
+                }
+                catch (Exception exception) when (maxElapsedToken.IsCancellationRequested
+                    && exception is OperationCanceledException or ScaleSetMaxElapsedExceededException)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    deadlineScope?.ThrowIfExpired(cancellationToken);
+                    throw CreateMaxElapsedException(method, safeUri, maxElapsed!.Value);
+                }
+                authorization = $"Bearer {installationToken.Value}";
+                knownSecrets = CollectKnownSecrets(authorization, uri);
+            }
+
+            async ValueTask<ScaleSetClientDiagnostics.ResponseBodyReadResult> ReadBodyAsync(HttpResponseMessage received, int maxBytes)
+            {
+                try
+                {
+                    return await ScaleSetClientDiagnostics.ReadResponseBytesAsync(
+                        received, maxBytes, cancellationToken, maxElapsedToken, deadlineToken, linkedSource.Token).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    RecordAttemptCancellation(byCaller: true, (int)received.StatusCode);
+                    throw new OperationCanceledException("The ScaleSet response read was canceled by the caller.", cancellationToken);
+                }
+                catch (OperationCanceledException) when (deadlineToken.IsCancellationRequested)
+                {
+                    RecordAttemptCancellation(byCaller: false, (int)received.StatusCode);
+                    throw;
+                }
+            }
+
+            void RecordAttemptCancellation(bool byCaller, int? statusCode = null)
+            {
+                activity?.SetTag("error.type", byCaller ? "caller_canceled" : "deadline_exceeded");
+                activity?.SetStatus(ActivityStatusCode.Error, byCaller ? "caller canceled request" : "deadline exceeded");
+                ScaleSetClientDiagnostics.RecordAttempt(
+                    dependency, method.Method, statusCode, _timeProvider.GetElapsedTime(startTimestamp).TotalSeconds);
+            }
         }
     }
 
-    private ScaleSetRetryOptions ResolveRetryOptions(out bool hasExplicitPolicy)
+    private readonly record struct ElapsedRequestBudget(TimeSpan Limit, long StartTimestamp, CancellationToken Token);
+
+    private ScaleSetRetryOptions ResolveRetryOptions(bool protectMutation, out bool hasExplicitPolicy)
     {
         ScaleSetRetryOptions retryOptions = _options.Retry ?? new ScaleSetRetryOptions
         {
@@ -825,12 +903,25 @@ public sealed partial class ScaleSetClient
 
         ImmutableArray<Func<ScaleSetRetryOptions, ScaleSetRetryOptions>> adjusters =
             ScaleSetRequestRetry.GetCurrentAdjusters();
-        hasExplicitPolicy = _options.Retry is not null || adjusters.Length > 0;
+        hasExplicitPolicy = _options.Retry is not null;
+        bool suppressMutationReplay = false;
 
         foreach (Func<ScaleSetRetryOptions, ScaleSetRetryOptions> adjust in adjusters)
         {
+            if (ScaleSetRequestRetry.IsMutationReplayGuard(adjust))
+            {
+                suppressMutationReplay |= protectMutation;
+                continue;
+            }
+
+            hasExplicitPolicy = true;
             retryOptions = adjust(retryOptions)
                 ?? throw new InvalidOperationException("Request retry adjuster cannot return null.");
+        }
+
+        if (suppressMutationReplay)
+        {
+            retryOptions = retryOptions with { MaxRetries = 0 };
         }
 
         retryOptions.Validate();
@@ -840,7 +931,6 @@ public sealed partial class ScaleSetClient
     private sealed class BoundedDeadlineScope : IDisposable
     {
         private readonly object _sync = new();
-        private readonly DateTimeOffset _deadlineUtc;
         private readonly TimeProvider _timeProvider;
         private readonly CancellationTokenSource _cts = new();
         private ITimer? _timer;
@@ -848,11 +938,27 @@ public sealed partial class ScaleSetClient
 
         private BoundedDeadlineScope(DateTimeOffset deadlineUtc, TimeProvider timeProvider)
         {
-            _deadlineUtc = deadlineUtc;
+            Deadline = deadlineUtc;
             _timeProvider = timeProvider;
         }
 
         public CancellationToken Token => _cts.Token;
+
+        public DateTimeOffset Deadline { get; }
+
+        public void ThrowIfExpired(CancellationToken cancellationToken)
+        {
+            if (!_cts.IsCancellationRequested && _timeProvider.GetUtcNow() >= Deadline)
+            {
+                _cts.Cancel();
+            }
+
+            if (_cts.IsCancellationRequested)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                throw new OperationCanceledException("The ScaleSet request exceeded its configured deadline.", Token);
+            }
+        }
 
         public static BoundedDeadlineScope? Create(DateTimeOffset? deadline, TimeProvider timeProvider)
         {
@@ -898,7 +1004,7 @@ public sealed partial class ScaleSetClient
                     return;
                 }
 
-                TimeSpan remaining = _deadlineUtc - _timeProvider.GetUtcNow();
+                TimeSpan remaining = Deadline - _timeProvider.GetUtcNow();
                 if (remaining <= TimeSpan.Zero)
                 {
                     timerToDispose = _timer;
@@ -1035,7 +1141,8 @@ public sealed partial class ScaleSetClient
         IReadOnlyCollection<string> knownSecrets,
         CancellationToken maxElapsedToken,
         CancellationToken deadlineToken,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool rejectedInstallation = false)
     {
         if (retryAttempt >= retryOptions.MaxRetries)
         {
@@ -1061,9 +1168,9 @@ public sealed partial class ScaleSetClient
         }
         else
         {
-            shouldRetry = !isCertificateError &&
+            shouldRetry = rejectedInstallation || (!isCertificateError &&
                 readOnly &&
-                (statusCode is null || IsTransient(statusCode.Value));
+                (statusCode is null || IsTransient(statusCode.Value)));
         }
 
         if (!shouldRetry)
@@ -1211,7 +1318,7 @@ public sealed partial class ScaleSetClient
             return customDelay < TimeSpan.Zero ? TimeSpan.Zero : customDelay;
         }
 
-        if (statusCode is HttpStatusCode.TooManyRequests or HttpStatusCode.ServiceUnavailable &&
+        if (statusCode is HttpStatusCode.TooManyRequests or HttpStatusCode.ServiceUnavailable or HttpStatusCode.Forbidden &&
             retryAfterHeaderDelay is { } serverDelay)
         {
             return serverDelay;
@@ -1408,6 +1515,15 @@ public sealed partial class ScaleSetClient
                 request.Headers.Accept.ParseAdd("application/json; api-version=6.0-preview");
             }
 
+            if (body is not null || contentType is not null)
+            {
+                request.Content = new ByteArrayContent(body ?? []);
+                if (contentType is not null)
+                {
+                    request.Content.Headers.ContentType = MediaTypeHeaderValue.Parse(contentType);
+                }
+            }
+
             if (headers is not null)
             {
                 foreach (var (name, value) in headers)
@@ -1427,15 +1543,6 @@ public sealed partial class ScaleSetClient
                     {
                         throw new ArgumentException($"The '{name}' header is not valid for this request.", nameof(headers));
                     }
-                }
-            }
-
-            if (body is not null || contentType is not null)
-            {
-                request.Content = new ByteArrayContent(body ?? []);
-                if (contentType is not null)
-                {
-                    request.Content.Headers.ContentType = MediaTypeHeaderValue.Parse(contentType);
                 }
             }
 

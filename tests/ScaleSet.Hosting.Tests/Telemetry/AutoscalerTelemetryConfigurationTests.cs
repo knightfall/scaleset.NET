@@ -105,6 +105,32 @@ public sealed class AutoscalerTelemetryConfigurationTests
     }
 
     [Fact]
+    public void Bind_PreservesNonSecretOtlpHeaderValuesInLogText()
+    {
+        IConfigurationRoot configuration = Configuration(
+            ("Telemetry:Otlp:Endpoint", "http://127.0.0.1:4318"),
+            ("Telemetry:Otlp:Headers", "x-tenant=prod,x-env=1,Authorization=export-secret"));
+
+        AutoscalerTelemetryConfiguration telemetry = AutoscalerTelemetryConfiguration.Bind(configuration);
+
+        Assert.Equal("production 1 [REDACTED]", telemetry.SecretRedactor.Redact("production 1 export-secret"));
+    }
+
+    [Theory]
+    [InlineData("authorization=\"RemoteAuth sample-secret\"", "sample-secret")]
+    [InlineData("credential: 'value with spaces'", "with spaces")]
+    [InlineData("signed eyJfixture.payload.signature", "eyJfixture")]
+    [InlineData("ghs_syntheticToken", "syntheticToken")]
+    [InlineData("GitHub_Pat_syntheticToken", "syntheticToken")]
+    [InlineData("-----begin device-bound private key-----\nsynthetic-key\n-----end device-bound private key-----", "synthetic-key")]
+    [InlineData("-----BEGIN PRIVATE KEY-----\nsynthetic-key", "synthetic-key")]
+    [InlineData("-----BEGIN PRIVATE KEY-----\nsynthetic-key\n-----END PRIVATE KEY-----", "synthetic-key")]
+    public void Redact_SanitizesCredentialForms(string text, string secret)
+    {
+        Assert.DoesNotContain(secret, new SecretRedactor().Redact(text), StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void ProductPrefixOverridesExplicitlyMappedStandardOtelEnvironmentValues()
     {
         IConfigurationRoot configuration = AutoscalerApplicationConfiguration.Build(

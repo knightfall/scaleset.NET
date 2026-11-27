@@ -186,7 +186,7 @@ public sealed class ClientTelemetryTests
                     .TrimEnd('=').Replace('+', '-').Replace('/', '_');
                 return Task.FromResult(Json(HttpStatusCode.OK, JsonSerializer.Serialize(new
                 {
-                    url = "https://admin.example/tenant/",
+                    url = "https://admin-fixture.actions.githubusercontent.com/tenant/",
                     token = $"eyJhbGciOiJSUzI1NiJ9.{payload}.signature",
                 })));
             }

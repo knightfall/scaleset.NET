@@ -99,7 +99,7 @@ public sealed partial class ScaleSetClient : IDisposable
             _ownedHandler?.Dispose();
         }
 
-        _adminRefreshGate.Dispose();
+        // Waiters may still release the gate. Its managed wait path does not allocate a wait handle.
     }
 
     private void ThrowIfDisposed()

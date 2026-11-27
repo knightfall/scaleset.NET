@@ -3,24 +3,52 @@ $ErrorActionPreference = 'Stop'
 $policy = Get-Content "$PSScriptRoot/policy.json" -Raw | ConvertFrom-Json
 $tag = "v$($policy.version)"
 $manifestFile = Join-Path $ReleaseDirectory 'release.json'
-$expectedManifestHash = (Get-FileHash $manifestFile -Algorithm SHA256).Hash.ToLowerInvariant()
 
-# Guard before any registry push or asset upload: if a draft release already holds
-# release.json, it must match this exact candidate manifest (use candidate_run_id on retries).
+function Assert-ExactReleaseAsset([string]$FilePath) {
+    $name = Split-Path $FilePath -Leaf
+    $previous = Join-Path $env:RUNNER_TEMP ('previous-' + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $previous | Out-Null
+    gh release download $tag --repo $policy.repository --pattern $name --dir $previous
+    if ($LASTEXITCODE -ne 0) { throw "Cannot verify existing release asset: $name" }
+    $old = Join-Path $previous $name
+    if ((Get-FileHash $old -Algorithm SHA256).Hash -ne (Get-FileHash $FilePath -Algorithm SHA256).Hash) {
+        throw "Existing release asset differs from the candidate: $name. Rerun failed jobs or pass the original candidate_run_id."
+    }
+}
+
+function Add-ReleaseAsset([string]$FilePath) {
+    $name = Split-Path $FilePath -Leaf
+    if ($script:releaseAssets -contains $name) {
+        Assert-ExactReleaseAsset $FilePath
+        return
+    }
+
+    gh release upload $tag $FilePath --repo $policy.repository
+    if ($LASTEXITCODE -ne 0) { throw "Cannot attach release evidence: $name" }
+    $script:releaseAssets += $name
+}
+
+# A symbol receipt is meaningful only when the current draft already identifies this candidate.
+$releaseAssets = @()
 gh release view $tag --repo $policy.repository *> $null
-if ($LASTEXITCODE -eq 0) {
-    $releaseAssets = (gh release view $tag --repo $policy.repository --json assets | ConvertFrom-Json).assets.name
+$releaseExists = $LASTEXITCODE -eq 0
+if ($releaseExists) {
+    $details = gh release view $tag --repo $policy.repository --json assets
     if ($LASTEXITCODE -ne 0) { throw 'Cannot inspect existing release assets' }
+    $releaseAssets = @(($details | ConvertFrom-Json).assets | ForEach-Object { $_.name })
     if ($releaseAssets -contains 'release.json') {
-        $existingManifestDir = Join-Path $env:RUNNER_TEMP ('existing-manifest-' + [guid]::NewGuid().ToString('N'))
-        New-Item -ItemType Directory -Path $existingManifestDir | Out-Null
-        gh release download $tag --repo $policy.repository --pattern 'release.json' --dir $existingManifestDir
-        if ($LASTEXITCODE -ne 0) { throw 'Cannot download existing release.json' }
-        $existingManifestPath = Join-Path $existingManifestDir 'release.json'
-        $actualExistingHash = (Get-FileHash $existingManifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
-        if ($actualExistingHash -ne $expectedManifestHash) {
-            throw "Release $tag already exists with different candidate evidence (release.json mismatch). Rerun failed jobs or pass the original candidate_run_id to reuse its evidence."
-        }
+        Assert-ExactReleaseAsset $manifestFile
+    } elseif ($releaseAssets -like '*.snupkg') {
+        throw "Release $tag has symbol assets without a candidate manifest."
+    }
+}
+
+$confirmedSymbols = @()
+foreach ($id in $policy.packages) {
+    $symbols = Join-Path $ReleaseDirectory "packages/$id.$($policy.version).snupkg"
+    if ($releaseAssets -contains (Split-Path $symbols -Leaf)) {
+        Assert-ExactReleaseAsset $symbols
+        $confirmedSymbols += $id
     }
 }
 
@@ -28,37 +56,7 @@ $existingPath = Join-Path $env:RUNNER_TEMP 'existing-packages.json'
 python3 "$PSScriptRoot/check_existing.py" $ReleaseDirectory $existingPath
 if ($LASTEXITCODE -ne 0) { throw 'Existing registry versions conflict with the verified candidate or could not be checked' }
 $existing = Get-Content $existingPath -Raw | ConvertFrom-Json
-foreach ($id in $policy.packages) {
-    $package = Join-Path $ReleaseDirectory "packages/$id.$($policy.version).nupkg"
-    # Only duplicates already compared with this candidate may be skipped.
-    # A new or not-yet-visible conflict must fail before subsequent uploads.
-    $duplicateOption = @()
-    if ($existing.NuGet -contains $id) { $duplicateOption = @('--skip-duplicate') }
-    dotnet nuget push $package --source https://api.nuget.org/v3/index.json --api-key $env:NUGET_API_KEY @duplicateOption --no-symbols
-    if ($LASTEXITCODE -ne 0) { throw "NuGet publication failed: $id" }
-    # NuGet skips automatic symbol upload when the main package is a duplicate.
-    $symbols = Join-Path $ReleaseDirectory "packages/$id.$($policy.version).snupkg"
-    dotnet nuget push $symbols --source https://api.nuget.org/v3/index.json --api-key $env:NUGET_API_KEY --skip-duplicate
-    if ($LASTEXITCODE -ne 0) { throw "NuGet symbol publication failed: $id" }
-    $duplicateOption = @()
-    if ($existing.GitHub -contains $id) { $duplicateOption = @('--skip-duplicate') }
-    dotnet nuget push $package --source "https://nuget.pkg.github.com/knightfall/index.json" --api-key $env:GH_TOKEN @duplicateOption --no-symbols
-    if ($LASTEXITCODE -ne 0) { throw "GitHub Packages publication failed: $id" }
-}
-$assets = Join-Path $env:RUNNER_TEMP 'release-assets'
-if (Test-Path $assets) { Remove-Item -Recurse -Force $assets }
-New-Item -ItemType Directory -Path $assets | Out-Null
-Copy-Item "$ReleaseDirectory/packages/*" $assets
-Copy-Item "$ReleaseDirectory/release.json" $assets
-Copy-Item "$ReleaseDirectory/_manifest/spdx_2.2/manifest.spdx.json" "$assets/build.spdx.json"
-foreach ($bundle in @(@('provenance', $env:PROVENANCE_BUNDLE), @('build-sbom', $env:BUILD_SBOM_BUNDLE))) {
-    $digest = (Get-FileHash $bundle[1] -Algorithm SHA256).Hash.ToLowerInvariant()
-    Copy-Item $bundle[1] (Join-Path $assets "$($bundle[0])-$digest.sigstore.json")
-}
-python3 "$PSScriptRoot/release_archive.py" $ReleaseDirectory "$assets/release-evidence.zip"
-if ($LASTEXITCODE -ne 0) { throw 'Cannot archive the complete release evidence' }
-gh release view $tag --repo $policy.repository *> $null
-if ($LASTEXITCODE -ne 0) {
+if (!$releaseExists) {
     $notesFile = "docs/releases/$($policy.version).md"
     if (Test-Path $notesFile) {
         gh release create $tag --repo $policy.repository --verify-tag --draft --prerelease --title $tag --notes-file $notesFile
@@ -67,20 +65,52 @@ if ($LASTEXITCODE -ne 0) {
     }
     if ($LASTEXITCODE -ne 0) { throw 'Cannot create draft release' }
 }
-$existingAssets = (gh release view $tag --repo $policy.repository --json assets | ConvertFrom-Json).assets.name
-if ($LASTEXITCODE -ne 0) { throw 'Cannot inspect existing release assets' }
-foreach ($file in Get-ChildItem $assets -File) {
-    if ($existingAssets -contains $file.Name) {
-        $previous = Join-Path $env:RUNNER_TEMP ('previous-' + [guid]::NewGuid().ToString('N'))
-        New-Item -ItemType Directory -Path $previous | Out-Null
-        gh release download $tag --repo $policy.repository --pattern $file.Name --dir $previous
-        if ($LASTEXITCODE -ne 0) { throw 'Cannot verify existing release asset' }
-        $old = Join-Path $previous $file.Name
-        if ((Get-FileHash $old).Hash -ne (Get-FileHash $file.FullName).Hash) {
-            throw "Existing release asset differs: $($file.Name)"
+Add-ReleaseAsset $manifestFile
+
+foreach ($id in $policy.packages) {
+    $package = Join-Path $ReleaseDirectory "packages/$id.$($policy.version).nupkg"
+    # Only duplicates already compared with this candidate may be skipped.
+    # A new or not-yet-visible conflict must fail before subsequent uploads.
+    $duplicateOption = @()
+    if ($existing.NuGet -contains $id) { $duplicateOption = @('--skip-duplicate') }
+    dotnet nuget push $package --source https://api.nuget.org/v3/index.json @duplicateOption --no-symbols
+    if ($LASTEXITCODE -ne 0) { throw "NuGet publication failed: $id" }
+    if ($confirmedSymbols -notcontains $id) {
+        $symbols = Join-Path $ReleaseDirectory "packages/$id.$($policy.version).snupkg"
+        $previousSymbolKey = $env:NUGET_SYMBOL_API_KEY
+        try {
+            # A package duplicate does not establish symbol identity.
+            $env:NUGET_SYMBOL_API_KEY = $env:NUGET_API_KEY
+            dotnet nuget push $symbols --source https://api.nuget.org/v3/index.json
+            if ($LASTEXITCODE -ne 0) { throw "NuGet symbol publication failed: $id" }
+        } finally {
+            $env:NUGET_SYMBOL_API_KEY = $previousSymbolKey
         }
-        continue
+        # Attaching the original archive records acknowledgement for this exact symbol payload.
+        Add-ReleaseAsset $symbols
     }
-    gh release upload $tag $file.FullName --repo $policy.repository
-    if ($LASTEXITCODE -ne 0) { throw 'Cannot attach release evidence; assets are never overwritten' }
+    $duplicateOption = @()
+    if ($existing.GitHub -contains $id) { $duplicateOption = @('--skip-duplicate') }
+    $nugetKey = $env:NUGET_API_KEY
+    try {
+        $env:NUGET_API_KEY = $env:GH_TOKEN
+        dotnet nuget push $package --source "https://nuget.pkg.github.com/knightfall/index.json" @duplicateOption --no-symbols
+        if ($LASTEXITCODE -ne 0) { throw "GitHub Packages publication failed: $id" }
+    } finally {
+        $env:NUGET_API_KEY = $nugetKey
+    }
+}
+$assets = Join-Path $env:RUNNER_TEMP 'release-assets'
+if (Test-Path $assets) { Remove-Item -Recurse -Force $assets }
+New-Item -ItemType Directory -Path $assets | Out-Null
+Copy-Item "$ReleaseDirectory/packages/*.nupkg" $assets
+Copy-Item "$ReleaseDirectory/_manifest/spdx_2.2/manifest.spdx.json" "$assets/build.spdx.json"
+foreach ($bundle in @(@('provenance', $env:PROVENANCE_BUNDLE), @('build-sbom', $env:BUILD_SBOM_BUNDLE))) {
+    $digest = (Get-FileHash $bundle[1] -Algorithm SHA256).Hash.ToLowerInvariant()
+    Copy-Item $bundle[1] (Join-Path $assets "$($bundle[0])-$digest.sigstore.json")
+}
+python3 "$PSScriptRoot/release_archive.py" $ReleaseDirectory "$assets/release-evidence.zip"
+if ($LASTEXITCODE -ne 0) { throw 'Cannot archive the complete release evidence' }
+foreach ($file in Get-ChildItem $assets -File) {
+    Add-ReleaseAsset $file.FullName
 }

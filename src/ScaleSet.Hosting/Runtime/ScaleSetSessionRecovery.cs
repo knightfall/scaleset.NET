@@ -49,6 +49,10 @@ internal sealed partial class ScaleSetSessionRecovery(
             {
                 failure = exception.InnerException!;
             }
+            catch (RetryableSessionCloseFailure exception)
+            {
+                failure = exception.InnerException!;
+            }
             catch (Exception exception) when (_current is null && IsRetryable(exception, opening: true))
             {
                 failure = exception;
@@ -83,12 +87,17 @@ internal sealed partial class ScaleSetSessionRecovery(
         Func<IMessageSession, CancellationToken, Task> close,
         CancellationToken cancellationToken)
     {
+        await Task.Delay(retry.Delay, timeProvider, cancellationToken).ConfigureAwait(false);
         if (_current is not null)
         {
             try
             {
                 await close(_current, cancellationToken).ConfigureAwait(false);
                 _current = null;
+            }
+            catch (Exception closeFailure) when (!cancellationToken.IsCancellationRequested && IsRetryable(closeFailure, opening: false))
+            {
+                throw new RetryableSessionCloseFailure(closeFailure);
             }
             catch (Exception closeFailure) when (!cancellationToken.IsCancellationRequested)
             {
@@ -97,7 +106,6 @@ internal sealed partial class ScaleSetSessionRecovery(
             }
         }
 
-        await Task.Delay(retry.Delay, timeProvider, cancellationToken).ConfigureAwait(false);
         return await connect(cancellationToken).ConfigureAwait(false);
     }
 
@@ -150,6 +158,8 @@ internal sealed partial class ScaleSetSessionRecovery(
     };
 
     private sealed class QueueTransportFailure(Exception innerException) : Exception(null, innerException);
+
+    private sealed class RetryableSessionCloseFailure(Exception innerException) : Exception(null, innerException);
 
     private sealed record RetryAttempt(Exception Failure, TimeSpan Delay);
 

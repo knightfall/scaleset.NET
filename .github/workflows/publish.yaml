@@ -307,7 +307,14 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: .github/release/policy.json
+          sparse-checkout-cone-mode: false
       - name: Publish release announcement after both registry consumers pass
-        run: gh release edit v0.1.0-alpha.1 --repo "$GITHUB_REPOSITORY" --draft=false
+        run: |
+          tag=$(jq -er '"v" + .version' .github/release/policy.json)
+          gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --draft=false
         env:
           GH_TOKEN: ${{ github.token }}

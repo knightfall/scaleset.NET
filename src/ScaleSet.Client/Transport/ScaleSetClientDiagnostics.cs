@@ -82,6 +82,7 @@ internal static partial class ScaleSetClientDiagnostics
         string normalizedKind = retryKind switch
         {
             "discovery-auth" => "discovery-auth",
+            "installation-auth" => "installation-auth",
             "rate-limit" => "rate-limit",
             _ => "transient",
         };
@@ -386,7 +387,7 @@ internal static partial class ScaleSetClientDiagnostics
         }
         catch (JsonException)
         {
-            sanitized = RedactFreeText(text, knownSecrets);
+            sanitized = text;
         }
 
         sanitized = RedactFreeText(sanitized, knownSecrets);
@@ -483,23 +484,19 @@ internal static partial class ScaleSetClientDiagnostics
             return safe.Uri;
         }
 
-        var safeAbsoluteUri = safe.Uri.AbsoluteUri;
-        foreach (var secret in knownSecrets)
+        string path = safe.Uri.AbsolutePath;
+        foreach (string secret in knownSecrets.Where(static secret => secret.Length > 0))
         {
-            if (secret.Length == 0)
+            if (path.Contains(secret, StringComparison.Ordinal) ||
+                path.Contains(Uri.EscapeDataString(secret), StringComparison.OrdinalIgnoreCase) ||
+                Uri.UnescapeDataString(path).Contains(secret, StringComparison.Ordinal))
             {
-                continue;
-            }
-
-            safeAbsoluteUri = safeAbsoluteUri.Replace(secret, "[REDACTED]", StringComparison.Ordinal);
-            var escapedSecret = Uri.EscapeDataString(secret);
-            if (!string.Equals(escapedSecret, secret, StringComparison.Ordinal))
-            {
-                safeAbsoluteUri = safeAbsoluteUri.Replace(escapedSecret, "[REDACTED]", StringComparison.Ordinal);
+                safe.Path = "/";
+                break;
             }
         }
 
-        return new Uri(safeAbsoluteUri, UriKind.Absolute);
+        return safe.Uri;
     }
 
     private static void WriteRedactedJson(JsonElement value, Utf8JsonWriter writer)
@@ -571,28 +568,26 @@ internal static partial class ScaleSetClientDiagnostics
             }
         }
 
-        text = PemPrivateKeyRegex().Replace(text, "[REDACTED-PRIVATE-KEY]");
-        text = HttpUrlRegex().Replace(text, "[REDACTED-URL]");
-        text = BearerCredentialRegex().Replace(text, "$1 [REDACTED]");
-        text = CompactJwtRegex().Replace(text, "[REDACTED-JWT]");
-        text = NamedSecretRegex().Replace(text, "$1[REDACTED]");
+        text = PemPrivateKey.Replace(text, "[REDACTED-PRIVATE-KEY]");
+        text = HttpUrl.Replace(text, "[REDACTED-URL]");
+        text = BearerCredential.Replace(text, "$1 [REDACTED]");
+        text = CompactJwt.Replace(text, "[REDACTED-JWT]");
+        text = GitHubToken.Replace(text, "[REDACTED]");
+        text = NamedSecret.Replace(text, "$1[REDACTED]");
         return text;
     }
 
-    [GeneratedRegex(@"(?i)\b(Bearer|RemoteAuth)\s+[A-Za-z0-9._~+/-]+=*")]
-    private static partial Regex BearerCredentialRegex();
+    private const RegexOptions RedactionOptions = RegexOptions.CultureInvariant | RegexOptions.NonBacktracking;
 
-    [GeneratedRegex(@"\beyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b")]
-    private static partial Regex CompactJwtRegex();
-
-    [GeneratedRegex("""(?is)-----BEGIN [^-]*PRIVATE KEY-----.*?-----END [^-]*PRIVATE KEY-----""")]
-    private static partial Regex PemPrivateKeyRegex();
-
-    [GeneratedRegex("""(?i)\bhttps?://[^\s"'<>]+""")]
-    private static partial Regex HttpUrlRegex();
-
-    [GeneratedRegex("""(?i)([\"']?\b(?:access[_-]?token|messagequeueaccesstoken|admin[_-]?token|token|secret|password|authorization|private[_-]?key|encodedjitconfig)\b[\"']?\s*[:=]\s*)(\"[^\"]*\"|'[^']*'|[^,;\s}]+)""")]
-    private static partial Regex NamedSecretRegex();
+    private static readonly Regex BearerCredential = new(@"(?i)\b(Bearer|Basic|RemoteAuth)\s+[A-Za-z0-9._~+/-]+=*", RedactionOptions);
+    private static readonly Regex CompactJwt = new(@"\beyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*", RedactionOptions);
+    private static readonly Regex GitHubToken = new(@"(?i)\b(?:gh[porsu]_|github_pat_)[A-Za-z0-9_]+", RedactionOptions);
+    private static readonly Regex PemPrivateKey = new(
+        """(?is)-----BEGIN [A-Z0-9 -]*PRIVATE KEY-----.*?(?:-----END [A-Z0-9 -]*PRIVATE KEY-----|\z)""", RedactionOptions);
+    private static readonly Regex HttpUrl = new("""(?i)\bhttps?://[^\s"'<>]+""", RedactionOptions);
+    private static readonly Regex NamedSecret = new(
+        """(?i)(["']?\b(?:access[_-]?token|messagequeueaccesstoken|admin[_-]?token|token|secret|password|authorization|private[_-]?key|encodedjitconfig)\b["']?\s*[:=]\s*)(?:"(?:\\.|[^"\\])*(?:"|\z)|'(?:\\.|[^'\\])*(?:'|\z)|[^,;\s}]+)""",
+        RedactionOptions);
 
     [GeneratedRegex(@"(?i)\bsecondary rate\b")]
     private static partial Regex SecondaryRateLimitRegex();

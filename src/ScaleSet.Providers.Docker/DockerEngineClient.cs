@@ -29,9 +29,9 @@ internal sealed class DockerEngineClient : IDisposable
     private readonly DockerProviderOptionsSnapshot _options;
     private readonly TimeProvider _timeProvider;
     private readonly SemaphoreSlim _versionGate = new(1, 1);
-    private string? _apiVersion;
+    private volatile string? _apiVersion;
     private string? _daemonArchitecture;
-    private bool _disposed;
+    private int _disposed;
 
     public DockerEngineClient(
         DockerProviderOptionsSnapshot options,
@@ -48,8 +48,8 @@ internal sealed class DockerEngineClient : IDisposable
     public string ApiVersion => _apiVersion
         ?? throw new InvalidOperationException("The Docker Engine API has not been negotiated.");
 
-    public string DaemonArchitecture => _daemonArchitecture
-        ?? throw new InvalidOperationException("The Docker Engine API has not been negotiated.");
+    public string DaemonArchitecture => _apiVersion is not null ? _daemonArchitecture!
+        : throw new InvalidOperationException("The Docker Engine API has not been negotiated.");
 
     public async Task EnsureCompatibleEngineAsync(CancellationToken cancellationToken)
     {
@@ -62,6 +62,7 @@ internal sealed class DockerEngineClient : IDisposable
         await _versionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
+            ThrowIfDisposed();
             if (_apiVersion is not null)
             {
                 return;
@@ -85,8 +86,10 @@ internal sealed class DockerEngineClient : IDisposable
             }
 
             EngineApiVersion daemonMaximum = EngineApiVersion.Parse(version.ApiVersion, "version");
-            EngineApiVersion daemonMinimum = EngineApiVersion.Parse(version.MinApiVersion, "version");
             EngineApiVersion clientMinimum = EngineApiVersion.Parse(MinimumSupportedApiVersion, "version");
+            EngineApiVersion daemonMinimum = version.MinApiVersion is null
+                ? clientMinimum
+                : EngineApiVersion.Parse(version.MinApiVersion, "version");
             EngineApiVersion clientMaximum = EngineApiVersion.Parse(MaximumSupportedApiVersion, "version");
             if (daemonMaximum < daemonMinimum || daemonMaximum < clientMinimum || daemonMinimum > clientMaximum)
             {
@@ -295,13 +298,12 @@ internal sealed class DockerEngineClient : IDisposable
 
     public void Dispose()
     {
-        if (_disposed)
+        if (Interlocked.Exchange(ref _disposed, 1) != 0)
         {
             return;
         }
 
-        _disposed = true;
-        _versionGate.Dispose();
+        // A handshake can still be unwinding and must be able to release the gate.
         if (_ownsHttpClient)
         {
             _httpClient.Dispose();
@@ -375,10 +377,11 @@ internal sealed class DockerEngineClient : IDisposable
         }
     }
 
-    private static async Task<byte[]> ReadBoundedBytesAsync(
+    internal static async Task<byte[]> ReadBoundedBytesAsync(
         HttpContent content,
         int maximumBytes,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        ArrayPool<byte>? bufferPool = null)
     {
         if (content.Headers.ContentLength is long contentLength && contentLength > maximumBytes)
         {
@@ -386,34 +389,79 @@ internal sealed class DockerEngineClient : IDisposable
         }
 
         await using Stream stream = await content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
-        byte[] buffer = ArrayPool<byte>.Shared.Rent(checked(maximumBytes + 1));
-        int written = 0;
+        const int chunkSize = 16 * 1024;
+        ArrayPool<byte> pool = bufferPool ?? ArrayPool<byte>.Shared;
+        List<byte[]>? completedChunks = null;
+        byte[]? chunk = null;
+        int chunkUsed = 0;
+        int total = 0;
         try
         {
             while (true)
             {
-                int remaining = Math.Min(buffer.Length - written, 16 * 1024);
-                int read = await stream.ReadAsync(buffer.AsMemory(written, remaining), cancellationToken)
-                    .ConfigureAwait(false);
+                chunk ??= pool.Rent(chunkSize);
+                int remaining = (int)Math.Min(maximumBytes - total + 1L, chunkSize - chunkUsed);
+                int read = await stream.ReadAsync(chunk.AsMemory(chunkUsed, remaining), cancellationToken).ConfigureAwait(false);
                 if (read == 0)
                 {
                     break;
                 }
 
-                written += read;
-                if (written > maximumBytes)
+                if (read > maximumBytes - total)
                 {
                     throw new IOException("The Docker Engine response exceeded its size limit.");
                 }
+
+                total += read;
+                chunkUsed += read;
+                if (chunkUsed == chunkSize)
+                {
+                    (completedChunks ??= []).Add(chunk);
+                    chunk = null;
+                    chunkUsed = 0;
+                }
             }
 
-            return buffer.AsSpan(0, written).ToArray();
+            if (total == 0)
+            {
+                return [];
+            }
+
+            byte[] contents = GC.AllocateUninitializedArray<byte>(total);
+            int offset = 0;
+            if (completedChunks is not null)
+            {
+                foreach (byte[] full in completedChunks)
+                {
+                    full.AsSpan(0, chunkSize).CopyTo(contents.AsSpan(offset));
+                    offset += chunkSize;
+                }
+            }
+
+            chunk.AsSpan(0, chunkUsed).CopyTo(contents.AsSpan(offset));
+            return contents;
         }
         finally
         {
-            CryptographicOperations.ZeroMemory(buffer);
-            ArrayPool<byte>.Shared.Return(buffer);
+            if (chunk is not null)
+            {
+                ClearAndReturn(chunk, pool);
+            }
+
+            if (completedChunks is not null)
+            {
+                foreach (byte[] full in completedChunks)
+                {
+                    ClearAndReturn(full, pool);
+                }
+            }
         }
+    }
+
+    private static void ClearAndReturn(byte[] chunk, ArrayPool<byte> pool)
+    {
+        CryptographicOperations.ZeroMemory(chunk);
+        pool.Return(chunk);
     }
 
     private static async Task ReadPullProgressAsync(
@@ -521,7 +569,7 @@ internal sealed class DockerEngineClient : IDisposable
 
     private void ThrowIfDisposed()
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
     }
 
     private static DockerProviderException ProviderFailure(string operation, string failureCode) =>

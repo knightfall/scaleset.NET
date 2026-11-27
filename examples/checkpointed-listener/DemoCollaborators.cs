@@ -52,7 +52,7 @@ internal sealed class DemoCheckpointStore(DemoOwnership ownership) : IScaleSetLi
 
             string snapshot = JsonSerializer.Serialize(checkpoint);
             if (snapshot.Contains("demo-secret", StringComparison.Ordinal) ||
-                snapshot.Contains("https://queue.example", StringComparison.Ordinal))
+                snapshot.Contains("https://queue-fixture.actions.githubusercontent.com", StringComparison.Ordinal))
             {
                 throw new InvalidDataException("Session credentials or a queue URL entered the checkpoint.");
             }
@@ -164,7 +164,7 @@ internal sealed class DemoSession : IMessageSession
     {
         SessionId = Guid.NewGuid(),
         Statistics = new RunnerScaleSetStatistic(),
-        MessageQueueUrl = "https://queue.example/demo",
+        MessageQueueUrl = "https://queue-fixture.actions.githubusercontent.com/demo",
         MessageQueueAccessToken = "demo-secret",
     };
 
@@ -180,7 +180,7 @@ internal sealed class DemoSession : IMessageSession
     {
         MessageId = messageId,
         Statistics = new() { TotalAssignedJobs = assigned },
-        JobAvailableMessages = [new() { RunnerRequestId = requestId, AcquireJobUrl = "https://queue.example/?sig=demo-secret" }],
+        JobAvailableMessages = [new() { RunnerRequestId = requestId, AcquireJobUrl = "https://queue-fixture.actions.githubusercontent.com/?sig=demo-secret" }],
     });
 
     internal PollBarrier HoldNextPoll() => _nextBarrier = new();

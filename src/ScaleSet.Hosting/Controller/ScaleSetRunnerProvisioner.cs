@@ -3,6 +3,7 @@ using System.Diagnostics;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using ScaleSet.Client;
+using ScaleSet.Hosting.Capacity;
 using ScaleSet.Hosting.Configuration;
 using ScaleSet.Hosting.Providers;
 using ScaleSet.Hosting.State;
@@ -36,6 +37,7 @@ public sealed partial class ScaleSetRunnerProvisioner : IDisposable
     private readonly IRunnerProvider _provider;
     private readonly IRunnerStateJournal _journal;
     private readonly RunnerLifecycleManager _lifecycle;
+    private readonly bool _ownsLifecycle;
     private readonly ILogger<ScaleSetRunnerProvisioner> _logger;
     private readonly TimeProvider _timeProvider;
     private readonly ScaleSetTelemetryMetrics? _telemetry;
@@ -81,6 +83,21 @@ public sealed partial class ScaleSetRunnerProvisioner : IDisposable
         TimeProvider? timeProvider,
         ScaleSetTelemetryMetrics? telemetry,
         ScaleSetTelemetryProvider telemetryProvider)
+        : this(scaleSetId, workFolder, jitConfigClient, provider, journal, logger, timeProvider, telemetry, telemetryProvider, null)
+    {
+    }
+
+    internal ScaleSetRunnerProvisioner(
+        long scaleSetId,
+        string workFolder,
+        IRunnerJitConfigClient jitConfigClient,
+        IRunnerProvider provider,
+        IRunnerStateJournal journal,
+        ILogger<ScaleSetRunnerProvisioner>? logger,
+        TimeProvider? timeProvider,
+        ScaleSetTelemetryMetrics? telemetry,
+        ScaleSetTelemetryProvider telemetryProvider,
+        RunnerLifecycleManager? lifecycle)
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(scaleSetId);
         ArgumentException.ThrowIfNullOrWhiteSpace(workFolder);
@@ -106,7 +123,8 @@ public sealed partial class ScaleSetRunnerProvisioner : IDisposable
         _timeProvider = timeProvider ?? TimeProvider.System;
         _telemetry = telemetry;
         _telemetryProvider = telemetryProvider;
-        _lifecycle = new RunnerLifecycleManager(journal, _timeProvider, NullLogger<RunnerLifecycleManager>.Instance);
+        _ownsLifecycle = lifecycle is null;
+        _lifecycle = lifecycle ?? new RunnerLifecycleManager(journal, _timeProvider, NullLogger<RunnerLifecycleManager>.Instance);
     }
 
     /// <summary>
@@ -196,10 +214,10 @@ public sealed partial class ScaleSetRunnerProvisioner : IDisposable
         RunnerResource? preexisting = await FindOwnedOperationAsync(identity, cancellationToken).ConfigureAwait(false);
         if (preexisting is not null)
         {
-            RunnerOperationState adopted = await AdoptOrTombstoneAsync(preexisting, identity, cancellationToken).ConfigureAwait(false);
+            RunnerOperationState adopted = await RecordDiscoveredOperationAsync(preexisting, identity, cancellationToken).ConfigureAwait(false);
             if (preexisting.Status == RunnerResourceStatus.Missing)
             {
-                throw new InvalidOperationException("The operation has a retained provider-absence tombstone and cannot be recreated.");
+                throw new InvalidOperationException("The operation was discovered as missing and requires registration reconciliation.");
             }
 
             activity?.SetTag("scaleset.recovered", true);
@@ -208,63 +226,97 @@ public sealed partial class ScaleSetRunnerProvisioner : IDisposable
 
         await _lifecycle.ReserveAsync(identity, cancellationToken).ConfigureAwait(false);
 
+        if (cancellationToken.IsCancellationRequested)
+        {
+            await _lifecycle.TransitionAsync(identity, RunnerLifecycleStage.Failed, cancellationToken: CancellationToken.None)
+                .ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
+        }
+
+        var settings = new RunnerScaleSetJitRunnerSetting { Name = identity.RunnerName, WorkFolder = _workFolder };
+        var trackedClient = _jitConfigClient as ITrackedRunnerJitConfigClient;
+        bool mayHaveDispatched = trackedClient is null;
         RunnerScaleSetJitRunnerConfig? jit;
         try
         {
-            jit = await _jitConfigClient.GenerateJitConfigAsync(
-                _scaleSetId,
-                new RunnerScaleSetJitRunnerSetting { Name = identity.RunnerName, WorkFolder = _workFolder },
-                cancellationToken).ConfigureAwait(false);
+            jit = trackedClient is null
+                ? await _jitConfigClient.GenerateJitConfigAsync(_scaleSetId, settings, cancellationToken).ConfigureAwait(false)
+                : await trackedClient.GenerateTrackedJitConfigAsync(
+                    _scaleSetId, settings, () => mayHaveDispatched = true, cancellationToken).ConfigureAwait(false);
         }
         catch
         {
-            await _lifecycle.TransitionAsync(identity, RunnerLifecycleStage.Unknown, cancellationToken: CancellationToken.None).ConfigureAwait(false);
+            RunnerLifecycleStage stage = mayHaveDispatched ? RunnerLifecycleStage.Unknown : RunnerLifecycleStage.Failed;
+            await _lifecycle.TransitionAsync(identity, stage, cancellationToken: CancellationToken.None).ConfigureAwait(false);
             throw;
         }
 
-        if (jit?.Runner is null || jit.Runner.Id <= 0 || string.IsNullOrWhiteSpace(jit.EncodedJitConfig))
+        if (jit?.Runner is null || jit.Runner.Id <= 0)
         {
             await _lifecycle.TransitionAsync(identity, RunnerLifecycleStage.Unknown, cancellationToken: CancellationToken.None).ConfigureAwait(false);
             throw new InvalidOperationException("GitHub returned an incomplete JIT runner configuration.");
         }
 
-        if (!string.Equals(jit.Runner.Name, identity.RunnerName, StringComparison.Ordinal))
+        if (!string.Equals(jit.Runner.Name, identity.RunnerName, StringComparison.Ordinal)
+            || (jit.Runner.RunnerScaleSetId > 0 && jit.Runner.RunnerScaleSetId != _scaleSetId))
         {
             await _lifecycle.TransitionAsync(identity, RunnerLifecycleStage.Unknown, cancellationToken: CancellationToken.None).ConfigureAwait(false);
-            throw new InvalidDataException("GitHub returned a JIT runner with a different name.");
+            throw new InvalidDataException("GitHub returned a JIT runner with a different name or scale-set identity.");
         }
 
-        await _lifecycle.TransitionAsync(identity, RunnerLifecycleStage.JitIssued, cancellationToken: cancellationToken).ConfigureAwait(false);
         RunnerIdentity linkedIdentity = new(
             identity.Scope,
             identity.OperationId,
             identity.RunnerName,
             jit.Runner.Id,
             identity.CapacityResources);
-        await _lifecycle.AssociateGitHubRunnerAsync(linkedIdentity, cancellationToken).ConfigureAwait(false);
+        using (var commit = new CancellationTokenSource(TimeSpan.FromSeconds(30), _timeProvider))
+        {
+            await _lifecycle.RecordJitIssuedAsync(linkedIdentity, commit.Token).ConfigureAwait(false);
+        }
+
+        if (string.IsNullOrWhiteSpace(jit.EncodedJitConfig))
+        {
+            throw new InvalidOperationException("GitHub returned an incomplete JIT runner configuration.");
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
         await _lifecycle.TransitionAsync(linkedIdentity, RunnerLifecycleStage.Creating, cancellationToken: cancellationToken).ConfigureAwait(false);
 
         // Creating is durable before the provider call. A retry must discover
         // this operation before considering any further create request.
+        bool handoffAtStart = _provider.Capabilities.RequiresJitConfigurationAtStart;
         RunnerResource created = await _provider.CreateAsync(
-            new RunnerCreateRequest(linkedIdentity, jit.EncodedJitConfig),
+            new RunnerCreateRequest(linkedIdentity, handoffAtStart ? null : jit.EncodedJitConfig),
             cancellationToken).ConfigureAwait(false);
 
         ValidateProviderResource(created, linkedIdentity);
+        using var providerCommit = new CancellationTokenSource(TimeSpan.FromSeconds(30), _timeProvider);
         RunnerOperationState starting = await _lifecycle.TransitionAsync(
             linkedIdentity,
             RunnerLifecycleStage.Starting,
             created.ProviderResourceId,
-            cancellationToken).ConfigureAwait(false);
+            providerCommit.Token).ConfigureAwait(false);
+        cancellationToken.ThrowIfCancellationRequested();
 
         // Starting and its provider ID are durable before StartAsync. Recovery
         // inspects this exact resource and does not replay StartAsync blindly.
-        RunnerResource started = await _provider.StartAsync(created, cancellationToken).ConfigureAwait(false);
+        RunnerResource started = await _provider.StartAsync(
+            created, handoffAtStart ? jit.EncodedJitConfig : null, cancellationToken).ConfigureAwait(false);
 
         ValidateProviderResource(started, linkedIdentity);
         if (!string.Equals(started.ProviderResourceId, created.ProviderResourceId, StringComparison.Ordinal))
         {
             throw new InvalidDataException("The provider changed a runner resource ID while starting it.");
+        }
+
+        if (started.Status is RunnerResourceStatus.Exited or RunnerResourceStatus.Dead)
+        {
+            // The process can exit before post-start inspection. Preserve the registration and
+            // capacity until reconciliation settles this exact resource and GitHub runner.
+            RunnerOperationState terminal = await _lifecycle.AdoptDiscoveredAsync(started, cancellationToken).ConfigureAwait(false);
+            activity?.SetTag("scaleset.provision.outcome", "terminal");
+            return new RunnerProvisioningResult(started, terminal.Stage, Recovered: false);
         }
 
         ProvisioningReachedProviderStart(_logger, identity.OperationId, identity.Scope.ScaleSetKey);
@@ -290,8 +342,7 @@ public sealed partial class ScaleSetRunnerProvisioner : IDisposable
             RunnerResource? inspected = await _provider.InspectAsync(probe, cancellationToken).ConfigureAwait(false);
             if (inspected is null || inspected.Status == RunnerResourceStatus.Missing)
             {
-                await _lifecycle.ConfirmGoneAsync(previous.Identity, cancellationToken).ConfigureAwait(false);
-                throw new InvalidOperationException("The journaled provider resource is absent; its operation is tombstoned and will not be recreated.");
+                throw await MarkUncertainAndDescribeAsync(previous, cancellationToken).ConfigureAwait(false);
             }
 
             if (!string.Equals(inspected.ProviderResourceId, previous.ProviderResourceId, StringComparison.Ordinal))
@@ -300,7 +351,7 @@ public sealed partial class ScaleSetRunnerProvisioner : IDisposable
             }
 
             ValidateProviderResource(inspected, previous.Identity);
-            if (previous.Stage == RunnerLifecycleStage.Starting
+            if (!_provider.Capabilities.RequiresJitConfigurationAtStart && previous.Stage == RunnerLifecycleStage.Starting
                 && inspected.Status == RunnerResourceStatus.Created)
             {
                 if (inspected.StartedAt is not null || inspected.FinishedAt is not null)
@@ -311,7 +362,7 @@ public sealed partial class ScaleSetRunnerProvisioner : IDisposable
                 RunnerResource resumed;
                 try
                 {
-                    resumed = await _provider.StartAsync(inspected, cancellationToken).ConfigureAwait(false);
+                    resumed = await _provider.StartAsync(inspected, encodedJitConfig: null, cancellationToken).ConfigureAwait(false);
                 }
                 catch
                 {
@@ -343,8 +394,7 @@ public sealed partial class ScaleSetRunnerProvisioner : IDisposable
                 }
                 if (resumed.Status == RunnerResourceStatus.Missing)
                 {
-                    await _lifecycle.ConfirmGoneAsync(previous.Identity, cancellationToken).ConfigureAwait(false);
-                    throw new InvalidOperationException("The provider resource disappeared while resuming its start; it will not be recreated.");
+                    throw await MarkUncertainAndDescribeAsync(previous, cancellationToken).ConfigureAwait(false);
                 }
 
                 RunnerOperationState resumedState = await _lifecycle.AdoptDiscoveredAsync(resumed, cancellationToken).ConfigureAwait(false);
@@ -358,7 +408,7 @@ public sealed partial class ScaleSetRunnerProvisioner : IDisposable
         RunnerResource? discovered = await FindOwnedOperationAsync(previous.Identity, cancellationToken).ConfigureAwait(false);
         if (discovered is not null)
         {
-            RunnerOperationState adopted = await AdoptOrTombstoneAsync(discovered, previous.Identity, cancellationToken).ConfigureAwait(false);
+            RunnerOperationState adopted = await RecordDiscoveredOperationAsync(discovered, previous.Identity, cancellationToken).ConfigureAwait(false);
             if (discovered.Status != RunnerResourceStatus.Missing)
             {
                 return new RunnerProvisioningResult(discovered, adopted.Stage, Recovered: true);
@@ -393,20 +443,24 @@ public sealed partial class ScaleSetRunnerProvisioner : IDisposable
         return match;
     }
 
-    private async Task<RunnerOperationState> AdoptOrTombstoneAsync(
+    private async Task<RunnerOperationState> RecordDiscoveredOperationAsync(
         RunnerResource resource,
         RunnerIdentity identity,
         CancellationToken cancellationToken)
     {
         if (resource.Status == RunnerResourceStatus.Missing)
         {
-            RunnerOperationState? existing = await _journal.FindAsync(identity.OperationId, cancellationToken).ConfigureAwait(false);
-            if (existing is null)
-            {
-                await _lifecycle.ReserveAsync(identity, cancellationToken).ConfigureAwait(false);
-            }
-
-            return await _lifecycle.ConfirmGoneAsync(identity, cancellationToken).ConfigureAwait(false);
+            // Provider absence does not settle a registration that may still exist at GitHub.
+            CapacityResourceQuantities? capacityResources = identity.CapacityResources
+                ?? (resource.CapacityResources is { IsFullyKnown: true } resources ? resources : null);
+            RunnerIdentity observed = new(identity.Scope, identity.OperationId, identity.RunnerName,
+                resource.Identity.GitHubRunnerId ?? identity.GitHubRunnerId, capacityResources);
+            RunnerOperationState reserved = await _lifecycle.ReserveAsync(observed, cancellationToken).ConfigureAwait(false);
+            RunnerOperationState uncertain = await _lifecycle.TransitionAsync(
+                reserved.Identity, RunnerLifecycleStage.Unknown, resource.ProviderResourceId, cancellationToken).ConfigureAwait(false);
+            return uncertain.Identity.GitHubRunnerId is null && observed.GitHubRunnerId is not null
+                ? await _lifecycle.AssociateRecoveredGitHubRunnerAsync(observed, cancellationToken).ConfigureAwait(false)
+                : uncertain;
         }
 
         return await _lifecycle.AdoptDiscoveredAsync(resource, cancellationToken).ConfigureAwait(false);
@@ -452,7 +506,8 @@ public sealed partial class ScaleSetRunnerProvisioner : IDisposable
         ArgumentNullException.ThrowIfNull(resource);
         if (resource.Identity.Scope != expected.Scope
             || resource.Identity.OperationId != expected.OperationId
-            || !string.Equals(resource.Identity.RunnerName, expected.RunnerName, StringComparison.Ordinal))
+            || !string.Equals(resource.Identity.RunnerName, expected.RunnerName, StringComparison.Ordinal)
+            || (resource.Identity.GitHubRunnerId is { } actualId && expected.GitHubRunnerId is { } expectedId && actualId != expectedId))
         {
             throw new InvalidDataException("The provider returned a resource outside the requested ownership operation.");
         }
@@ -568,5 +623,11 @@ public sealed partial class ScaleSetRunnerProvisioner : IDisposable
     }
 
     /// <inheritdoc />
-    public void Dispose() => _lifecycle.Dispose();
+    public void Dispose()
+    {
+        if (_ownsLifecycle)
+        {
+            _lifecycle.Dispose();
+        }
+    }
 }

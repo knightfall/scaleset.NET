@@ -62,4 +62,10 @@ before requesting a JIT configuration and creating a runner. `RunnerLifecycleMan
 and `FileRunnerStateJournal` retain operation evidence for restart recovery.
 See the [component-level worker example](https://github.com/knightfall/scaleset.NET/tree/main/examples/dotnet-worker).
 
+The built-in file journal stores current operation rows and terminal replay
+tombstones in SQLite. Reconciliation queries active rows and reads terminal
+records by exact identity. The in-memory capacity coordinator caches only
+recent release receipts. Use the journal as the durable authority for replay
+protection.
+
 Licensed under [Apache-2.0](https://github.com/knightfall/scaleset.NET/blob/main/LICENSE).

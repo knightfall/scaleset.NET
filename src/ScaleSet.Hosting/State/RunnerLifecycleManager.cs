@@ -47,6 +47,7 @@ public sealed partial class RunnerLifecycleManager : IDisposable
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
+            ThrowIfDisposed();
             RunnerOperationState? existing = await _journal.FindAsync(identity.OperationId, cancellationToken).ConfigureAwait(false);
             if (existing is not null)
             {
@@ -92,9 +93,17 @@ public sealed partial class RunnerLifecycleManager : IDisposable
     /// Associates the GitHub runner ID returned after JIT generation with the
     /// already-reserved operation. The association is idempotent and one-way.
     /// </summary>
-    public async Task<RunnerOperationState> AssociateGitHubRunnerAsync(
+    public Task<RunnerOperationState> AssociateGitHubRunnerAsync(
         RunnerIdentity identity,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        AssociateGitHubRunnerCoreAsync(identity, allowRecovered: false, cancellationToken);
+
+    internal Task<RunnerOperationState> AssociateRecoveredGitHubRunnerAsync(
+        RunnerIdentity identity, CancellationToken cancellationToken) =>
+        AssociateGitHubRunnerCoreAsync(identity, allowRecovered: true, cancellationToken);
+
+    private async Task<RunnerOperationState> AssociateGitHubRunnerCoreAsync(
+        RunnerIdentity identity, bool allowRecovered, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(identity);
         EnsureScope(identity);
@@ -108,6 +117,7 @@ public sealed partial class RunnerLifecycleManager : IDisposable
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
+            ThrowIfDisposed();
             RunnerOperationState current = await _journal.FindAsync(identity.OperationId, cancellationToken).ConfigureAwait(false)
                 ?? throw new InvalidOperationException("The runner operation has not been reserved or adopted.");
             EnsureSameOperation(current.Identity, identity);
@@ -127,12 +137,13 @@ public sealed partial class RunnerLifecycleManager : IDisposable
                 throw new InvalidOperationException("A terminal runner operation cannot be associated with a GitHub runner ID.");
             }
 
-            if (current.Stage == RunnerLifecycleStage.Reserved)
+            if (current.Stage == RunnerLifecycleStage.Reserved && !allowRecovered)
             {
                 throw new InvalidOperationException("A GitHub runner ID can only be associated after JIT issuance.");
             }
 
-            if (current.Stage != RunnerLifecycleStage.JitIssued)
+            if (current.Stage != RunnerLifecycleStage.JitIssued
+                && !(allowRecovered && current.Stage is RunnerLifecycleStage.Unknown or RunnerLifecycleStage.Reserved))
             {
                 throw new InvalidOperationException("Associate the GitHub runner ID after JIT issuance and before provider creation.");
             }
@@ -204,6 +215,9 @@ public sealed partial class RunnerLifecycleManager : IDisposable
         return PersistTransitionAsync(identity, stage, providerResourceId: null, cancellationToken);
     }
 
+    internal Task<RunnerOperationState> RecordJitIssuedAsync(RunnerIdentity identity, CancellationToken cancellationToken) =>
+        PersistTransitionAsync(identity, RunnerLifecycleStage.JitIssued, null, cancellationToken, bindJitIdentity: true);
+
     private async Task<RunnerOperationState> PersistTransitionAsync(
         RunnerIdentity identity,
         RunnerLifecycleStage nextStage,
@@ -211,7 +225,8 @@ public sealed partial class RunnerLifecycleManager : IDisposable
         CancellationToken cancellationToken,
         RunnerResource? terminalResource = null,
         RunnerProviderCapabilities? providerCapabilities = null,
-        bool providerAbsenceConfirmed = false)
+        bool providerAbsenceConfirmed = false,
+        bool bindJitIdentity = false)
     {
         ArgumentNullException.ThrowIfNull(identity);
         ThrowIfDisposed();
@@ -226,6 +241,7 @@ public sealed partial class RunnerLifecycleManager : IDisposable
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
+            ThrowIfDisposed();
             RunnerOperationState current = await _journal.FindAsync(identity.OperationId, cancellationToken).ConfigureAwait(false)
                 ?? throw new InvalidOperationException("The runner operation has not been reserved or adopted.");
             EnsureSameOperation(current.Identity, identity);
@@ -239,7 +255,7 @@ public sealed partial class RunnerLifecycleManager : IDisposable
                 }
             }
 
-            if (current.Identity.GitHubRunnerId is null && identity.GitHubRunnerId is not null)
+            if (!bindJitIdentity && current.Identity.GitHubRunnerId is null && identity.GitHubRunnerId is not null)
             {
                 throw new InvalidOperationException("Associate the GitHub runner ID in its own durable revision before advancing lifecycle state.");
             }
@@ -274,7 +290,12 @@ public sealed partial class RunnerLifecycleManager : IDisposable
             bool terminalResourceAllowsRemoval = terminalResource is not null
                 && nextStage == RunnerLifecycleStage.Removing;
             bool confirmedAbsenceAllowsGone = providerAbsenceConfirmed && nextStage == RunnerLifecycleStage.Gone;
-            if (!CanTransition(current, nextStage) && !terminalResourceAllowsRemoval && !confirmedAbsenceAllowsGone)
+            bool discoveredUnknownResource = current.Stage == RunnerLifecycleStage.Unknown
+                && nextStage == RunnerLifecycleStage.Unknown
+                && current.ProviderResourceId is null
+                && providerResourceId is not null;
+            if (!CanTransition(current, nextStage) && !terminalResourceAllowsRemoval
+                && !confirmedAbsenceAllowsGone && !discoveredUnknownResource)
             {
                 throw new InvalidOperationException($"The runner operation cannot transition from {current.Stage} to {nextStage}.");
             }
@@ -353,19 +374,7 @@ public sealed partial class RunnerLifecycleManager : IDisposable
             throw new InvalidOperationException("The provider has not supplied safe removal evidence for this resource.");
         }
 
-        if (resource.Status == RunnerResourceStatus.Created)
-        {
-            RunnerOperationState? previous = await _journal.FindAsync(resource.Identity.OperationId, cancellationToken).ConfigureAwait(false);
-            if (previous is not null
-                && (previous.Stage is RunnerLifecycleStage.Idle or RunnerLifecycleStage.Busy or RunnerLifecycleStage.Completed
-                    || previous.LastObservedProviderStatus is RunnerResourceStatus.Running
-                        or RunnerResourceStatus.Exited or RunnerResourceStatus.Dead or RunnerResourceStatus.Missing))
-            {
-                throw new InvalidDataException("Created status contradicts previously observed runner activity or provider state.");
-            }
-        }
-
-        await AdoptDiscoveredAsync(resource, cancellationToken).ConfigureAwait(false);
+        await AdoptDiscoveredCoreAsync(resource, onlyIfUntracked: true, cancellationToken).ConfigureAwait(false);
 
         return await PersistTransitionAsync(
             resource.Identity,
@@ -381,9 +390,13 @@ public sealed partial class RunnerLifecycleManager : IDisposable
     /// after restart even if the provider reports Running or the old journal
     /// recorded Idle/Busy.
     /// </summary>
-    public async Task<RunnerOperationState> AdoptDiscoveredAsync(
+    public Task<RunnerOperationState> AdoptDiscoveredAsync(
         RunnerResource resource,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        AdoptDiscoveredCoreAsync(resource, onlyIfUntracked: false, cancellationToken);
+
+    private async Task<RunnerOperationState> AdoptDiscoveredCoreAsync(
+        RunnerResource resource, bool onlyIfUntracked, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(resource);
         ThrowIfDisposed();
@@ -398,6 +411,7 @@ public sealed partial class RunnerLifecycleManager : IDisposable
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
+            ThrowIfDisposed();
             RunnerOperationState? current = await _journal.FindAsync(discoveredIdentity.OperationId, cancellationToken).ConfigureAwait(false);
             if (current is null)
             {
@@ -435,6 +449,11 @@ public sealed partial class RunnerLifecycleManager : IDisposable
                 || (current.Stage == RunnerLifecycleStage.Failed && current.ProviderResourceId is null))
             {
                 throw new InvalidDataException("Provider discovery contradicts a retained terminal operation tombstone.");
+            }
+
+            if (onlyIfUntracked)
+            {
+                return current;
             }
 
             RunnerIdentity adoptedIdentity = PreserveKnownGitHubRunnerId(current.Identity, discoveredIdentity);
@@ -483,10 +502,8 @@ public sealed partial class RunnerLifecycleManager : IDisposable
 
     public void Dispose()
     {
-        if (Interlocked.Exchange(ref _disposed, 1) == 0)
-        {
-            _gate.Dispose();
-        }
+        // The gate may still be in use by an admitted asynchronous operation.
+        Interlocked.Exchange(ref _disposed, 1);
     }
 
     private static Activity? StartActivity(string name)
@@ -566,6 +583,11 @@ public sealed partial class RunnerLifecycleManager : IDisposable
             && current.LastObservedProviderStatus is (null or RunnerResourceStatus.Created or RunnerResourceStatus.Unknown);
         bool terminalResource = resource.Status is (RunnerResourceStatus.Exited or RunnerResourceStatus.Dead)
             && capabilities.ProvidesTerminalStateEvidence;
+
+        if (resource.Status == RunnerResourceStatus.Created && !safeCreatedResource)
+        {
+            throw new InvalidDataException("Created status contradicts previously observed runner activity or provider state.");
+        }
 
         if (!safeCreatedResource && !terminalResource)
         {

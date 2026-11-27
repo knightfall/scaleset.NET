@@ -1,5 +1,4 @@
 using System.Runtime.ExceptionServices;
-using System.Text.Json;
 using ScaleSet.Client;
 
 namespace ScaleSet.Listener;
@@ -231,7 +230,9 @@ internal sealed class ListenerStepEngine(
             _acknowledgmentNotSent = Guid.Empty;
             // A transport failure after DELETE is uncertain even if a custom retry policy
             // would replay it. The Client's same-session queue-401 refresh still applies.
-            using var retry = ScaleSetRequestRetry.Configure(static options => options with { MaxRetries = 0 });
+            using var retry = session is MessageSessionClient
+                ? ScaleSetRequestRetry.SuppressMutationReplay()
+                : ScaleSetRequestRetry.Configure(static options => options with { MaxRetries = 0 });
             await session.DeleteMessageAsync(delivery.Message!.MessageId, token).ConfigureAwait(false);
             ValidateSession();
             PrepareWrite(ScaleSetListenerOperation.PersistSettled, delivery, null);
@@ -333,14 +334,66 @@ internal sealed class ListenerStepEngine(
 
     private static bool SameCheckpoint(ScaleSetListenerCheckpoint? left, ScaleSetListenerCheckpoint? right)
     {
-        if (ReferenceEquals(left, right) || left == right)
+        if (left == right)
         {
             return true;
         }
 
-        return left is not null && right is not null && left.Revision == right.Revision &&
-            left.TransitionId == right.TransitionId &&
-            JsonSerializer.SerializeToUtf8Bytes(left).AsSpan().SequenceEqual(JsonSerializer.SerializeToUtf8Bytes(right));
+        return left is not null && right is not null &&
+            left with { Pending = right.Pending } == right &&
+            left.Pending is { } a && right.Pending is { } b &&
+            a.Phase == b.Phase && SameDelivery(a.Delivery, b.Delivery);
+    }
+
+    private static bool SameDelivery(ScaleSetListenerDelivery left, ScaleSetListenerDelivery right)
+    {
+        return left.SessionKey == right.SessionKey &&
+            left.Kind == right.Kind &&
+            left.ObservedAt == right.ObservedAt &&
+            left.InitialStatistics == right.InitialStatistics &&
+            SameMessage(left.Message, right.Message);
+    }
+
+    private static bool SameMessage(RunnerScaleSetMessage? left, RunnerScaleSetMessage? right)
+    {
+        if (left == right)
+        {
+            return true;
+        }
+
+        return left is not null && right is not null &&
+            left with
+            {
+                JobAvailableMessages = right.JobAvailableMessages,
+                JobAssignedMessages = right.JobAssignedMessages,
+                JobStartedMessages = right.JobStartedMessages,
+                JobCompletedMessages = right.JobCompletedMessages,
+            } == right &&
+            SameJobs(left.JobAvailableMessages, right.JobAvailableMessages) &&
+            SameJobs(left.JobAssignedMessages, right.JobAssignedMessages) &&
+            SameJobs(left.JobStartedMessages, right.JobStartedMessages) &&
+            SameJobs(left.JobCompletedMessages, right.JobCompletedMessages);
+    }
+
+    private static bool SameJobs<T>(IReadOnlyList<T> left, IReadOnlyList<T> right) where T : JobMessage
+    {
+        if (left.Count != right.Count)
+        {
+            return false;
+        }
+
+        for (int index = 0; index < left.Count; index++)
+        {
+            T a = left[index];
+            T b = right[index];
+            if (a with { RequestLabels = b.RequestLabels } != b ||
+                !(a.RequestLabels ?? []).SequenceEqual(b.RequestLabels ?? [], StringComparer.Ordinal))
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private sealed record CheckpointWrite(

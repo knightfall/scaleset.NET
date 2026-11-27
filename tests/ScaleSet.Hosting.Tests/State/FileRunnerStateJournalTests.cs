@@ -1,12 +1,14 @@
 using System.Collections.Immutable;
+using System.Diagnostics;
 using System.Reflection;
 using System.Text.Json;
+using Microsoft.Data.Sqlite;
 using ScaleSet.Hosting.Providers;
 using ScaleSet.Hosting.State;
 
 namespace ScaleSet.Hosting.Tests.State;
 
-public sealed class FileRunnerStateJournalTests
+public sealed class FileRunnerStateJournalTests(ITestOutputHelper output)
 {
     [Fact]
     public async Task OpenAsync_RoundTripsScopeAndOperationState()
@@ -30,6 +32,184 @@ public sealed class FileRunnerStateJournalTests
         Assert.Equal(RunnerLifecycleStage.Reserved, restored.Stage);
         Assert.Equal(0L, restored.Revision);
         Assert.Equal(updatedAt, restored.UpdatedAt);
+    }
+
+    [Fact]
+    public async Task OpenAsync_MigratesLegacyTombstonesAndRejectsReusingAnOperationOrName()
+    {
+        using TemporaryStateDirectory directory = new();
+        RunnerOwnershipScope scope = CreateScope();
+        RunnerIdentity identity = CreateIdentity(scope);
+        string legacyPath = Path.Combine(directory.Path, "runner-state.json");
+        var legacy = new
+        {
+            schemaVersion = 1,
+            scope,
+            operations = new[]
+            {
+                new { identity, stage = "Gone", revision = 4, updatedAt = DateTimeOffset.UnixEpoch },
+            },
+        };
+        var token = TestContext.Current.CancellationToken;
+        string original = JsonSerializer.Serialize(legacy, JsonSerializerOptions.Web);
+        await File.WriteAllTextAsync(legacyPath, original, token);
+
+        await using (FileRunnerStateJournal journal = await FileRunnerStateJournal.OpenAsync(directory.Path, scope, token))
+        {
+            Assert.Empty(await journal.ReadActiveAsync(token));
+            var terminal = Assert.IsType<RunnerOperationState>(await journal.FindAsync(identity.OperationId, token));
+            Assert.Equal(RunnerLifecycleStage.Gone, terminal.Stage);
+            Assert.Equal(4L, terminal.Revision);
+            await Assert.ThrowsAsync<InvalidOperationException>(() => journal.WriteAsync(
+                new RunnerOperationState(identity, RunnerLifecycleStage.Reserved, 5, DateTimeOffset.UnixEpoch), 4, token));
+            var sameName = new RunnerIdentity(scope, Guid.NewGuid(), identity.RunnerName);
+            await Assert.ThrowsAsync<InvalidOperationException>(() => journal.WriteAsync(
+                new RunnerOperationState(sameName, RunnerLifecycleStage.Reserved, 0, DateTimeOffset.UnixEpoch), -1, token));
+        }
+
+        using (JsonDocument barrier = JsonDocument.Parse(await File.ReadAllTextAsync(legacyPath, token)))
+        {
+            Assert.Equal(2, barrier.RootElement.GetProperty("schemaVersion").GetInt32());
+        }
+
+        await using (FileRunnerStateJournal reopened = await FileRunnerStateJournal.OpenAsync(directory.Path, scope, token))
+        {
+            Assert.Equal(identity, Assert.Single(await reopened.ReadAllAsync(token)).Identity);
+        }
+
+        File.Delete(Path.Combine(directory.Path, "runner-state.sqlite3"));
+        await Assert.ThrowsAsync<InvalidDataException>(() => FileRunnerStateJournal.OpenAsync(directory.Path, scope, token));
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public async Task OpenAsync_RecoversInterruptedMigrationWithoutOverwritingConflictingLegacyData(
+        bool schemaCommitted, bool changeLegacy)
+    {
+        using TemporaryStateDirectory directory = new();
+        RunnerOwnershipScope scope = CreateScope();
+        RunnerIdentity identity = CreateIdentity(scope);
+        CancellationToken token = TestContext.Current.CancellationToken;
+        string legacyPath = Path.Combine(directory.Path, "runner-state.json");
+        string databasePath = Path.Combine(directory.Path, "runner-state.sqlite3");
+        string original = JsonSerializer.Serialize(new
+        {
+            schemaVersion = 1,
+            scope,
+            operations = new[] { new { identity, stage = "Gone", revision = 4, updatedAt = DateTimeOffset.UnixEpoch } },
+        }, JsonSerializerOptions.Web);
+        await File.WriteAllTextAsync(legacyPath, original, token);
+
+        if (schemaCommitted)
+        {
+            await using (FileRunnerStateJournal previouslyMigrated = await FileRunnerStateJournal.OpenAsync(directory.Path, scope, token))
+            {
+                Assert.Equal(4, (await previouslyMigrated.FindAsync(identity.OperationId, token))?.Revision);
+            }
+
+            // Restore the precise disk boundary between the committed import and replacing the original.
+            await File.WriteAllTextAsync(legacyPath, changeLegacy ? original + " " : original, token);
+        }
+        else
+        {
+            await using var initial = new SqliteConnection(new SqliteConnectionStringBuilder
+            {
+                DataSource = databasePath,
+                Mode = SqliteOpenMode.ReadWriteCreate,
+                Pooling = false,
+            }.ToString());
+            await initial.OpenAsync(token);
+            await using SqliteTransaction interrupted = initial.BeginTransaction();
+            await using SqliteCommand partial = initial.CreateCommand();
+            partial.Transaction = interrupted;
+            partial.CommandText = "CREATE TABLE journal (id INTEGER PRIMARY KEY); PRAGMA user_version = 2;";
+            partial.ExecuteNonQuery();
+            interrupted.Rollback();
+            partial.Transaction = null;
+            partial.CommandText = "PRAGMA user_version;";
+            Assert.Equal(0L, Assert.IsType<long>(partial.ExecuteScalar()));
+        }
+
+        if (changeLegacy)
+        {
+            var error = await Assert.ThrowsAsync<InvalidDataException>(() => FileRunnerStateJournal.OpenAsync(directory.Path, scope, token));
+            Assert.Contains("changed since database migration", error.Message, StringComparison.Ordinal);
+            Assert.Equal(original + " ", await File.ReadAllTextAsync(legacyPath, token));
+            await File.WriteAllTextAsync(legacyPath, original, token);
+        }
+
+        await using FileRunnerStateJournal reopened = await FileRunnerStateJournal.OpenAsync(directory.Path, scope, token);
+        var operation = Assert.Single(await reopened.ReadAllAsync(token));
+        Assert.Equal(identity, operation.Identity);
+        Assert.Equal(4, operation.Revision);
+        Assert.Equal(RunnerLifecycleStage.Gone, operation.Stage);
+        using JsonDocument barrier = JsonDocument.Parse(await File.ReadAllTextAsync(legacyPath, token));
+        Assert.Equal(2, barrier.RootElement.GetProperty("schemaVersion").GetInt32());
+        Assert.Empty(Directory.EnumerateFiles(directory.Path, "*.tmp"));
+    }
+
+    public static bool LinuxNativeFileModesAvailable => OperatingSystem.IsLinux();
+
+    [Fact(Skip = "Requires Linux filesystem modes and the shipped native SQLite.", SkipUnless = nameof(LinuxNativeFileModesAvailable))]
+    public async Task NativeRollbackJournalInheritsPrivateDatabaseModeDuringCreationAndReopen()
+    {
+        if (!OperatingSystem.IsLinux())
+        {
+            throw new PlatformNotSupportedException();
+        }
+
+        using TemporaryStateDirectory directory = new();
+        const UnixFileMode searchable = UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute
+            | UnixFileMode.GroupRead | UnixFileMode.GroupExecute | UnixFileMode.OtherRead | UnixFileMode.OtherExecute;
+        const UnixFileMode ownerOnly = UnixFileMode.UserRead | UnixFileMode.UserWrite;
+        string databasePath = Path.Combine(directory.Path, "runner-state.sqlite3");
+        string rollbackPath = databasePath + "-journal";
+        CancellationToken token = TestContext.Current.CancellationToken;
+        File.SetUnixFileMode(directory.Path, searchable);
+        await using (FileStream placeholder = new(databasePath, new FileStreamOptions
+        {
+            Mode = FileMode.CreateNew,
+            Access = FileAccess.Write,
+            UnixCreateMode = ownerOnly,
+        }))
+        {
+            Assert.Equal(ownerOnly, File.GetUnixFileMode(databasePath));
+        }
+
+        await AssertModesDuringWriteAsync("CREATE TABLE initial_probe (id INTEGER PRIMARY KEY);");
+        await using (FileRunnerStateJournal opened = await FileRunnerStateJournal.OpenAsync(directory.Path, CreateScope(), token))
+        {
+            Assert.Empty(await opened.ReadAllAsync(token));
+        }
+
+        await AssertModesDuringWriteAsync("UPDATE journal SET scope = scope || ' ' WHERE id = 1;");
+        await using FileRunnerStateJournal reopened = await FileRunnerStateJournal.OpenAsync(directory.Path, CreateScope(), token);
+        Assert.Empty(await reopened.ReadAllAsync(token));
+
+        async Task AssertModesDuringWriteAsync(string sql)
+        {
+            await using var database = new SqliteConnection(new SqliteConnectionStringBuilder
+            {
+                DataSource = databasePath,
+                Mode = SqliteOpenMode.ReadWrite,
+                Pooling = false,
+            }.ToString());
+            await database.OpenAsync(token);
+            await using SqliteTransaction transaction = database.BeginTransaction();
+            await using SqliteCommand command = database.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText = sql;
+            command.ExecuteNonQuery();
+
+            Assert.Equal(searchable, File.GetUnixFileMode(directory.Path));
+            Assert.Equal(ownerOnly, File.GetUnixFileMode(databasePath));
+            Assert.True(File.Exists(rollbackPath));
+            Assert.Equal(ownerOnly, File.GetUnixFileMode(rollbackPath));
+            transaction.Rollback();
+            Assert.False(File.Exists(rollbackPath));
+        }
     }
 
     [Fact]
@@ -105,6 +285,21 @@ public sealed class FileRunnerStateJournalTests
         await Assert.ThrowsAsync<InvalidDataException>(() => FileRunnerStateJournal.OpenAsync(directory.Path, scope, cancellationToken: TestContext.Current.CancellationToken));
 
         Assert.Equal("{ malformed", await File.ReadAllTextAsync(journalPath, cancellationToken: TestContext.Current.CancellationToken));
+        Assert.False(File.Exists(Path.Combine(directory.Path, "runner-state.sqlite3")));
+    }
+
+    [Fact]
+    public async Task OpenAsync_ReportsCorruptExistingDatabaseAndPreservesItsOwnershipEvidence()
+    {
+        using TemporaryStateDirectory directory = new();
+        var token = TestContext.Current.CancellationToken;
+        string databasePath = Path.Combine(directory.Path, "runner-state.sqlite3");
+        byte[] invalidDatabase = [32, 88, 48, 92, 63, 24];
+        await File.WriteAllBytesAsync(databasePath, invalidDatabase, token);
+
+        await Assert.ThrowsAsync<InvalidDataException>(() => FileRunnerStateJournal.OpenAsync(directory.Path, CreateScope(), token));
+
+        Assert.Equal(invalidDatabase, await File.ReadAllBytesAsync(databasePath, token));
     }
 
     [Fact]
@@ -160,6 +355,88 @@ public sealed class FileRunnerStateJournalTests
 
         Assert.True(Directory.Exists(Path.Combine(directory.Path, "runner-state.json")));
         Assert.Empty(Directory.EnumerateFiles(directory.Path, "*.tmp"));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task WriteAsync_CancellationUnderNativeContentionRollsBackAndAllowsReopen(bool readerBlocksCommit)
+    {
+        using TemporaryStateDirectory directory = new();
+        RunnerOwnershipScope scope = CreateScope();
+        CancellationToken token = TestContext.Current.CancellationToken;
+        var state = new RunnerOperationState(CreateIdentity(scope), RunnerLifecycleStage.Reserved, 0, DateTimeOffset.UnixEpoch);
+        string databasePath = Path.Combine(directory.Path, "runner-state.sqlite3");
+        await using (FileRunnerStateJournal journal = await FileRunnerStateJournal.OpenAsync(directory.Path, scope, token))
+        {
+            await using var blocker = new SqliteConnection(new SqliteConnectionStringBuilder
+            {
+                DataSource = databasePath,
+                Mode = SqliteOpenMode.ReadWrite,
+                Pooling = false,
+            }.ToString());
+            await blocker.OpenAsync(token);
+            await using SqliteTransaction held = blocker.BeginTransaction(deferred: readerBlocksCommit);
+            if (readerBlocksCommit)
+            {
+                await using SqliteCommand count = blocker.CreateCommand();
+                count.Transaction = held;
+                count.CommandText = "SELECT COUNT(*) FROM operations;";
+                Assert.Equal(0L, Assert.IsType<long>(count.ExecuteScalar()));
+            }
+
+            using var caller = CancellationTokenSource.CreateLinkedTokenSource(token);
+            Task write = Task.Run(() => journal.WriteAsync(state, -1, caller.Token), CancellationToken.None);
+            using var entered = CancellationTokenSource.CreateLinkedTokenSource(token);
+            entered.CancelAfter(TimeSpan.FromSeconds(2));
+            while (GetJournalGate(journal).CurrentCount != 0
+                || (readerBlocksCommit && !File.Exists(databasePath + "-journal")))
+            {
+                await Task.Delay(TimeSpan.FromMilliseconds(10), entered.Token);
+            }
+
+            await Task.Delay(TimeSpan.FromMilliseconds(60), token);
+            Assert.False(write.IsCompleted, "The SQLite lock must hold while the operation is canceled.");
+            long started = Stopwatch.GetTimestamp();
+            await caller.CancelAsync();
+            Exception? failure = await Record.ExceptionAsync(() => write);
+            TimeSpan latency = Stopwatch.GetElapsedTime(started);
+            output.WriteLine($"Native cancellation after {(readerBlocksCommit ? "commit" : "begin")} contention settled in {latency.TotalMilliseconds:F0} ms ({failure?.GetType().Name}).");
+
+            Assert.True(latency < TimeSpan.FromSeconds(2), $"Cancellation exceeded the two-second hosting cleanup budget: {latency}.");
+            Assert.IsAssignableFrom<OperationCanceledException>(failure);
+            held.Rollback();
+            Assert.Null(await journal.FindAsync(state.Identity.OperationId, token));
+        }
+
+        await using FileRunnerStateJournal reopened = await FileRunnerStateJournal.OpenAsync(directory.Path, scope, token);
+        await reopened.WriteAsync(state, -1, token);
+        Assert.Equal(state, await reopened.FindAsync(state.Identity.OperationId, token));
+    }
+
+    [Fact]
+    public async Task WriteAsync_RetriesWithinTheLockBudgetAfterTheFirstSlice()
+    {
+        using TemporaryStateDirectory directory = new();
+        RunnerOwnershipScope scope = CreateScope();
+        CancellationToken token = TestContext.Current.CancellationToken;
+        var state = new RunnerOperationState(CreateIdentity(scope), RunnerLifecycleStage.Reserved, 0, DateTimeOffset.UnixEpoch);
+        await using FileRunnerStateJournal journal = await FileRunnerStateJournal.OpenAsync(directory.Path, scope, token);
+        await using var blocker = new SqliteConnection(new SqliteConnectionStringBuilder
+        {
+            DataSource = Path.Combine(directory.Path, "runner-state.sqlite3"),
+            Mode = SqliteOpenMode.ReadWrite,
+            Pooling = false,
+        }.ToString());
+        await blocker.OpenAsync(token);
+        await using SqliteTransaction held = blocker.BeginTransaction();
+        Task write = journal.WriteAsync(state, -1, token);
+        await Task.Delay(TimeSpan.FromMilliseconds(1300), token);
+        Assert.False(write.IsCompleted);
+        held.Rollback();
+
+        await write.WaitAsync(TimeSpan.FromSeconds(3), token);
+        Assert.Equal(state, Assert.Single(await journal.ReadAllAsync(token)));
     }
 
     [Fact]

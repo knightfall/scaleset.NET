@@ -10,6 +10,17 @@ public interface IRunnerStateJournal : IAsyncDisposable
 
     Task<ImmutableArray<RunnerOperationState>> ReadAllAsync(CancellationToken cancellationToken = default);
 
+    /// <summary>Reads operations that may still own resources or unconfirmed effects.</summary>
+    async Task<ImmutableArray<RunnerOperationState>> ReadActiveAsync(CancellationToken cancellationToken = default)
+    {
+        var operations = await ReadAllAsync(cancellationToken).ConfigureAwait(false);
+        return operations.Where(static operation => !IsTerminal(operation)).ToImmutableArray();
+    }
+
+    internal static bool IsTerminal(RunnerOperationState operation) =>
+        operation.Stage == RunnerLifecycleStage.Gone
+        || (operation.Stage == RunnerLifecycleStage.Failed && operation.ProviderResourceId is null);
+
     Task<RunnerOperationState?> FindAsync(Guid operationId, CancellationToken cancellationToken = default);
 
     /// <summary>

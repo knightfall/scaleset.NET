@@ -69,7 +69,7 @@ internal static class TestResponses
             if (path == "/actions/runner-registration")
             {
                 string token = CreateAdminToken(adminExpiry);
-                return Json(HttpStatusCode.OK, $"{{\"url\":\"https://actions.example/tenant\",\"token\":\"{token}\"}}");
+                return Json(HttpStatusCode.OK, $"{{\"url\":\"https://actions-fixture.actions.githubusercontent.com/tenant\",\"token\":\"{token}\"}}");
             }
 
             return await actionsHandler(request, cancellationToken).ConfigureAwait(false);

@@ -1,5 +1,6 @@
 using System.Net;
 using System.Text;
+using System.Text.Json;
 
 namespace ScaleSet.Client;
 
@@ -176,7 +177,14 @@ public sealed partial class ScaleSetClient
     public async Task<RunnerScaleSetJitRunnerConfig> GenerateJitConfigAsync(
         long scaleSetId,
         RunnerScaleSetJitRunnerSetting runnerSetting,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        await GenerateJitConfigAsync(scaleSetId, runnerSetting, onDispatch: null, cancellationToken).ConfigureAwait(false);
+
+    internal async Task<RunnerScaleSetJitRunnerConfig> GenerateJitConfigAsync(
+        long scaleSetId,
+        RunnerScaleSetJitRunnerSetting runnerSetting,
+        Action? onDispatch,
+        CancellationToken cancellationToken)
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(scaleSetId);
         ArgumentNullException.ThrowIfNull(runnerSetting);
@@ -189,14 +197,18 @@ public sealed partial class ScaleSetClient
             null,
             (int)HttpStatusCode.OK,
             cancellationToken,
-            static response => DeserializeRequiredAdministrationResponse<RunnerScaleSetJitRunnerConfig>(response, "runner JIT config")).ConfigureAwait(false);
+            static response => DeserializeRequiredAdministrationResponse<RunnerScaleSetJitRunnerConfig>(response, "runner JIT config"),
+            onDispatch: onDispatch).ConfigureAwait(false);
     }
 
     /// <summary>Gets a registered runner by identifier.</summary>
     /// <param name="runnerId">The positive runner identifier.</param>
     /// <param name="cancellationToken">A token used to cancel the request.</param>
     /// <returns>The runner, or <see langword="null"/> when the service returns a JSON null body.</returns>
-    public async Task<RunnerReference?> GetRunnerAsync(long runnerId, CancellationToken cancellationToken = default)
+    public Task<RunnerReference?> GetRunnerAsync(long runnerId, CancellationToken cancellationToken = default) =>
+        GetRunnerCoreAsync(runnerId, returnDefaultOnNotFound: false, cancellationToken);
+
+    private async Task<RunnerReference?> GetRunnerCoreAsync(long runnerId, bool returnDefaultOnNotFound, CancellationToken cancellationToken)
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(runnerId);
 
@@ -207,7 +219,57 @@ public sealed partial class ScaleSetClient
             null,
             (int)HttpStatusCode.OK,
             cancellationToken,
-            DeserializeAdministrationResponse<RunnerReference>).ConfigureAwait(false);
+            DeserializeAdministrationResponse<RunnerReference>,
+            returnDefaultOnNotFound: returnDefaultOnNotFound).ConfigureAwait(false);
+    }
+
+    /// <summary>Checks whether an exact runner is registered with this scale set and currently online and idle.</summary>
+    /// <remarks>This is a point-in-time observation. It does not fence assignments or authorize removal.</remarks>
+    /// <param name="scaleSetId">The expected scale-set identifier.</param>
+    /// <param name="runnerId">The exact registered GitHub runner ID.</param>
+    /// <param name="runnerName">The exact registered name.</param>
+    /// <param name="cancellationToken">A token used to cancel the observation.</param>
+    /// <returns>True when both GitHub services confirm the runner's identity and idle status. False when either runner lookup reports no such runner.</returns>
+    public async Task<bool> IsRunnerIdleAsync(
+        long scaleSetId, long runnerId, string runnerName, CancellationToken cancellationToken = default)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(scaleSetId);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(runnerId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(runnerName);
+
+        RunnerReference? membership = await GetRunnerCoreAsync(
+            runnerId, returnDefaultOnNotFound: true, cancellationToken).ConfigureAwait(false);
+        if (membership is null || membership.Id != runnerId || membership.RunnerScaleSetId != scaleSetId ||
+            !string.Equals(membership.Name, runnerName, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var uri = BuildGitHubRequestUri(Target.ApiBaseUri, $"{Target.RunnerApiPath}/{FormatIdentifier(runnerId)}");
+        return await WithGitHubAccessTokenAsync((token, installationToken, deadline) => SendHttpAsync(
+            HttpMethod.Get, uri, body: null, $"Bearer {token}", contentType: null,
+            headers: new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["Accept"] = "application/vnd.github+json",
+                ["Cache-Control"] = "no-cache, no-store",
+            },
+            dependency: "github", expectedStatus: 200, allowAccepted: false, timeout: _options.ControlRequestTimeout,
+            queueTokenOnUnauthorized: false, retryDiscoveryAuthentication: false,
+            response => IsIdleRunnerResponse(response, runnerId, runnerName), cancellationToken,
+            installationToken: installationToken, returnDefaultOnNotFound: true, sharedDeadline: deadline), cancellationToken).ConfigureAwait(false);
+    }
+
+    private static bool IsIdleRunnerResponse(byte[] response, long runnerId, string runnerName)
+    {
+        using var document = JsonDocument.Parse(response,
+            new JsonDocumentOptions { AllowDuplicateProperties = false });
+        var runner = document.RootElement;
+        return runner.ValueKind == JsonValueKind.Object
+            && runner.TryGetProperty("id", out var id) && id.ValueKind == JsonValueKind.Number
+            && id.TryGetInt64(out long reportedId) && reportedId == runnerId
+            && runner.TryGetProperty("name", out var name) && name.ValueEquals(runnerName)
+            && runner.TryGetProperty("status", out var status) && status.ValueEquals("online")
+            && runner.TryGetProperty("busy", out var busy) && busy.ValueKind == JsonValueKind.False;
     }
 
     /// <summary>Finds a registered runner by name.</summary>
@@ -334,18 +396,24 @@ public sealed partial class ScaleSetClient
 
     private static RunnerReference? DecodeRunnerByName(byte[] responseBody)
     {
+        using var document = JsonDocument.Parse(responseBody);
+        if (!document.RootElement.TryGetProperty("count", out _))
+        {
+            throw new InvalidDataException("The runner reference list response must specify its count.");
+        }
+
         RunnerReferenceList response = DeserializeRequiredAdministrationResponse<RunnerReferenceList>(responseBody, "runner reference list");
         if (response.Count < 0)
         {
             throw new InvalidDataException("The runner reference list response count cannot be negative.");
         }
 
-        if (response.Count == 0)
+        if (response.Count == 0 && response.Value is null or { Count: 0 })
         {
             return null;
         }
 
-        if (response.Count > 1)
+        if (response.Count > 1 || response.Value is { Count: > 1 })
         {
             throw new InvalidDataException("Multiple runners matched the requested name.");
         }

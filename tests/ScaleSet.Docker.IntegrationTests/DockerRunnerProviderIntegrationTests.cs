@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Logging.Abstractions;
 using ScaleSet.Hosting.Configuration;
 using ScaleSet.Hosting.Providers;
@@ -29,7 +30,7 @@ public sealed class DockerRunnerProviderIntegrationTests
             {
                 resource = await first.CreateAsync(new RunnerCreateRequest(identity, SyntheticJit), TestContext.Current.CancellationToken);
                 Assert.Equal(RunnerResourceStatus.Created, resource.Status);
-                resource = await first.StartAsync(resource, TestContext.Current.CancellationToken);
+                resource = await first.StartAsync(resource, SyntheticJit, TestContext.Current.CancellationToken);
                 Assert.Equal(RunnerResourceStatus.Running, resource.Status);
             }
 
@@ -70,11 +71,12 @@ public sealed class DockerRunnerProviderIntegrationTests
         var identity = new RunnerIdentity(scope, Guid.NewGuid(), $"fixture-{Guid.NewGuid():N}", 5000000002);
         RunnerResource? resource = null;
         string directory = Path.Combine(Path.GetTempPath(), $"scaleset-docker-state-{Guid.NewGuid():N}");
-        using DockerRunnerProvider provider = CreateProvider("exit 0");
+        using DockerRunnerProvider provider = CreateProvider(
+            """test "$ACTIONS_RUNNER_INPUT_JITCONFIG" = docker-integration-jit-sentinel-no-github-credential && test ! -e /run/scaleset-jit/handoff""");
         try
         {
             resource = await provider.CreateAsync(new RunnerCreateRequest(identity, SyntheticJit), TestContext.Current.CancellationToken);
-            resource = await provider.StartAsync(resource, TestContext.Current.CancellationToken);
+            resource = await provider.StartAsync(resource, SyntheticJit, TestContext.Current.CancellationToken);
             using var wait = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
             wait.CancelAfter(TimeSpan.FromSeconds(20));
             while (resource.Status is not (RunnerResourceStatus.Exited or RunnerResourceStatus.Dead))
@@ -102,7 +104,17 @@ public sealed class DockerRunnerProviderIntegrationTests
             RunnerOperationState persisted = Assert.Single(await reopened.ReadAllAsync(TestContext.Current.CancellationToken));
             Assert.Equal(RunnerLifecycleStage.Gone, persisted.Stage);
             Assert.Equal(resource.ProviderResourceId, persisted.ProviderResourceId);
-            string json = await File.ReadAllTextAsync(Path.Combine(directory, "runner-state.json"), TestContext.Current.CancellationToken);
+            await using var persistedDb = new SqliteConnection(new SqliteConnectionStringBuilder
+            {
+                DataSource = Path.Combine(directory, "runner-state.sqlite3"),
+                Mode = SqliteOpenMode.ReadOnly,
+                Pooling = false,
+            }.ToString());
+            await persistedDb.OpenAsync(TestContext.Current.CancellationToken);
+            await using var selectPayload = persistedDb.CreateCommand();
+            selectPayload.CommandText = "SELECT payload FROM operations";
+            string json = Assert.IsType<string>(await selectPayload.ExecuteScalarAsync(TestContext.Current.CancellationToken));
+            Assert.Contains(identity.RunnerName, json, StringComparison.Ordinal);
             Assert.DoesNotContain(SyntheticJit, json, StringComparison.Ordinal);
             Assert.DoesNotContain("EncodedJitConfig", json, StringComparison.OrdinalIgnoreCase);
         }

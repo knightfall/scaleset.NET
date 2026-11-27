@@ -44,7 +44,7 @@ public sealed class ScaleSetAutoscalerServiceTests
 
         await service.StopAsync(CancellationToken.None);
         Assert.False(healthState.IsReady);
-        Assert.False(healthState.IsLive);
+        Assert.True(healthState.IsLive);
 
         Assert.All(runtimes, static runtime =>
         {

@@ -91,6 +91,10 @@ internal sealed class DemoRunnerProvider(DemoRunnerBackend backend) : IRunnerPro
         return Task.FromResult(backend.Create(request.Identity));
     }
 
+    public Task<RunnerResource> StartAsync(RunnerResource resource, string? encodedJitConfig, CancellationToken cancellationToken) =>
+        StartAsync(resource, cancellationToken);
+
+    /// <summary>Starts the runner through the published alpha.1 provider interface.</summary>
     public Task<RunnerResource> StartAsync(RunnerResource resource, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();

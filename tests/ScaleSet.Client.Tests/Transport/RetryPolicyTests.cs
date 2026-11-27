@@ -178,14 +178,14 @@ public sealed class RetryPolicyTests
             if (path == "/actions/runner-registration")
             {
                 string token = TestResponses.CreateAdminToken(BaseNow.AddMinutes(10));
-                return Task.FromResult(TestResponses.Json(HttpStatusCode.OK, $"{{\"url\":\"https://actions.example/tenant\",\"token\":\"{token}\"}}"));
+                return Task.FromResult(TestResponses.Json(HttpStatusCode.OK, $"{{\"url\":\"https://actions-fixture.actions.githubusercontent.com/tenant\",\"token\":\"{token}\"}}"));
             }
 
             if (path.EndsWith("/sessions", StringComparison.Ordinal))
             {
                 return Task.FromResult(TestResponses.Json(
                     HttpStatusCode.OK,
-                    "{\"sessionId\":\"2c581b9c-5c84-44d0-85bd-d6d780de6124\",\"ownerName\":\"host\",\"messageQueueUrl\":\"https://queue.example/poll\",\"messageQueueAccessToken\":\"qtok\"}"));
+                    "{\"sessionId\":\"2c581b9c-5c84-44d0-85bd-d6d780de6124\",\"ownerName\":\"host\",\"messageQueueUrl\":\"https://queue-fixture.actions.githubusercontent.com/poll\",\"messageQueueAccessToken\":\"qtok\"}"));
             }
 
             calls++;

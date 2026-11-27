@@ -12,12 +12,14 @@ namespace ScaleSet.Hosting.Capacity;
 /// </summary>
 public sealed class HostCapacityCoordinator
 {
+    private const int MaximumRecentReleases = 4096;
     private readonly object _sync = new();
     private readonly HostCapacityLimits _limits;
     private readonly ScaleSetCapacityDefinition[] _definitions;
     private readonly Dictionary<string, ScaleSetCapacityDefinition> _definitionsByKey;
     private readonly Dictionary<CapacityOperationKey, Occupant> _occupants = new();
     private readonly Dictionary<CapacityOperationKey, ReleasedOperation> _released = new();
+    private readonly LinkedList<CapacityOperationKey> _releaseOrder = new();
     private readonly Dictionary<Guid, CapacityOperationKey> _operationIds = new();
     private readonly Guid _coordinatorId = Guid.NewGuid();
     private long _version;
@@ -416,6 +418,8 @@ public sealed class HostCapacityCoordinator
             {
                 resources = CapacityResourceQuantities.MergeObservation(released.Resources, item.Resources, out hadConflict);
                 adoptedIdentity = released.Identity;
+                _releaseOrder.Remove(released.Order);
+                _released.Remove(key);
             }
 
             Occupant adopted = new(
@@ -496,7 +500,15 @@ public sealed class HostCapacityCoordinator
     }
 
     /// <summary>Releases capacity only for the current handle generation and capacity revision.</summary>
-    public CapacityReleaseStatus TryRelease(CapacityReservationHandle handle, long expectedRevision)
+    /// <remarks>Only recent release receipts are cached. Use the durable operation journal for replay protection.</remarks>
+    public CapacityReleaseStatus TryRelease(CapacityReservationHandle handle, long expectedRevision) =>
+        TryReleaseCore(handle, expectedRevision, retainTombstone: true);
+
+    internal CapacityReleaseStatus ReleaseUnusedPermit(CapacityReservationHandle handle, long expectedRevision) =>
+        TryReleaseCore(handle, expectedRevision, retainTombstone: false);
+
+    private CapacityReleaseStatus TryReleaseCore(
+        CapacityReservationHandle handle, long expectedRevision, bool retainTombstone)
     {
         ArgumentNullException.ThrowIfNull(handle);
         using Activity? activity = CapacityTelemetry.StartActivity("release");
@@ -536,11 +548,22 @@ public sealed class HostCapacityCoordinator
             }
 
             _occupants.Remove(key);
-            _released[key] = new ReleasedOperation(
-                occupant.Identity,
-                occupant.Resources,
-                occupant.Generation,
-                occupant.Revision);
+            if (retainTombstone)
+            {
+                _released.Add(key, new ReleasedOperation(
+                    occupant.Identity, occupant.Resources, occupant.Generation, occupant.Revision, _releaseOrder.AddLast(key)));
+                if (_released.Count > MaximumRecentReleases)
+                {
+                    CapacityOperationKey expired = _releaseOrder.First!.Value;
+                    _releaseOrder.RemoveFirst();
+                    _released.Remove(expired);
+                    _operationIds.Remove(expired.OperationId);
+                }
+            }
+            else
+            {
+                _operationIds.Remove(occupant.Identity.OperationId);
+            }
             _version = nextVersion;
             CapacityTelemetry.RecordCapacityOperation("release", "released");
             return CapacityReleaseStatus.Released;
@@ -1216,7 +1239,8 @@ public sealed class HostCapacityCoordinator
         RunnerIdentity Identity,
         CapacityResourceQuantities Resources,
         long Generation,
-        long Revision);
+        long Revision,
+        LinkedListNode<CapacityOperationKey> Order);
 
     private readonly record struct CapacityOperationKey(
         string ControllerId,

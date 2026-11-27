@@ -209,6 +209,14 @@ public static class ScaleSetRequestRetry
 {
     private static readonly AsyncLocal<ImmutableArray<Func<ScaleSetRetryOptions, ScaleSetRetryOptions>>> Adjusters = new();
 
+    private static readonly Func<ScaleSetRetryOptions, ScaleSetRetryOptions> MutationReplayGuard =
+        static options => options with { MaxRetries = 0 };
+
+    internal static IDisposable SuppressMutationReplay() => Configure(MutationReplayGuard);
+
+    internal static bool IsMutationReplayGuard(Func<ScaleSetRetryOptions, ScaleSetRetryOptions> adjust) =>
+        ReferenceEquals(adjust, MutationReplayGuard);
+
     /// <summary>
     /// Applies <paramref name="adjust"/> to the current async call's retry options until the returned handle is disposed.
     /// Nested scopes apply outer-first.

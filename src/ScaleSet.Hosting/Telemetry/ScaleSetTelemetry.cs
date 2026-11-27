@@ -115,9 +115,9 @@ public sealed class ScaleSetTelemetryMetrics : IDisposable
         _droppedLogs = _meter.CreateCounter<long>("scaleset.telemetry.logs.dropped", "{log}", "Log events dropped before export.");
         _configuredScaleSetKeys = (configuredScaleSetKeys ?? Array.Empty<string>())
             .Where(static key => !string.IsNullOrWhiteSpace(key))
-            .Distinct(StringComparer.Ordinal)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
             .Take(MaximumScaleSetDimensions)
-            .ToHashSet(StringComparer.Ordinal);
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
         _ = _meter.CreateObservableGauge<long>("scaleset.runners", ObserveRunners, "{runner}", "Current runner count by finite lifecycle state.");
     }
 
@@ -230,8 +230,8 @@ public sealed class ScaleSetTelemetryMetrics : IDisposable
             return "unspecified";
         }
 
-        return scaleSetKey is not null && _configuredScaleSetKeys.Contains(scaleSetKey)
-            ? scaleSetKey
+        return scaleSetKey is not null && _configuredScaleSetKeys.TryGetValue(scaleSetKey, out string? configuredKey)
+            ? configuredKey
             : "other";
     }
 

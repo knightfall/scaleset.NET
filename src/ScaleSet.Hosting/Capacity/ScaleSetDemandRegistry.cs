@@ -118,6 +118,17 @@ public sealed class ScaleSetDemandRegistry
         return status;
     }
 
+    internal CapacityReleaseStatus ReleaseUnusedPermit(HostCapacityCoordinator coordinator, CapacityReservationLease lease)
+    {
+        CapacityReleaseStatus status = coordinator.ReleaseUnusedPermit(lease.Handle, lease.Revision);
+        if (status is CapacityReleaseStatus.Released or CapacityReleaseStatus.AlreadyReleased)
+        {
+            _ = RemoveCapacityLease(lease.Handle.Identity.OperationId, lease);
+        }
+
+        return status;
+    }
+
     /// <summary>Gets the latest registered generation and revision for an operation.</summary>
     public CapacityReservationLease? GetCapacityLease(Guid operationId)
     {
@@ -129,6 +140,18 @@ public sealed class ScaleSetDemandRegistry
         lock (_sync)
         {
             return _capacityLeases.TryGetValue(operationId, out CapacityReservationLease? lease) ? lease : null;
+        }
+    }
+
+    internal Guid[] GetTrackedOperationIds(string scaleSetKey)
+    {
+        lock (_sync)
+        {
+            return _capacityLeases.Values
+                .Where(lease => string.Equals(lease.Handle.Identity.Scope.ScaleSetKey, scaleSetKey, StringComparison.OrdinalIgnoreCase))
+                .Select(static lease => lease.Handle.Identity.OperationId)
+                .Where(operationId => !_admissionPermits.Contains(operationId))
+                .ToArray();
         }
     }
 

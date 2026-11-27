@@ -177,12 +177,12 @@ public sealed class MessageSessionClient : IMessageSession
         }
     }
 
-    internal static RunnerScaleSetSession ParseAndValidateSession(byte[] response, string ownerName)
+    internal static RunnerScaleSetSession ParseAndValidateSession(byte[] response, string ownerName, ScaleSetClient client)
     {
         var json = Encoding.UTF8.GetString(TrimUtf8Bom(response)).TrimStart('\uFEFF');
         var session = ScaleSetJson.Deserialize<RunnerScaleSetSession>(json)
             ?? throw new JsonException("The message session response was empty.");
-        return ValidateSession(session, ownerName);
+        return ValidateSession(session, ownerName, client);
     }
 
     private async Task<TResult> ExecuteWithQueueRefreshAsync<TResult>(
@@ -256,8 +256,8 @@ public sealed class MessageSessionClient : IMessageSession
                 return;
             }
             catch (OperationCanceledException) when (
-                !cancellationToken.IsCancellationRequested &&
-                flight.Completion.Task.IsCanceled)
+                !ownsRefresh && !cancellationToken.IsCancellationRequested &&
+                flight.OwnerCanceled && flight.Completion.Task.IsCanceled)
             {
                 // Another operation owned this refresh and canceled its request. Retry under this caller's token.
             }
@@ -278,7 +278,7 @@ public sealed class MessageSessionClient : IMessageSession
                 query: null,
                 expectedStatus: 200,
                 cancellationToken,
-                response => ParseAndValidateSession(response, _ownerName)).ConfigureAwait(false);
+                response => ParseAndValidateSession(response, _ownerName, _client)).ConfigureAwait(false);
             cancellationToken.ThrowIfCancellationRequested();
             if (refreshedSession.SessionId != session.SessionId)
             {
@@ -304,6 +304,8 @@ public sealed class MessageSessionClient : IMessageSession
 
             if (cancellationFailure is not null)
             {
+                flight.OwnerCanceled = cancellationToken.IsCancellationRequested
+                    && cancellationFailure.CancellationToken == cancellationToken;
                 flight.Completion.TrySetCanceled(cancellationFailure.CancellationToken);
             }
             else if (failure is not null)
@@ -377,25 +379,20 @@ public sealed class MessageSessionClient : IMessageSession
         return queueUri;
     }
 
-    private static RunnerScaleSetSession ValidateSession(RunnerScaleSetSession session, string fallbackOwnerName)
+    private static RunnerScaleSetSession ValidateSession(
+        RunnerScaleSetSession session, string fallbackOwnerName, ScaleSetClient client)
     {
         if (session.SessionId == Guid.Empty)
         {
             throw new InvalidDataException("The message session response does not contain a valid session ID.");
         }
 
-        if (!Uri.TryCreate(session.MessageQueueUrl, UriKind.Absolute, out var queueUri) ||
-            !string.Equals(queueUri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase) ||
-            string.IsNullOrEmpty(queueUri.Host) ||
-            queueUri.UserInfo.Length != 0 ||
-            queueUri.Fragment.Length != 0)
+        if (!client.TryValidateDiscoveredEndpoint(session.MessageQueueUrl, out _))
         {
             throw new InvalidDataException("The message session response does not contain a valid HTTPS queue URL.");
         }
 
-        if (string.IsNullOrWhiteSpace(session.MessageQueueAccessToken) ||
-            session.MessageQueueAccessToken.Contains('\r') ||
-            session.MessageQueueAccessToken.Contains('\n'))
+        if (session.MessageQueueAccessToken is not { } token || !ScaleSetCredentials.IsSafeAuthenticationToken(token))
         {
             throw new InvalidDataException("The message session response does not contain a valid queue access token.");
         }
@@ -491,6 +488,7 @@ public sealed class MessageSessionClient : IMessageSession
 
     private sealed class RefreshFlight(RunnerScaleSetSession snapshot)
     {
+        public bool OwnerCanceled { get; set; }
         internal RunnerScaleSetSession Snapshot { get; } = snapshot;
 
         internal TaskCompletionSource Completion { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);

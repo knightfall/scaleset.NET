@@ -52,7 +52,7 @@ public sealed class WireModelTests
             RunnerGroupName = "default",
             Labels = [new Label { Type = "System", Name = "linux" }],
             RunnerSetting = new RunnerSetting { DisableUpdate = true },
-            RunnerJitConfigUrl = "https://actions.example/jit",
+            RunnerJitConfigUrl = "https://actions-fixture.actions.githubusercontent.com/jit",
         };
 
         using var document = JsonDocument.Parse(ScaleSetJson.Serialize(value));
@@ -64,7 +64,7 @@ public sealed class WireModelTests
         Assert.Equal("default", root.GetProperty("runnerGroupName").GetString());
         Assert.Equal("linux", root.GetProperty("labels")[0].GetProperty("name").GetString());
         Assert.True(root.GetProperty("RunnerSetting").GetProperty("disableUpdate").GetBoolean());
-        Assert.Equal("https://actions.example/jit", root.GetProperty("runnerJitConfigUrl").GetString());
+        Assert.Equal("https://actions-fixture.actions.githubusercontent.com/jit", root.GetProperty("runnerJitConfigUrl").GetString());
     }
 
     [Fact]
@@ -109,7 +109,7 @@ public sealed class WireModelTests
     [Fact]
     public void DiagnosticToStringRedactsCredentialBearingQueueUrlWithoutChangingWireJson()
     {
-        const string queueUrl = "https://queue.example/path-secret?access_token=url-token-secret";
+        const string queueUrl = "https://queue-fixture.actions.githubusercontent.com/path-secret?access_token=url-token-secret";
         var session = new RunnerScaleSetSession { MessageQueueUrl = queueUrl };
 
         string diagnostic = session.ToString();

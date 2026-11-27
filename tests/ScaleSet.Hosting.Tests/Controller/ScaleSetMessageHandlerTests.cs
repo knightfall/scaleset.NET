@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Collections.Immutable;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using ScaleSet.Client;
 using ScaleSet.Hosting.Configuration;
@@ -48,6 +49,64 @@ public sealed class ScaleSetMessageHandlerTests
     }
 
     [Fact]
+    public async Task HandleAsync_NewOffersCannotReusePermitsForPendingAcquisitions()
+    {
+        using TemporaryStateDirectory directory = new();
+        RunnerOwnershipScope scope = CreateScope();
+        ScaleSetCapacityContext capacity = CreateCapacityContext(scope);
+        await using Fixture fixture = await Fixture.CreateAsync(directory.Path, scope, capacity);
+        var batches = new List<long[]>();
+        fixture.Session.Acquire = (offered, _) =>
+        {
+            batches.Add(offered.ToArray());
+            return Task.FromResult<IReadOnlyList<long>>(offered.ToArray());
+        };
+        CancellationToken token = TestContext.Current.CancellationToken;
+
+        for (int first = 100; first <= 200; first += 100)
+        {
+            await fixture.Handler.HandleAsync(new RunnerScaleSetMessage
+            {
+                Statistics = new RunnerScaleSetStatistic(),
+                JobAvailableMessages = Enumerable.Range(first, 6)
+                    .Select(id => new JobAvailableMessage { RunnerRequestId = id }).ToArray(),
+            }, token);
+        }
+
+        Assert.Equal(2, batches.Count);
+        Assert.Equal(6, batches[0].Length);
+        Assert.Equal([200L, 201L], batches[1]);
+        Assert.Equal(8, capacity.DemandRegistry.GetAdmissionPermits(scope.ScaleSetKey).Count);
+        Assert.Equal(0, fixture.Provider.CreateCount);
+    }
+
+    [Fact]
+    public async Task HandleAsync_HoldsNewAdmissionWhenStartingRunnerCoversPriorAssignment()
+    {
+        using TemporaryStateDirectory directory = new();
+        RunnerOwnershipScope scope = CreateScope();
+        ScaleSetCapacityContext capacity = CreateCapacityContext(scope);
+        await using Fixture fixture = await Fixture.CreateAsync(directory.Path, scope, capacity);
+        CancellationToken token = TestContext.Current.CancellationToken;
+        fixture.Session.Acquire = (offered, _) => Task.FromResult<IReadOnlyList<long>>(offered.ToArray());
+        var oneAssignment = new RunnerScaleSetStatistic { TotalAssignedJobs = 1 };
+        await fixture.Handler.HandleAsync(new RunnerScaleSetMessage { Statistics = oneAssignment }, token);
+
+        await fixture.Handler.HandleAsync(new RunnerScaleSetMessage
+        {
+            Statistics = oneAssignment,
+            JobAvailableMessages = [new JobAvailableMessage { RunnerRequestId = 702 }],
+        }, token);
+
+        Assert.Equal(1, fixture.Session.AcquireCount);
+        Assert.Equal(1, fixture.Provider.CreateCount);
+        Assert.Single(capacity.DemandRegistry.GetAdmissionPermits(scope.ScaleSetKey));
+        var usage = capacity.Coordinator.CaptureSnapshot().ScaleSets[scope.ScaleSetKey].Usage;
+        Assert.Equal(1, usage.StateCounts[CapacityOccupancyState.Starting]);
+        Assert.Equal(1, usage.StateCounts[CapacityOccupancyState.Reserved]);
+    }
+
+    [Fact]
     public async Task HandleAsync_CapacityPathUsesJobMessagesForAdmissionButNotScaleDemand()
     {
         using TemporaryStateDirectory directory = new();
@@ -84,6 +143,7 @@ public sealed class ScaleSetMessageHandlerTests
         await fixture.Handler.HandleAsync(new RunnerScaleSetMessage
         {
             Statistics = new RunnerScaleSetStatistic { TotalAssignedJobs = 1 },
+            JobAssignedMessages = [new JobAssignedMessage { RunnerRequestId = 701 }],
         }, TestContext.Current.CancellationToken);
 
         Assert.Equal(1, fixture.Provider.CreateCount);
@@ -141,6 +201,498 @@ public sealed class ScaleSetMessageHandlerTests
         Assert.Equal(0, fixture.Session.AcquireCount);
         Assert.Equal(0, fixture.Provider.CreateCount);
         Assert.Equal(0, advertisedMaximum);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task HandleAsync_ReleasesUnusedOfferPermits(bool acquireFailed)
+    {
+        using TemporaryStateDirectory directory = new();
+        RunnerOwnershipScope scope = CreateScope();
+        ScaleSetCapacityContext capacity = CreateCapacityContext(scope);
+        await using Fixture fixture = await Fixture.CreateAsync(directory.Path, scope, capacity);
+        fixture.Session.Acquire = (_, _) => acquireFailed
+            ? throw new IOException("Synthetic acquire failure.")
+            : Task.FromResult<IReadOnlyList<long>>([]);
+        var offer = new RunnerScaleSetMessage
+        {
+            Statistics = new RunnerScaleSetStatistic(),
+            JobAvailableMessages = [new JobAvailableMessage { RunnerRequestId = 701 }],
+        };
+
+        if (acquireFailed)
+        {
+            await Assert.ThrowsAsync<IOException>(() => fixture.Handler.HandleAsync(offer, TestContext.Current.CancellationToken));
+        }
+        else
+        {
+            await fixture.Handler.HandleAsync(offer, TestContext.Current.CancellationToken);
+        }
+
+        Assert.Empty(capacity.DemandRegistry.GetAdmissionPermits(scope.ScaleSetKey));
+        Assert.Equal(0, capacity.Coordinator.CaptureSnapshot().Usage.RunnerCount);
+        Assert.Equal(0, fixture.Jit.CallCount);
+    }
+
+    [Fact]
+    public async Task HandleAsync_CancellationWithHeldPlanningGateDefersTrimWithoutBlockingAnotherSet()
+    {
+        using TemporaryStateDirectory directory = new();
+        RunnerOwnershipScope scope = CreateScope();
+        RunnerOwnershipScope other = new(scope.ControllerId, "other", 89);
+        ScaleSetOptions options = CreateScaleSetOptions(scope, ScalingPolicy.SpareCapacity, 0, 1);
+        ScaleSetOptions otherOptions = CreateScaleSetOptions(other, ScalingPolicy.SpareCapacity, 0, 1);
+        HostCapacityCoordinator coordinator = new(new HostCapacityOptions { MaxTotalRunners = 1, CreationConcurrency = 1 }, [options, otherOptions]);
+        ScaleSetCapacityContext capacity = new(options, coordinator, coordinator.DemandRegistry, static _ => { });
+        await using Fixture fixture = await Fixture.CreateAsync(directory.Path, scope, capacity);
+        CancellationToken testToken = TestContext.Current.CancellationToken;
+        using var caller = CancellationTokenSource.CreateLinkedTokenSource(testToken);
+        TaskCompletionSource entered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        fixture.Session.Acquire = async (_, token) =>
+        {
+            entered.SetResult();
+            await Task.Delay(Timeout.InfiniteTimeSpan, token);
+            return [];
+        };
+        Task callback = fixture.Handler.HandleAsync(new RunnerScaleSetMessage
+        {
+            Statistics = new RunnerScaleSetStatistic(),
+            JobAvailableMessages = [new JobAvailableMessage { RunnerRequestId = 701 }],
+        }, caller.Token);
+        await entered.Task.WaitAsync(TimeSpan.FromSeconds(2), testToken);
+
+        SemaphoreSlim gate = capacity.DemandRegistry.PlanningGate;
+        await gate.WaitAsync(testToken);
+        try
+        {
+            await caller.CancelAsync();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => callback.WaitAsync(TimeSpan.FromSeconds(2), testToken));
+            Assert.Single(capacity.DemandRegistry.GetAdmissionPermits(scope.ScaleSetKey));
+            Assert.Equal(0, coordinator.CreatePlan().GetScaleSet(other.ScaleSetKey).ReservableAdditionalRunners);
+        }
+        finally
+        {
+            gate.Release();
+        }
+
+        using var settle = CancellationTokenSource.CreateLinkedTokenSource(testToken);
+        settle.CancelAfter(TimeSpan.FromSeconds(5));
+        while (capacity.DemandRegistry.GetAdmissionPermits(scope.ScaleSetKey).Count != 0)
+        {
+            await Task.Delay(TimeSpan.FromMilliseconds(10), settle.Token);
+        }
+
+        Assert.Equal(1, coordinator.CreatePlan().GetScaleSet(other.ScaleSetKey).ReservableAdditionalRunners);
+        Assert.False(fixture.Handler.IsDraining);
+    }
+
+    [Theory]
+    [InlineData(false, false, false)]
+    [InlineData(true, false, false)]
+    [InlineData(false, true, false)]
+    [InlineData(false, false, true)]
+    public async Task Listener_HandlesCommittedDeliveryWhilePlanningGateRemainsHeld(
+        bool alreadyHasRunner, bool cancelAfterPrimary, bool primaryFails)
+    {
+        using TemporaryStateDirectory directory = new();
+        RunnerOwnershipScope scope = CreateScope();
+        RunnerOwnershipScope other = new(scope.ControllerId, "other", 89);
+        ScaleSetOptions options = CreateScaleSetOptions(scope, ScalingPolicy.SpareCapacity, 0, 2);
+        ScaleSetOptions otherOptions = CreateScaleSetOptions(other, ScalingPolicy.SpareCapacity, 0, 1);
+        HostCapacityCoordinator coordinator = new(new HostCapacityOptions
+        {
+            MaxTotalRunners = alreadyHasRunner ? 2 : 1,
+            CreationConcurrency = 1,
+        }, [options, otherOptions]);
+        ScaleSetCapacityContext capacity = new(options, coordinator, coordinator.DemandRegistry, static _ => { });
+        const long messageId = 78;
+        var statistics = new RunnerScaleSetStatistic();
+        var delivery = new RunnerScaleSetMessage
+        {
+            MessageId = messageId,
+            Statistics = statistics,
+            JobAvailableMessages = [new JobAvailableMessage { RunnerRequestId = 701 }],
+        };
+        CancellationToken testToken = TestContext.Current.CancellationToken;
+        using var caller = CancellationTokenSource.CreateLinkedTokenSource(testToken);
+        TaskCompletionSource entered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        TaskCompletionSource resume = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        TaskCompletionSource<long> nextPoll = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        await using Fixture fixture = await Fixture.CreateAsync(directory.Path, scope, capacity, queuedMessage: delivery,
+            afterActiveRead: () =>
+            {
+                if (cancelAfterPrimary && resume.Task.IsCompleted)
+                {
+                    caller.Cancel();
+                }
+            });
+        int existingRunners = alreadyHasRunner ? 1 : 0;
+        if (alreadyHasRunner)
+        {
+            await fixture.Handler.HandleAsync(new RunnerScaleSetMessage
+            {
+                Statistics = new RunnerScaleSetStatistic { TotalAssignedJobs = 1 },
+            }, testToken);
+        }
+
+        var primary = new IOException("Synthetic acquisition failure.");
+        fixture.Session.Acquire = async (_, token) =>
+        {
+            entered.SetResult();
+            await resume.Task.WaitAsync(token);
+            return primaryFails ? throw primary : [];
+        };
+        fixture.Session.PollAfterDelivery = async (lastMessageId, token) =>
+        {
+            nextPoll.SetResult(lastMessageId);
+            await Task.Delay(Timeout.InfiniteTimeSpan, token);
+            return null;
+        };
+        ScaleSetListener listener = new(fixture.Session, new ScaleSetListenerOptions { ScaleSetId = scope.ScaleSetId, MaxRunners = 2 });
+        Task running = listener.RunAsync(fixture.Handler, caller.Token);
+        TimeSpan assertionTimeout = TimeSpan.FromSeconds(3);
+        try
+        {
+            await entered.Task.WaitAsync(assertionTimeout, testToken);
+            SemaphoreSlim gate = capacity.DemandRegistry.PlanningGate;
+            await gate.WaitAsync(testToken);
+            try
+            {
+                Assert.Equal(alreadyHasRunner ? 0 : 1, capacity.DemandRegistry.GetAdmissionPermits(scope.ScaleSetKey).Count);
+                resume.SetResult();
+
+                if (primaryFails)
+                {
+                    Assert.Same(primary, await Assert.ThrowsAsync<IOException>(() => running.WaitAsync(assertionTimeout, testToken)));
+                }
+                else if (cancelAfterPrimary)
+                {
+                    await Assert.ThrowsAnyAsync<OperationCanceledException>(() => running.WaitAsync(assertionTimeout, testToken));
+                }
+                else
+                {
+                    Assert.Equal(messageId, await nextPoll.Task.WaitAsync(assertionTimeout, testToken));
+                    Assert.False(running.IsCompleted);
+                }
+
+                Assert.Equal(primaryFails ? 0 : 1, fixture.Session.DeleteCount);
+                Assert.Equal(primaryFails ? 0 : messageId, fixture.Session.LastDeletedMessageId);
+                Assert.Equal(1, fixture.Session.AcquireCount);
+                Assert.Equal(existingRunners, fixture.Provider.CreateCount);
+                Assert.Equal(existingRunners, fixture.Jit.CallCount);
+            }
+            finally
+            {
+                gate.Release();
+            }
+
+            using var settle = CancellationTokenSource.CreateLinkedTokenSource(testToken);
+            settle.CancelAfter(assertionTimeout);
+            while (capacity.DemandRegistry.GetAdmissionPermits(scope.ScaleSetKey).Count != 0)
+            {
+                await Task.Delay(TimeSpan.FromMilliseconds(10), settle.Token);
+            }
+
+            Assert.Equal(1, coordinator.CreatePlan().GetScaleSet(other.ScaleSetKey).ReservableAdditionalRunners);
+        }
+        finally
+        {
+            await caller.CancelAsync();
+        }
+
+        if (!primaryFails)
+        {
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => running);
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task HandleAsync_ReportsCleanupFailureIndependentlyFromPrimaryFailure(bool primaryFails)
+    {
+        using TemporaryStateDirectory directory = new();
+        RunnerOwnershipScope scope = CreateScope();
+        ScaleSetCapacityContext capacity = CreateCapacityContext(scope);
+        var logger = new AdmissionTestLogger();
+        await using Fixture fixture = await Fixture.CreateAsync(directory.Path, scope, capacity, logger);
+        var primary = new IOException("Synthetic acquisition failure.");
+        fixture.Session.Acquire = (_, _) =>
+        {
+            CapacityReservationLease permit = Assert.Single(capacity.DemandRegistry.GetAdmissionPermits(scope.ScaleSetKey));
+            Assert.Equal(CapacityStateUpdateStatus.Updated,
+                capacity.Coordinator.TryUpdateState(permit.Handle, permit.Revision, CapacityOccupancyState.JitIssued).Status);
+            return primaryFails ? Task.FromException<IReadOnlyList<long>>(primary) : Task.FromResult<IReadOnlyList<long>>([]);
+        };
+        Task callback = fixture.Handler.HandleAsync(new RunnerScaleSetMessage
+        {
+            Statistics = new RunnerScaleSetStatistic(),
+            JobAvailableMessages = [new JobAvailableMessage { RunnerRequestId = 701 }],
+        }, TestContext.Current.CancellationToken);
+
+        if (primaryFails)
+        {
+            Assert.Same(primary, await Assert.ThrowsAsync<IOException>(() => callback));
+            Assert.Contains(20, logger.Events);
+        }
+        else
+        {
+            var error = await Assert.ThrowsAsync<InvalidOperationException>(() => callback);
+            Assert.Contains("current revision", error.Message, StringComparison.Ordinal);
+        }
+
+        Assert.Single(capacity.DemandRegistry.GetAdmissionPermits(scope.ScaleSetKey));
+    }
+
+    private sealed class AdmissionTestLogger : ILogger<ScaleSetMessageHandler>
+    {
+        public ConcurrentQueue<int> Events { get; } = new();
+        public TaskCompletionSource TrimFailed { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public bool IsEnabled(LogLevel logLevel) => true;
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception,
+            Func<TState, Exception?, string> formatter)
+        {
+            Events.Enqueue(eventId.Id);
+            if (eventId.Id == 20)
+            {
+                TrimFailed.TrySetResult();
+            }
+        }
+    }
+
+    [Fact]
+    public async Task HandleAsync_ReleasesPermitWhenCanceledBeforeProvisionerRuns()
+    {
+        using TemporaryStateDirectory directory = new();
+        RunnerOwnershipScope scope = CreateScope();
+        var options = CreateScaleSetOptions(scope, ScalingPolicy.TotalFloor, minimumRunners: 1, maximumRunners: 2);
+        HostCapacityCoordinator coordinator = new(new HostCapacityOptions { CreationConcurrency = 1 }, [options]);
+        ScaleSetCapacityContext capacity = new(options, coordinator, coordinator.DemandRegistry, static _ => { });
+        await using Fixture fixture = await Fixture.CreateAsync(directory.Path, scope, capacity);
+        var token = TestContext.Current.CancellationToken;
+        await using var held = await coordinator.CreationConcurrencyGate.AcquireAsync(token);
+        using var caller = CancellationTokenSource.CreateLinkedTokenSource(token);
+        Task handling = fixture.Handler.HandleAsync(new RunnerScaleSetMessage { Statistics = new RunnerScaleSetStatistic() }, caller.Token);
+        Assert.False(handling.IsCompleted);
+        Assert.Equal(1, coordinator.CaptureSnapshot().Usage.RunnerCount);
+
+        await caller.CancelAsync();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => handling);
+
+        Assert.Equal(0, coordinator.CaptureSnapshot().Usage.RunnerCount);
+        Assert.Empty(await fixture.Journal.ReadAllAsync(token));
+        Assert.Equal(0, fixture.Jit.CallCount);
+    }
+
+    [Theory]
+    [InlineData(false, "release")]
+    [InlineData(true, "release")]
+    [InlineData(true, "new generation")]
+    [InlineData(true, "release error")]
+    public async Task WaitForDrainAsync_WaitsForDeferredTrimOrProvisioningRelease(bool waitingForCreation, string outcome)
+    {
+        using TemporaryStateDirectory directory = new();
+        RunnerOwnershipScope scope = CreateScope();
+        RunnerOwnershipScope peer = new(scope.ControllerId, "other", 89);
+        ScaleSetOptions options = CreateScaleSetOptions(scope, ScalingPolicy.SpareCapacity, 0, 1);
+        ScaleSetOptions peerOptions = CreateScaleSetOptions(peer, ScalingPolicy.SpareCapacity, 0, 1);
+        HostCapacityCoordinator coordinator = new(new HostCapacityOptions { MaxTotalRunners = 1, CreationConcurrency = 1 }, [options, peerOptions]);
+        var registry = coordinator.DemandRegistry;
+        var logger = new AdmissionTestLogger();
+        await using Fixture fixture = await Fixture.CreateAsync(directory.Path, scope,
+            new ScaleSetCapacityContext(options, coordinator, registry, static _ => { }), logger);
+        var token = TestContext.Current.CancellationToken;
+        await using CreationConcurrencyLease? heldCreation = waitingForCreation
+            ? await coordinator.CreationConcurrencyGate.AcquireAsync(token)
+            : null;
+        using var caller = CancellationTokenSource.CreateLinkedTokenSource(token);
+        TaskCompletionSource acquisitionEntered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        fixture.Session.Acquire = async (_, cancellationToken) =>
+        {
+            acquisitionEntered.SetResult();
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            return [];
+        };
+
+        CapacityReservationLease? reserved = null;
+        if (waitingForCreation)
+        {
+            var resources = CapacityResourceQuantities.FromRunnerProfile(options.RunnerProfile);
+            var identity = new RunnerIdentity(scope, Guid.NewGuid(), "reserved-runner", capacityResources: resources);
+            var attempt = coordinator.TryReserve(coordinator.CreatePlan(new Dictionary<string, int> { [scope.ScaleSetKey] = 1 }),
+                new CapacityReservationRequest(identity, resources));
+            Assert.Equal(CapacityReservationStatus.Reserved, attempt.Status);
+            reserved = new CapacityReservationLease(Assert.IsType<CapacityReservationHandle>(attempt.Handle), attempt.Revision);
+            registry.StoreCapacityLease(reserved, isAdmissionPermit: true);
+        }
+
+        Task callback = fixture.Handler.HandleAsync(new RunnerScaleSetMessage
+        {
+            Statistics = new RunnerScaleSetStatistic { TotalAssignedJobs = waitingForCreation ? 1 : 0 },
+            JobAvailableMessages = waitingForCreation ? [] : [new JobAvailableMessage { RunnerRequestId = 701 }],
+        }, caller.Token);
+        CapacityReservationLease permit;
+        if (waitingForCreation)
+        {
+            permit = Assert.IsType<CapacityReservationLease>(reserved);
+            Assert.Empty(registry.GetAdmissionPermits(scope.ScaleSetKey));
+        }
+        else
+        {
+            await acquisitionEntered.Task.WaitAsync(TimeSpan.FromSeconds(3), token);
+            permit = Assert.Single(registry.GetAdmissionPermits(scope.ScaleSetKey));
+        }
+
+        Assert.False(callback.IsCompleted);
+        TimeSpan shortBudget = TimeSpan.FromMilliseconds(75);
+        ManualDrainDeadline clock = new(shortBudget);
+        Task<bool> shortDrain = fixture.Handler.WaitForDrainAsync(shortBudget, clock, token);
+        Assert.False(shortDrain.IsCompleted);
+        SemaphoreSlim gate = registry.PlanningGate;
+        await gate.WaitAsync(token);
+        CapacityReservationLease? replacement = null;
+        long? staleRevision = null;
+        long versionBeforeSettlement;
+        try
+        {
+            await caller.CancelAsync();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => callback.WaitAsync(TimeSpan.FromSeconds(3), token));
+            Assert.False(await fixture.Handler.WaitForDrainAsync(TimeSpan.Zero, TimeProvider.System, token));
+            clock.Expire();
+            Assert.False(await shortDrain.WaitAsync(TimeSpan.FromSeconds(3), token));
+            Assert.Equal(1, coordinator.CaptureSnapshot().Usage.RunnerCount);
+            Assert.Equal(0, coordinator.CreatePlan().GetScaleSet(peer.ScaleSetKey).ReservableAdditionalRunners);
+
+            if (outcome == "new generation")
+            {
+                Assert.Equal(CapacityReleaseStatus.Released, registry.TryReleaseConfirmedAbsent(coordinator, permit));
+                CapacityInventoryAdoptionAttempt adopted = coordinator.AdoptInventory(
+                    new CapacityInventoryItem(permit.Handle.Identity, permit.Handle.Resources, CapacityOccupancyState.Unknown));
+                Assert.Equal(CapacityInventoryAdoptionStatus.Adopted, adopted.Status);
+                var handle = Assert.IsType<CapacityReservationHandle>(adopted.Handle);
+                Assert.True(handle.Generation > permit.Handle.Generation);
+                replacement = new CapacityReservationLease(handle, adopted.Revision);
+                registry.StoreCapacityLease(replacement);
+            }
+            else if (outcome == "release error")
+            {
+                CapacityStateUpdateAttempt update = coordinator.TryUpdateState(permit.Handle, permit.Revision, CapacityOccupancyState.JitIssued);
+                Assert.Equal(CapacityStateUpdateStatus.Updated, update.Status);
+                staleRevision = update.CurrentRevision;
+            }
+
+            versionBeforeSettlement = coordinator.CaptureSnapshot().Version;
+        }
+        finally
+        {
+            gate.Release();
+        }
+
+        if (staleRevision is long revision)
+        {
+            await logger.TrimFailed.Task.WaitAsync(TimeSpan.FromSeconds(3), token);
+            await gate.WaitAsync(token);
+            gate.Release();
+            InvalidOperationException failure = await Assert.ThrowsAsync<InvalidOperationException>(
+                () => fixture.Handler.WaitForDrainAsync(TimeSpan.Zero, TimeProvider.System, token));
+            Assert.Contains("current revision", failure.Message, StringComparison.Ordinal);
+            Assert.Same(permit, registry.GetCapacityLease(permit.Handle.Identity.OperationId));
+            Assert.Equal(versionBeforeSettlement, coordinator.CaptureSnapshot().Version);
+            Assert.True(registry.TryUpdateCapacityLease(permit, revision));
+        }
+
+        Assert.True(await fixture.Handler.WaitForDrainAsync(TimeSpan.FromSeconds(3), TimeProvider.System, token));
+        Assert.True(await fixture.Handler.WaitForDrainAsync(TimeSpan.Zero, TimeProvider.System, token));
+        Assert.Empty(registry.GetAdmissionPermits(scope.ScaleSetKey));
+        Assert.Same(replacement, registry.GetCapacityLease(permit.Handle.Identity.OperationId));
+        HostCapacitySnapshot capacity = coordinator.CaptureSnapshot();
+        Assert.Equal(versionBeforeSettlement + (replacement is null ? 1 : 0), capacity.Version);
+        Assert.Equal(replacement is null ? 0 : 1, capacity.Usage.RunnerCount);
+        Assert.Equal(replacement is null ? 1 : 0, coordinator.CreatePlan().GetScaleSet(peer.ScaleSetKey).ReservableAdditionalRunners);
+        Assert.Equal(0, fixture.Provider.CreateCount);
+        Assert.Equal(0, fixture.Jit.CallCount);
+    }
+
+    [Fact]
+    public async Task WaitForDrainAsync_LeavesAmbiguousProviderResourceCharged()
+    {
+        using TemporaryStateDirectory directory = new();
+        RunnerOwnershipScope scope = CreateScope();
+        ScaleSetCapacityContext capacity = CreateCapacityContext(scope);
+        await using Fixture fixture = await Fixture.CreateAsync(directory.Path, scope, capacity);
+        CancellationToken token = TestContext.Current.CancellationToken;
+        var lostResponse = new IOException("Synthetic start response lost.");
+        fixture.Provider.StartFailure = lostResponse;
+        Assert.Same(lostResponse, await Assert.ThrowsAsync<IOException>(() => fixture.Handler.HandleAsync(new RunnerScaleSetMessage
+        {
+            Statistics = new RunnerScaleSetStatistic { TotalAssignedJobs = 1 },
+        }, token)));
+        RunnerOperationState durable = Assert.Single(await fixture.Journal.ReadAllAsync(token));
+        Assert.NotNull(durable.ProviderResourceId);
+        Assert.Equal(RunnerLifecycleStage.Starting, durable.Stage);
+        var before = capacity.Coordinator.CaptureSnapshot();
+        Assert.True(await fixture.Handler.WaitForDrainAsync(TimeSpan.Zero, TimeProvider.System, token));
+        var after = capacity.Coordinator.CaptureSnapshot();
+        Assert.Equal(before.Version, after.Version);
+        Assert.Equal(1, after.Usage.StateCounts[CapacityOccupancyState.Unknown]);
+        Assert.NotNull(capacity.DemandRegistry.GetCapacityLease(durable.Identity.OperationId));
+        Assert.Empty(fixture.Provider.RemovedOperations);
+        Assert.Equal(1, fixture.Provider.StartCount);
+    }
+
+    private sealed class ManualDrainDeadline(TimeSpan budget) : TimeProvider
+    {
+        private Action? _expire;
+
+        public override ITimer CreateTimer(TimerCallback callback, object? state, TimeSpan dueTime, TimeSpan period)
+        {
+            if (dueTime != budget)
+            {
+                return System.CreateTimer(callback, state, dueTime, period);
+            }
+
+            _expire = () => callback(state);
+            return new ManualTimer();
+        }
+
+        public void Expire() => Assert.IsType<Action>(_expire)();
+
+        private sealed class ManualTimer : ITimer
+        {
+            public bool Change(TimeSpan dueTime, TimeSpan period) => throw new NotSupportedException();
+            public void Dispose() { }
+            public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+        }
+    }
+
+    [Fact]
+    public async Task BeginDrain_SettlesAnAcquiredJobCanceledBeforeRunnerAssignment()
+    {
+        using TemporaryStateDirectory directory = new();
+        RunnerOwnershipScope scope = CreateScope();
+        ScaleSetCapacityContext capacity = CreateCapacityContext(scope);
+        await using Fixture fixture = await Fixture.CreateAsync(directory.Path, scope, capacity);
+        var token = TestContext.Current.CancellationToken;
+        fixture.Session.Acquire = (_, _) => Task.FromResult<IReadOnlyList<long>>([701L]);
+        await fixture.Handler.HandleAsync(new RunnerScaleSetMessage
+        {
+            Statistics = new RunnerScaleSetStatistic(),
+            JobAvailableMessages = [new JobAvailableMessage { RunnerRequestId = 701 }],
+        }, token);
+
+        fixture.Handler.BeginDrain();
+        Assert.False(await fixture.Handler.WaitForDrainAsync(TimeSpan.Zero, TimeProvider.System, token));
+        Assert.Empty(capacity.DemandRegistry.GetAdmissionPermits(scope.ScaleSetKey));
+        await fixture.Handler.HandleAsync(new RunnerScaleSetMessage
+        {
+            JobCompletedMessages = [new JobCompletedMessage { RunnerRequestId = 701 }],
+        }, token);
+
+        Assert.True(await fixture.Handler.WaitForDrainAsync(TimeSpan.Zero, TimeProvider.System, token));
+        Assert.Equal(0, capacity.Coordinator.CaptureSnapshot().Usage.RunnerCount);
     }
 
     [Fact]
@@ -528,11 +1080,14 @@ public sealed class ScaleSetMessageHandlerTests
         public static async Task<Fixture> CreateAsync(
             string stateDirectory,
             RunnerOwnershipScope scope,
-            ScaleSetCapacityContext? capacity = null)
+            ScaleSetCapacityContext? capacity = null,
+            ILogger<ScaleSetMessageHandler>? logger = null,
+            RunnerScaleSetMessage? queuedMessage = null,
+            Action? afterActiveRead = null)
         {
             FileRunnerStateJournal journal = await FileRunnerStateJournal.OpenAsync(stateDirectory, scope, TestContext.Current.CancellationToken);
             ConcurrentQueue<string> timeline = new();
-            FakeMessageSession session = new() { Timeline = timeline };
+            FakeMessageSession session = new(queuedMessage) { Timeline = timeline };
             FakeRunnerProvider provider = new(scope, timeline);
             FakeJitConfigClient jit = new((_, setting, _) =>
             {
@@ -545,7 +1100,8 @@ public sealed class ScaleSetMessageHandlerTests
             });
             ScaleSetRunnerProvisioner provisioner = new(scope.ScaleSetId, "_work", jit, provider, journal);
             RunnerLifecycleManager lifecycle = new(journal, TimeProvider.System, NullLogger<RunnerLifecycleManager>.Instance);
-            ScaleSetMessageHandler handler = new(scope, session, provisioner, lifecycle, journal, capacity ?? CreateCapacityContext(scope));
+            IRunnerStateJournal handlerJournal = afterActiveRead is null ? journal : new ActiveReadObserver(journal, afterActiveRead);
+            ScaleSetMessageHandler handler = new(scope, session, provisioner, lifecycle, handlerJournal, capacity ?? CreateCapacityContext(scope), logger);
             return new Fixture(journal, session, provider, jit, lifecycle, provisioner, handler, timeline);
         }
 
@@ -555,6 +1111,29 @@ public sealed class ScaleSetMessageHandlerTests
             Provisioner.Dispose();
             await Journal.DisposeAsync().ConfigureAwait(false);
         }
+    }
+
+    private sealed class ActiveReadObserver(IRunnerStateJournal journal, Action afterRead) : IRunnerStateJournal
+    {
+        public RunnerOwnershipScope Scope => journal.Scope;
+
+        public async Task<ImmutableArray<RunnerOperationState>> ReadActiveAsync(CancellationToken cancellationToken = default)
+        {
+            var operations = await journal.ReadActiveAsync(cancellationToken);
+            afterRead();
+            return operations;
+        }
+
+        public Task<ImmutableArray<RunnerOperationState>> ReadAllAsync(CancellationToken cancellationToken = default) =>
+            journal.ReadAllAsync(cancellationToken);
+
+        public Task<RunnerOperationState?> FindAsync(Guid operationId, CancellationToken cancellationToken = default) =>
+            journal.FindAsync(operationId, cancellationToken);
+
+        public Task WriteAsync(RunnerOperationState state, long expectedRevision, CancellationToken cancellationToken = default) =>
+            journal.WriteAsync(state, expectedRevision, cancellationToken);
+
+        public ValueTask DisposeAsync() => journal.DisposeAsync();
     }
 
     private static int _nextRunnerId;
@@ -581,6 +1160,7 @@ public sealed class ScaleSetMessageHandlerTests
         private int _acquireCount;
         private int _deleteCount;
         private int _messageRead;
+        private long _lastDeletedMessageId;
 
         public RunnerScaleSetSession Session { get; } = new()
         {
@@ -591,21 +1171,28 @@ public sealed class ScaleSetMessageHandlerTests
         public Func<IReadOnlyList<long>, CancellationToken, Task<IReadOnlyList<long>>> Acquire { get; set; } =
             (offered, _) => Task.FromResult<IReadOnlyList<long>>(offered.ToArray());
 
+        public Func<long, CancellationToken, Task<RunnerScaleSetMessage?>>? PollAfterDelivery { get; set; }
+
         public ConcurrentQueue<string>? Timeline { get; init; }
 
         public int AcquireCount => Volatile.Read(ref _acquireCount);
 
         public int DeleteCount => Volatile.Read(ref _deleteCount);
 
+        public long LastDeletedMessageId => Interlocked.Read(ref _lastDeletedMessageId);
+
         public Task<RunnerScaleSetMessage?> GetMessageAsync(long lastMessageId, int maxCapacity, CancellationToken cancellationToken)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            return Task.FromResult(Interlocked.Exchange(ref _messageRead, 1) == 0 ? queuedMessage : null);
+            return Interlocked.Exchange(ref _messageRead, 1) == 0
+                ? Task.FromResult(queuedMessage)
+                : PollAfterDelivery?.Invoke(lastMessageId, cancellationToken) ?? Task.FromResult<RunnerScaleSetMessage?>(null);
         }
 
         public Task DeleteMessageAsync(long messageId, CancellationToken cancellationToken)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            Interlocked.Exchange(ref _lastDeletedMessageId, messageId);
             Interlocked.Increment(ref _deleteCount);
             return Task.CompletedTask;
         }
@@ -632,6 +1219,8 @@ public sealed class ScaleSetMessageHandlerTests
             providesTerminalStateEvidence: true);
 
         public List<Guid> RemovedOperations { get; } = [];
+
+        public Exception? StartFailure { get; set; }
 
         public int CreateCount => Volatile.Read(ref _createCount);
 
@@ -660,14 +1249,14 @@ public sealed class ScaleSetMessageHandlerTests
             return Task.FromResult(resource);
         }
 
-        public Task<RunnerResource> StartAsync(RunnerResource resource, CancellationToken cancellationToken = default)
+        public Task<RunnerResource> StartAsync(RunnerResource resource, string? encodedJitConfig, CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
             Interlocked.Increment(ref _startCount);
             timeline?.Enqueue("start");
             RunnerResource started = new(resource.ProviderResourceId, resource.Identity, RunnerResourceStatus.Running);
             _resources[resource.Identity.OperationId] = started;
-            return Task.FromResult(started);
+            return StartFailure is { } failure ? Task.FromException<RunnerResource>(failure) : Task.FromResult(started);
         }
 
         public Task<RunnerResource?> InspectAsync(RunnerResource resource, CancellationToken cancellationToken = default)

@@ -1,5 +1,7 @@
 using System.Collections.Concurrent;
 using System.Collections.Immutable;
+using System.Net;
+using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Logging.Abstractions;
 using ScaleSet.Client;
 using ScaleSet.Hosting.Configuration;
@@ -37,7 +39,7 @@ public sealed class ScaleSetRunnerProvisionerTests
                 calls.Add("create");
                 RunnerOperationState? creating = await journal.FindAsync(identity.OperationId, token);
                 Assert.Equal(RunnerLifecycleStage.Creating, creating?.Stage);
-                Assert.Equal(3L, creating?.Revision);
+                Assert.Equal(2L, creating?.Revision);
                 Assert.Equal(704L, creating?.Identity.GitHubRunnerId);
                 Assert.Equal(SyntheticJit, request.EncodedJitConfig);
                 return new RunnerResource("container-1", request.Identity, RunnerResourceStatus.Created);
@@ -56,7 +58,17 @@ public sealed class ScaleSetRunnerProvisionerTests
         RunnerProvisioningResult result = await provisioner.ProvisionAsync(identity, TestContext.Current.CancellationToken);
 
         RunnerOperationState finalState = Assert.IsType<RunnerOperationState>(await journal.FindAsync(identity.OperationId, TestContext.Current.CancellationToken));
-        string journalJson = await File.ReadAllTextAsync(Path.Combine(directory.Path, "runner-state.json"), TestContext.Current.CancellationToken);
+        await using var persistedDb = new SqliteConnection(new SqliteConnectionStringBuilder
+        {
+            DataSource = Path.Combine(directory.Path, "runner-state.sqlite3"),
+            Mode = SqliteOpenMode.ReadOnly,
+            Pooling = false,
+        }.ToString());
+        await persistedDb.OpenAsync(TestContext.Current.CancellationToken);
+        await using var selectPayload = persistedDb.CreateCommand();
+        selectPayload.CommandText = "SELECT payload FROM operations";
+        string journalJson = Assert.IsType<string>(await selectPayload.ExecuteScalarAsync(TestContext.Current.CancellationToken));
+        Assert.Contains(identity.RunnerName, journalJson, StringComparison.Ordinal);
         Assert.Equal(["jit", "create", "start"], calls);
         Assert.Equal(["discover", "create", "start"], provider.Calls.ToArray());
         Assert.Equal(RunnerLifecycleStage.Starting, result.Stage);
@@ -65,6 +77,94 @@ public sealed class ScaleSetRunnerProvisionerTests
         Assert.Equal(RunnerLifecycleStage.Starting, finalState.Stage);
         Assert.Equal(704L, finalState.Identity.GitHubRunnerId);
         Assert.DoesNotContain(SyntheticJit, journalJson, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ProvisionAsync_PersistsIssuedIdentityWhenCallerCancelsBeforeCreate()
+    {
+        RunnerOwnershipScope scope = CreateScope();
+        RunnerIdentity identity = CreateIdentity(scope);
+        InMemoryRunnerStateJournal journal = new(scope);
+        using var caller = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+        FakeJitConfigClient client = new((_, _, _) =>
+        {
+            caller.Cancel();
+            return Task.FromResult<RunnerScaleSetJitRunnerConfig?>(CreateJit(identity, SyntheticJit));
+        });
+        FakeRunnerProvider provider = new(scope);
+        using ScaleSetRunnerProvisioner provisioner = CreateProvisioner(provider, client, journal);
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => provisioner.ProvisionAsync(identity, caller.Token));
+
+        var operation = Assert.IsType<RunnerOperationState>(
+            await journal.FindAsync(identity.OperationId, TestContext.Current.CancellationToken));
+        Assert.Equal(704L, operation.Identity.GitHubRunnerId);
+        Assert.Equal(RunnerLifecycleStage.JitIssued, operation.Stage);
+        Assert.Equal(["discover"], provider.Calls.ToArray());
+    }
+
+    [Fact]
+    public async Task ProvisionAsync_MarksFailedWhenAuthenticationPreventsJitDispatch()
+    {
+        RunnerOwnershipScope scope = CreateScope();
+        RunnerIdentity identity = CreateIdentity(scope);
+        InMemoryRunnerStateJournal journal = new(scope);
+        using var httpClient = new HttpClient(new RegistrationDeniedHandler());
+        using var sdk = new ScaleSetClient(GitHubTarget.Parse("https://github.com/example/runner"),
+            ScaleSetCredentials.FromPersonalAccessToken("synthetic-pat"), httpClient: httpClient);
+        var jit = new ScaleSetRunnerJitConfigClient(sdk);
+        FakeRunnerProvider provider = new(scope);
+        using var provisioner = new ScaleSetRunnerProvisioner(scope.ScaleSetId, "_work", jit, provider, journal);
+        var token = TestContext.Current.CancellationToken;
+
+        await Assert.ThrowsAsync<ScaleSetApiException>(() => provisioner.ProvisionAsync(identity, token));
+
+        var operation = Assert.IsType<RunnerOperationState>(await journal.FindAsync(identity.OperationId, token));
+        Assert.Equal(RunnerLifecycleStage.Failed, operation.Stage);
+        Assert.Equal(["discover"], provider.Calls.ToArray());
+    }
+
+    private sealed class RegistrationDeniedHandler : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            Assert.EndsWith("/registration-token", request.RequestUri!.AbsolutePath, StringComparison.Ordinal);
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.Forbidden));
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ProvisionAsync_DiscoveredMissingWithPartialResourcesRetainsRegistrationUncertainty(bool alreadyUnknown)
+    {
+        RunnerOwnershipScope scope = CreateScope();
+        RunnerIdentity identity = CreateIdentity(scope);
+        var token = TestContext.Current.CancellationToken;
+        var journal = new InMemoryRunnerStateJournal(scope);
+        var discoveredIdentity = new RunnerIdentity(scope, identity.OperationId, identity.RunnerName, 704);
+        var provider = new FakeRunnerProvider(scope)
+        {
+            Discovered = [new RunnerResource("container-missing", discoveredIdentity, RunnerResourceStatus.Missing,
+                capacityResources: new ScaleSet.Hosting.Capacity.CapacityResourceQuantities(1m, null))],
+        };
+        if (alreadyUnknown)
+        {
+            using var lifecycle = new RunnerLifecycleManager(journal, TimeProvider.System, NullLogger<RunnerLifecycleManager>.Instance);
+            await lifecycle.ReserveAsync(identity, token);
+            await lifecycle.TransitionAsync(identity, RunnerLifecycleStage.Unknown, cancellationToken: token);
+        }
+
+        var client = new FakeJitConfigClient((_, _, _) => throw new InvalidOperationException("Unexpected JIT replay."));
+        using ScaleSetRunnerProvisioner provisioner = CreateProvisioner(provider, client, journal);
+        var failure = await Assert.ThrowsAsync<InvalidOperationException>(() => provisioner.ProvisionAsync(identity, token));
+        Assert.Contains(alreadyUnknown ? "confirms the operation is absent" : "requires registration reconciliation", failure.Message, StringComparison.Ordinal);
+        RunnerOperationState state = Assert.IsType<RunnerOperationState>(await journal.FindAsync(identity.OperationId, token));
+        Assert.Equal(RunnerLifecycleStage.Unknown, state.Stage);
+        Assert.Equal("container-missing", state.ProviderResourceId);
+        Assert.Equal(704L, state.Identity.GitHubRunnerId);
+        Assert.Null(state.Identity.CapacityResources);
+        Assert.Equal(["discover"], provider.Calls.ToArray());
     }
 
     [Fact]
@@ -340,6 +440,60 @@ public sealed class ScaleSetRunnerProvisionerTests
         Assert.Equal(1, provider.StartCount);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ProvisionAsync_StartupUncertaintyAndTerminalEvidenceNeverRepeatTheHandoff(bool ambiguousStart)
+    {
+        RunnerOwnershipScope scope = CreateScope();
+        RunnerIdentity identity = CreateIdentity(scope);
+        var journal = new InMemoryRunnerStateJournal(scope);
+        var token = TestContext.Current.CancellationToken;
+        int jitCalls = 0;
+        var client = new FakeJitConfigClient((_, _, _) =>
+        {
+            jitCalls++;
+            return Task.FromResult<RunnerScaleSetJitRunnerConfig?>(CreateJit(identity, SyntheticJit));
+        });
+        var provider = new FakeRunnerProvider(scope)
+        {
+            RequiresJitAtStart = true,
+            OnCreate = (request, _) =>
+            {
+                Assert.Null(request.EncodedJitConfig);
+                return Task.FromResult(new RunnerResource("container-start", request.Identity, RunnerResourceStatus.Created));
+            },
+            OnStart = (resource, _) => ambiguousStart
+                ? throw new IOException("Synthetic handoff uncertainty.")
+                : Task.FromResult(new RunnerResource(resource.ProviderResourceId, resource.Identity, RunnerResourceStatus.Exited, 0)),
+            OnInspect = (resource, _) => Task.FromResult<RunnerResource?>(
+                new RunnerResource(resource.ProviderResourceId, resource.Identity, RunnerResourceStatus.Exited, 0)),
+        };
+        using ScaleSetRunnerProvisioner provisioner = CreateProvisioner(provider, client, journal);
+
+        if (ambiguousStart)
+        {
+            await Assert.ThrowsAsync<IOException>(() => provisioner.ProvisionAsync(identity, token));
+            Assert.Equal(RunnerLifecycleStage.Starting, (await journal.FindAsync(identity.OperationId, token))?.Stage);
+            Assert.True((await provisioner.ProvisionAsync(identity, token)).Recovered);
+        }
+        else
+        {
+            RunnerProvisioningResult result = await provisioner.ProvisionAsync(identity, token);
+            Assert.Equal(RunnerLifecycleStage.Unknown, result.Stage);
+            Assert.False(result.Recovered);
+        }
+
+        var state = Assert.IsType<RunnerOperationState>(await journal.FindAsync(identity.OperationId, token));
+        Assert.Equal(RunnerLifecycleStage.Unknown, state.Stage);
+        Assert.Equal(RunnerResourceStatus.Exited, state.LastObservedProviderStatus);
+        Assert.Equal("container-start", state.ProviderResourceId);
+        Assert.Equal(1, jitCalls);
+        Assert.Equal(SyntheticJit, Assert.Single(provider.StartJitConfigs));
+        Assert.Equal(1, provider.StartCount);
+        Assert.Equal(1, provider.CreateCount);
+    }
+
     [Fact]
     public async Task ProvisionAsync_ExistingProviderIdInspectsThatResourceAndAdoptsRunningAsUnknown()
     {
@@ -375,6 +529,32 @@ public sealed class ScaleSetRunnerProvisionerTests
         Assert.Equal(RunnerLifecycleStage.Unknown, finalState.Stage);
         Assert.Equal(RunnerResourceStatus.Running, finalState.LastObservedProviderStatus);
         Assert.Equal(704L, finalState.Identity.GitHubRunnerId);
+    }
+
+    [Fact]
+    public async Task ProvisionAsync_ProviderAbsenceDoesNotSettleTheGitHubRegistration()
+    {
+        using TemporaryStateDirectory directory = new();
+        RunnerOwnershipScope scope = CreateScope();
+        RunnerIdentity identity = CreateIdentity(scope);
+        const string providerId = "missing-container";
+        RunnerIdentity linked = await SeedStartingOperationAsync(directory.Path, scope, identity, providerId);
+        var token = TestContext.Current.CancellationToken;
+        await using var journal = await FileRunnerStateJournal.OpenAsync(directory.Path, scope, token);
+        FakeRunnerProvider provider = new(scope)
+        {
+            OnInspect = (_, _) => Task.FromResult<RunnerResource?>(null),
+        };
+        FakeJitConfigClient client = new((_, _, _) => throw new InvalidOperationException("JIT cannot be replayed."));
+        using ScaleSetRunnerProvisioner provisioner = CreateProvisioner(provider, client, journal);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => provisioner.ProvisionAsync(identity, token));
+
+        var pending = Assert.IsType<RunnerOperationState>(await journal.FindAsync(identity.OperationId, token));
+        Assert.Equal(RunnerLifecycleStage.Unknown, pending.Stage);
+        Assert.Equal(linked.GitHubRunnerId, pending.Identity.GitHubRunnerId);
+        Assert.Equal(providerId, pending.ProviderResourceId);
+        Assert.Equal(0, provider.CreateCount);
     }
 
     [Fact]
@@ -582,11 +762,18 @@ public sealed class ScaleSetRunnerProvisionerTests
     {
         private readonly RunnerOwnershipScope _scope = expectedScope;
 
-        public RunnerProviderCapabilities Capabilities { get; } = new(
+        public bool RequiresJitAtStart { get; init; }
+
+        public RunnerProviderCapabilities Capabilities => new(
             "fake",
             ImmutableArray.Create(RunnerArchitecture.X64),
             supportsOwnershipScopedDiscovery: true,
-            providesTerminalStateEvidence: true);
+            providesTerminalStateEvidence: true)
+        {
+            RequiresJitConfigurationAtStart = RequiresJitAtStart,
+        };
+
+        public ConcurrentQueue<string?> StartJitConfigs { get; } = new();
 
         public ConcurrentQueue<string> Calls { get; } = new();
 
@@ -623,10 +810,11 @@ public sealed class ScaleSetRunnerProvisionerTests
                 ?? Task.FromResult(new RunnerResource("container-new", request.Identity, RunnerResourceStatus.Created));
         }
 
-        public Task<RunnerResource> StartAsync(RunnerResource resource, CancellationToken cancellationToken = default)
+        public Task<RunnerResource> StartAsync(RunnerResource resource, string? encodedJitConfig, CancellationToken cancellationToken = default)
         {
             Interlocked.Increment(ref _startCount);
             Calls.Enqueue("start");
+            StartJitConfigs.Enqueue(encodedJitConfig);
             return OnStart?.Invoke(resource, cancellationToken)
                 ?? Task.FromResult(new RunnerResource(resource.ProviderResourceId, resource.Identity, RunnerResourceStatus.Running));
         }

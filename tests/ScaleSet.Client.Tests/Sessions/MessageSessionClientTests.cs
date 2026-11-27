@@ -4,6 +4,7 @@ using System.Net;
 using System.Text;
 using System.Text.Json;
 using ScaleSet.Client;
+using ScaleSet.Client.Tests.Transport;
 using Xunit;
 
 namespace ScaleSet.Client.Tests.Sessions;
@@ -16,7 +17,7 @@ public sealed class MessageSessionClientTests
     private const string RefreshedQueueToken = "synthetic-refreshed-queue-token";
     private const string DiscoveryJwt = "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJleHAiOjQxMDI0NDQ4MDB9.";
     private static readonly Guid SessionId = Guid.Parse("2c581b9c-5c84-44d0-85bd-d6d780de6124");
-    private const string QueueUri = "https://queue.example.test/messages?region=west";
+    private const string QueueUri = "https://queue-fixture.actions.githubusercontent.com/messages?region=west";
 
     [Fact]
     public async Task CreateMessageSessionAsync_PostsOwnerAndPublishesValidatedSnapshot()
@@ -41,7 +42,7 @@ public sealed class MessageSessionClientTests
         Assert.Equal(SessionId, session.Session.SessionId);
         Assert.Equal("runner-host", session.Session.OwnerName);
         Assert.Equal(QueueToken, session.Session.MessageQueueAccessToken);
-        Assert.Equal("https://queue.example.test/messages?region=west", session.Session.MessageQueueUrl);
+        Assert.Equal("https://queue-fixture.actions.githubusercontent.com/messages?region=west", session.Session.MessageQueueUrl);
         Assert.Equal(3, session.Session.Statistics?.TotalAvailableJobs);
     }
 
@@ -56,7 +57,7 @@ public sealed class MessageSessionClientTests
         session = invalidPart switch
         {
             "id" => session with { SessionId = Guid.Empty },
-            "url" => session with { MessageQueueUrl = "http://queue.example.test/messages" },
+            "url" => session with { MessageQueueUrl = "http://queue-fixture.actions.githubusercontent.com/messages" },
             "token" => session with { MessageQueueAccessToken = " " },
             "statistics" => session with { Statistics = new RunnerScaleSetStatistic { TotalBusyRunners = -1 } },
             _ => throw new ArgumentOutOfRangeException(nameof(invalidPart)),
@@ -95,7 +96,7 @@ public sealed class MessageSessionClientTests
     [Fact]
     public async Task GetMessageAsync_PreservesQueueQueryAndSendsCursorCapacityAndAccept()
     {
-        const string queueUrl = "https://queue.example.test/messages?region=west&lastMessageId=3&opaque=a%2Fb";
+        const string queueUrl = "https://queue-fixture.actions.githubusercontent.com/messages?region=west&lastMessageId=3&opaque=a%2Fb";
         using ClientFixture fixture = new((request, _) =>
         {
             if (IsCreateSession(request))
@@ -177,7 +178,7 @@ public sealed class MessageSessionClientTests
     [Fact]
     public async Task DeleteMessageAsync_AppendsLargeIdPreservesQueryAndUsesQueueToken()
     {
-        const string queueUrl = "https://queue.example.test/messages?region=west&opaque=a%2Fb";
+        const string queueUrl = "https://queue-fixture.actions.githubusercontent.com/messages?region=west&opaque=a%2Fb";
         using ClientFixture fixture = new((request, _) =>
         {
             if (IsCreateSession(request))
@@ -527,6 +528,48 @@ public sealed class MessageSessionClientTests
     }
 
     [Fact]
+    public async Task RefreshDeadlineStopsTheOwnerWithoutRetrying()
+    {
+        VirtualTimeProvider clock = new(DateTimeOffset.UtcNow);
+        DateTimeOffset deadline = clock.GetUtcNow().AddSeconds(5);
+        TaskCompletionSource refreshStarted = NewSignal();
+        using ClientFixture fixture = new(async (request, cancellationToken) =>
+        {
+            if (IsCreateSession(request))
+            {
+                return JsonResponse(HttpStatusCode.OK, SessionJson(QueueToken));
+            }
+
+            if (IsRefresh(request))
+            {
+                refreshStarted.SetResult();
+                await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            }
+
+            return new HttpResponseMessage(HttpStatusCode.Unauthorized);
+        }, clock);
+
+        CancellationToken token = TestContext.Current.CancellationToken;
+        MessageSessionClient session = await fixture.Client.CreateMessageSessionAsync(LargeScaleSetId, "runner-host", token);
+        using var retry = ScaleSetRequestRetry.Configure(options => options with { Deadline = deadline });
+        using CancellationTokenSource caller = CancellationTokenSource.CreateLinkedTokenSource(token);
+        Task<RunnerScaleSetMessage?> poll = session.GetMessageAsync(0, 10, caller.Token);
+        try
+        {
+            await refreshStarted.Task.WaitAsync(TimeSpan.FromSeconds(5), token);
+            clock.Advance(TimeSpan.FromSeconds(5));
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => poll.WaitAsync(TimeSpan.FromSeconds(5), token));
+        }
+        finally
+        {
+            await caller.CancelAsync();
+        }
+
+        Assert.Single(fixture.Handler.Requests, IsRefresh);
+        Assert.Equal(QueueToken, session.Session.MessageQueueAccessToken);
+    }
+
+    [Fact]
     public async Task FailedRefreshDoesNotPreventALaterOperationFromRefreshing()
     {
         int refreshRequests = 0;
@@ -625,12 +668,12 @@ public sealed class MessageSessionClientTests
         await fixture.Client.DeleteMessageSessionAsync(LargeScaleSetId, SessionId, TestContext.Current.CancellationToken);
 
         RecordedRequest close = Assert.Single(fixture.Handler.Requests, IsClose);
-        Assert.Equal("actions.example.test", close.Uri.Host);
+        Assert.Equal("actions-fixture.actions.githubusercontent.com", close.Uri.Host);
         Assert.Equal($"/tenant/123/_apis/runtime/runnerscalesets/{LargeScaleSetId}/sessions/{SessionId:D}", close.Uri.AbsolutePath);
         Assert.Equal("Bearer " + DiscoveryJwt, close.Authorization);
         Assert.Empty(close.Body);
         Assert.DoesNotContain(fixture.Handler.Requests, IsCreateSession);
-        Assert.DoesNotContain(fixture.Handler.Requests, request => request.Uri.Host == "queue.example.test");
+        Assert.DoesNotContain(fixture.Handler.Requests, request => request.Uri.Host == "queue-fixture.actions.githubusercontent.com");
     }
 
     [Fact]
@@ -661,6 +704,39 @@ public sealed class MessageSessionClientTests
         Assert.Equal((int)status, error.StatusCode);
         Assert.Contains("RunnerScaleSetSessionExpiredException", error.BodyPreview, StringComparison.Ordinal);
         Assert.Single(fixture.Handler.Requests, IsClose);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task DeleteMessageSessionAsync_PreservesDiscoveryRetriesUnlessTheCallerDisablesThem(bool callerDisables)
+    {
+        int discoveryAttempts = 0;
+        using ClientFixture fixture = new(
+            (request, _) => Task.FromResult(request.Method == HttpMethod.Delete
+                ? new HttpResponseMessage(HttpStatusCode.NoContent)
+                : NotFoundResponse()),
+            discoveryFailure: () => ++discoveryAttempts == 1 ? new(HttpStatusCode.Unauthorized) : null);
+        using var policy = ScaleSetRequestRetry.Configure(options => options with
+        {
+            MaxRetries = callerDisables ? 0 : 4,
+            WaitMin = TimeSpan.Zero,
+            WaitMax = TimeSpan.Zero,
+        });
+        var token = TestContext.Current.CancellationToken;
+        if (callerDisables)
+        {
+            await Assert.ThrowsAsync<ScaleSetApiException>(
+                () => fixture.Client.DeleteMessageSessionAsync(LargeScaleSetId, SessionId, token));
+            Assert.Equal(1, discoveryAttempts);
+            Assert.DoesNotContain(fixture.Handler.Requests, request => request.Method == HttpMethod.Delete);
+        }
+        else
+        {
+            await fixture.Client.DeleteMessageSessionAsync(LargeScaleSetId, SessionId, token);
+            Assert.Equal(2, discoveryAttempts);
+            Assert.Single(fixture.Handler.Requests, request => request.Method == HttpMethod.Delete);
+        }
     }
 
     [Fact]
@@ -727,7 +803,7 @@ public sealed class MessageSessionClientTests
 
         fixture.Client.Dispose();
         using HttpResponseMessage transportProbe = await fixture.HttpClient.GetAsync(
-            "https://actions.example.test/transport-ownership-probe", TestContext.Current.CancellationToken);
+            "https://actions-fixture.actions.githubusercontent.com/transport-ownership-probe", TestContext.Current.CancellationToken);
         Assert.Equal(HttpStatusCode.NotFound, transportProbe.StatusCode);
     }
 
@@ -1015,7 +1091,7 @@ public sealed class MessageSessionClientTests
         request.Method == HttpMethod.Post && request.Uri.AbsolutePath.EndsWith("/acquirejobs", StringComparison.Ordinal);
 
     private static bool IsQueueRequest(RecordedRequest request, HttpMethod method) =>
-        request.Method == method && string.Equals(request.Uri.Host, "queue.example.test", StringComparison.Ordinal);
+        request.Method == method && string.Equals(request.Uri.Host, "queue-fixture.actions.githubusercontent.com", StringComparison.Ordinal);
 
     private static HttpResponseMessage DefaultSessionResponse(RecordedRequest request)
     {
@@ -1096,18 +1172,24 @@ public sealed class MessageSessionClientTests
 
     private sealed class ClientFixture : IDisposable
     {
-        public ClientFixture(Func<RecordedRequest, CancellationToken, Task<HttpResponseMessage>> responder)
+        public ClientFixture(
+            Func<RecordedRequest, CancellationToken, Task<HttpResponseMessage>> responder,
+            TimeProvider? timeProvider = null,
+            Func<HttpResponseMessage?>? discoveryFailure = null)
         {
+            _discoveryFailure = discoveryFailure;
             Handler = new RecordingHandler(DispatchAsync);
             HttpClient = new HttpClient(Handler);
             Client = new ScaleSetClient(
                 GitHubTarget.Parse("https://github.com/example-org/example-repo"),
                 ScaleSetCredentials.FromPersonalAccessToken("synthetic-pat"),
-                httpClient: HttpClient);
+                httpClient: HttpClient,
+                timeProvider: timeProvider);
             _responder = responder;
         }
 
         private readonly Func<RecordedRequest, CancellationToken, Task<HttpResponseMessage>> _responder;
+        private readonly Func<HttpResponseMessage?>? _discoveryFailure;
 
         public RecordingHandler Handler { get; }
 
@@ -1130,7 +1212,8 @@ public sealed class MessageSessionClientTests
 
             if (request.Uri.Host == "api.github.com" && request.Uri.AbsolutePath == "/actions/runner-registration")
             {
-                return JsonResponse(HttpStatusCode.OK, $"{{\"url\":\"https://actions.example.test/tenant/123/\",\"token\":\"{DiscoveryJwt}\"}}");
+                return _discoveryFailure?.Invoke()
+                    ?? JsonResponse(HttpStatusCode.OK, $"{{\"url\":\"https://actions-fixture.actions.githubusercontent.com/tenant/123/\",\"token\":\"{DiscoveryJwt}\"}}");
             }
 
             return await _responder(request, cancellationToken).ConfigureAwait(false);

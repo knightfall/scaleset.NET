@@ -133,6 +133,7 @@ internal sealed class DockerProviderTestContext : IDisposable
         identity ??= CreateIdentity();
         Dictionary<string, string> labels = new(StringComparer.Ordinal)
         {
+            ["io.scaleset.jit-bootstrap"] = "2",
             [DockerProviderLabels.Product] = "scaleset.net",
             [DockerProviderLabels.ControllerId] = identity.Scope.ControllerId,
             [DockerProviderLabels.ScaleSetKey] = identity.Scope.ScaleSetKey,
