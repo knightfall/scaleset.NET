@@ -240,8 +240,7 @@ jobs:
         with:
           user: knightfall
       - name: Publish identical verified packages and draft release assets
-        shell: pwsh
-        run: .github/release/publish.ps1 -ReleaseDirectory "$env:RUNNER_TEMP/release"
+        run: python3 .github/release/publish.py --release-directory "$RUNNER_TEMP/release"
         env:
           NUGET_API_KEY: ${{ steps.nuget.outputs.NUGET_API_KEY }}
           PROVENANCE_BUNDLE: ${{ steps.provenance.outputs.bundle-path }}
