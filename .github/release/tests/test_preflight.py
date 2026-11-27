@@ -1,8 +1,7 @@
-"""Exercise PowerShell preflight with a local native gh fixture."""
+"""Exercise release preflight with a local native gh fixture."""
 import json
 import os
 from pathlib import Path
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -11,13 +10,16 @@ import unittest
 
 RELEASE = Path(__file__).resolve().parents[1]
 POLICY = json.loads((RELEASE / "policy.json").read_text(encoding="utf-8"))
-PWSH = shutil.which("pwsh")
 SHA = "a" * 40
 GH_FIXTURE = """
-import json, os, sys
+import os, sys
 args = sys.argv[1:]
 if "/git/ref/tags/" in args[-1]:
-    print(json.dumps({"object": {"type": "commit", "sha": os.environ["GITHUB_SHA"]}}))
+    print(os.environ["PREFLIGHT_FIXTURE_TAG"])
+elif args[-1].endswith("/actions/runs/123"):
+    print(os.environ["PREFLIGHT_FIXTURE_RUN"])
+elif args[-1].endswith("/actions/runs/123/jobs"):
+    print(os.environ["PREFLIGHT_FIXTURE_JOBS"])
 elif "/check-runs?" in args[-1]:
     assert args[:3] == ["api", "--paginate", "--slurp"], args
     assert "filter=all&per_page=100" in args[-1]
@@ -30,7 +32,7 @@ else:
 """
 
 
-@unittest.skipUnless(PWSH and os.name == "posix", "Requires PowerShell and POSIX fixture executables")
+@unittest.skipUnless(os.name == "posix", "Requires POSIX fixture executables")
 class PreflightTests(unittest.TestCase):
     def checks(self):
         return [
@@ -38,15 +40,22 @@ class PreflightTests(unittest.TestCase):
             for index, (name, slug) in enumerate(POLICY["requiredChecks"].items(), start=1)
         ]
 
-    def preflight(self, pages, native_failure=False):
+    def preflight(self, pages, *, native_failure=False, candidate="", tag_type="commit", run_details=None, jobs=None):
+        run = {"path": ".github/workflows/publish.yaml", "head_repository": {"full_name": POLICY["repository"]},
+               "head_branch": "main", "head_sha": SHA, "event": "push", **(run_details or {})}
+        if jobs is None:
+            jobs = [{"name": "Build release candidate", "status": "completed", "conclusion": "success"}]
         with tempfile.TemporaryDirectory(prefix="scaleset-preflight-fixture-") as directory:
             gh = Path(directory) / "gh"
             gh.write_text(f"#!{sys.executable}\n{GH_FIXTURE}", encoding="utf-8")
             gh.chmod(0o700)
             return subprocess.run(
-                [PWSH, "-NoProfile", "-NonInteractive", "-File", str(RELEASE / "preflight.ps1")],
+                [sys.executable, str(RELEASE / "preflight.py"), f"--candidate-run-id={candidate}"],
                 env={**os.environ, "GITHUB_SHA": SHA, "PATH": directory + os.pathsep + os.environ["PATH"],
                      "PREFLIGHT_FIXTURE_CHECKS": json.dumps(pages),
+                     "PREFLIGHT_FIXTURE_TAG": json.dumps({"object": {"type": tag_type, "sha": SHA}}),
+                     "PREFLIGHT_FIXTURE_RUN": json.dumps(run),
+                     "PREFLIGHT_FIXTURE_JOBS": json.dumps({"jobs": jobs}),
                      "PREFLIGHT_FIXTURE_FAILURE": "1" if native_failure else "0"},
                 capture_output=True, text=True, timeout=15,
             )
@@ -74,4 +83,25 @@ class PreflightTests(unittest.TestCase):
         result = self.preflight([], native_failure=True)
         self.assertNotEqual(0, result.returncode)
         self.assertIn("Cannot read source verification checks", result.stderr)
-        self.assertNotIn("Conversion from JSON", result.stderr)
+        self.assertNotIn("invalid JSON", result.stderr)
+
+    def test_annotated_tag_does_not_authorize_publication(self):
+        result = self.preflight([{"check_runs": self.checks()}], tag_type="tag")
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("The protected lightweight release tag", result.stderr)
+
+    def test_retry_uses_only_the_successful_build_from_the_exact_candidate_run(self):
+        checks = [check for check in self.checks() if check["name"] != "Build release candidate"]
+        pages = [{"check_runs": checks}]
+        success = self.preflight(pages, candidate="123")
+        self.assertEqual(0, success.returncode, success.stderr)
+
+        for options, message in (
+            ({"candidate": "123/456"}, "Invalid candidate_run_id"),
+            ({"candidate": "123", "run_details": {"head_sha": "b" * 40}}, "on main at this exact commit"),
+            ({"candidate": "123", "jobs": []}, "must have a completed successful Build release candidate job"),
+        ):
+            with self.subTest(options=options):
+                result = self.preflight(pages, **options)
+                self.assertNotEqual(0, result.returncode)
+                self.assertIn(message, result.stderr)
