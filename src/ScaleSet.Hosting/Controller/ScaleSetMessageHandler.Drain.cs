@@ -1,3 +1,4 @@
+using System.Collections.Immutable;
 using System.Runtime.ExceptionServices;
 using ScaleSet.Client;
 using ScaleSet.Hosting.Capacity;
@@ -61,7 +62,7 @@ public sealed partial class ScaleSetMessageHandler
         BeginDrain();
         if (timeout == TimeSpan.Zero)
         {
-            return await TryCompleteDrainAsync(cancellationToken).ConfigureAwait(false);
+            return await TryReadDrainedOperationsAsync(cancellationToken).ConfigureAwait(false) is not null;
         }
 
         using CancellationTokenSource deadline = new(timeout, timeProvider);
@@ -70,7 +71,7 @@ public sealed partial class ScaleSetMessageHandler
             deadline.Token);
         try
         {
-            while (!await TryCompleteDrainAsync(linked.Token).ConfigureAwait(false))
+            while (await TryReadDrainedOperationsAsync(linked.Token).ConfigureAwait(false) is null)
             {
                 await Task.Delay(TimeSpan.FromMilliseconds(250), timeProvider, linked.Token).ConfigureAwait(false);
             }
@@ -83,12 +84,12 @@ public sealed partial class ScaleSetMessageHandler
         }
     }
 
-    private async Task<bool> TryCompleteDrainAsync(CancellationToken cancellationToken)
+    internal async Task<ImmutableArray<RunnerOperationState>?> TryReadDrainedOperationsAsync(CancellationToken cancellationToken)
     {
         // Keep journal evidence stable against callbacks without holding the host-wide gate during I/O.
         if (!_callbackGate.Wait(0, cancellationToken))
         {
-            return false;
+            return null;
         }
 
         try
@@ -96,7 +97,7 @@ public sealed partial class ScaleSetMessageHandler
             SemaphoreSlim gate = _capacity.DemandRegistry.PlanningGate;
             if (!gate.Wait(0, cancellationToken))
             {
-                return false;
+                return null;
             }
 
             try
@@ -107,7 +108,7 @@ public sealed partial class ScaleSetMessageHandler
                     SettleAdmissionUnderGate();
                     if (!IsDrainQuiescent())
                     {
-                        return false;
+                        return null;
                     }
                 }
             }
@@ -120,7 +121,9 @@ public sealed partial class ScaleSetMessageHandler
             lock (_drainSync)
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                return IsDrainQuiescent() && !operations.Any(static operation => operation.Stage == RunnerLifecycleStage.Busy);
+                return IsDrainQuiescent() && !operations.Any(static operation => operation.Stage == RunnerLifecycleStage.Busy)
+                    ? operations
+                    : null;
             }
         }
         finally

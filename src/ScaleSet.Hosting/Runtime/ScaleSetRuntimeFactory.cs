@@ -612,66 +612,71 @@ public sealed partial class ScaleSetRuntimeFactory : IScaleSetRuntimeFactory
         private async Task<bool> WaitForOwnedRunnerDrainAsync(ScaleSetMessageHandler handler, CancellationToken cancellationToken)
         {
             TimeSpan timeout = _scaleSetOptions.Lifecycle.ShutdownDrainTimeout;
-            long started = _timeProvider.GetTimestamp();
-            if (!await handler.WaitForDrainAsync(timeout, _timeProvider, cancellationToken).ConfigureAwait(false))
+            bool wait = timeout > TimeSpan.Zero;
+            using var deadline = new CancellationTokenSource(wait ? timeout : Timeout.InfiniteTimeSpan, _timeProvider);
+            using var bounded = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, deadline.Token);
+            try
             {
-                return false;
-            }
-
-            while (true)
-            {
-                var operations = await _journal!.ReadActiveAsync(cancellationToken).ConfigureAwait(false);
-                TimeSpan remaining = timeout - _timeProvider.GetElapsedTime(started);
-                var protectedOperations = operations.Where(static operation => operation.ProviderResourceId is not null
-                    && operation.Stage is RunnerLifecycleStage.Starting or RunnerLifecycleStage.Busy or RunnerLifecycleStage.Unknown
-                        or RunnerLifecycleStage.Completed or RunnerLifecycleStage.Removing).ToArray();
-                if (protectedOperations.Length == 0)
+                while (true)
                 {
-                    return true;
-                }
-
-                int retryIntervalMs = 250;
-                if (remaining > TimeSpan.Zero && _client is IScaleSetRunnerIdleLookup lookup
-                    && protectedOperations.All(static operation => operation.Stage == RunnerLifecycleStage.Starting))
-                {
-                    using var deadline = new CancellationTokenSource(remaining, _timeProvider);
-                    using var bounded = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, deadline.Token);
-                    try
+                    int retryIntervalMs = 250;
+                    if (await handler.TryReadDrainedOperationsAsync(bounded.Token).ConfigureAwait(false) is { } snapshot)
                     {
-                        bool idle = true;
-                        foreach (RunnerOperationState operation in protectedOperations)
-                        {
-                            if (!await lookup.IsRunnerIdleAsync(operation.Identity, bounded.Token).ConfigureAwait(false))
-                            {
-                                idle = false;
-                                break;
-                            }
-                        }
-
-                        // Confirm that no work arrived while reading the runner-specific evidence.
-                        if (idle && await handler.WaitForDrainAsync(TimeSpan.Zero, _timeProvider, bounded.Token).ConfigureAwait(false))
+                        var protectedOperations = snapshot.Where(RequiresDrainEvidence).ToArray();
+                        if (protectedOperations.Length == 0)
                         {
                             return true;
                         }
+
+                        if (wait && _client is IScaleSetRunnerIdleLookup lookup
+                            && protectedOperations.All(static operation => operation.Stage == RunnerLifecycleStage.Starting))
+                        {
+                            if (await VerifyWarmRunnersAsync(handler, lookup, protectedOperations, bounded.Token).ConfigureAwait(false))
+                            {
+                                return true;
+                            }
+
+                            retryIntervalMs = 5000;
+                        }
                     }
-                    catch (OperationCanceledException) when (deadline.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
+
+                    if (!wait)
                     {
                         return false;
                     }
 
-                    retryIntervalMs = 5000;
-                    remaining = timeout - _timeProvider.GetElapsedTime(started);
+                    await Task.Delay(TimeSpan.FromMilliseconds(retryIntervalMs), _timeProvider, bounded.Token).ConfigureAwait(false);
                 }
+            }
+            catch (OperationCanceledException) when (deadline.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
+            {
+                return false;
+            }
+        }
 
-                if (remaining <= TimeSpan.Zero)
+        private static async Task<bool> VerifyWarmRunnersAsync(
+            ScaleSetMessageHandler handler,
+            IScaleSetRunnerIdleLookup lookup,
+            IReadOnlyList<RunnerOperationState> protectedOperations,
+            CancellationToken cancellationToken)
+        {
+            foreach (RunnerOperationState operation in protectedOperations)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (!await lookup.IsRunnerIdleAsync(operation.Identity, cancellationToken).ConfigureAwait(false))
                 {
                     return false;
                 }
-
-                TimeSpan delay = TimeSpan.FromMilliseconds(Math.Min(retryIntervalMs, remaining.TotalMilliseconds));
-                await Task.Delay(delay, _timeProvider, cancellationToken).ConfigureAwait(false);
             }
+
+            // A delivery can change the durable revision while an idle lookup is in flight.
+            return await handler.TryReadDrainedOperationsAsync(cancellationToken).ConfigureAwait(false) is { } current
+                && current.Where(RequiresDrainEvidence).All(protectedOperations.Contains);
         }
+
+        private static bool RequiresDrainEvidence(RunnerOperationState operation) => operation.ProviderResourceId is not null
+            && operation.Stage is RunnerLifecycleStage.Starting or RunnerLifecycleStage.Busy or RunnerLifecycleStage.Unknown
+                or RunnerLifecycleStage.Completed or RunnerLifecycleStage.Removing;
 
         public ValueTask DisposeAsync()
         {
