@@ -35,7 +35,7 @@ support is planned.
 
 ## NuGet quickstart
 
-The `0.1.0-alpha.1` prerelease targets .NET 10. Use the install commands once
+The `0.1.0-alpha.2` prerelease targets .NET 10. Use the install commands once
 the packages are available in the registry.
 
 | Package | Purpose |
@@ -46,7 +46,7 @@ the packages are available in the registry.
 | [`Knightfall.ScaleSet.Providers.Docker`](src/ScaleSet.Providers.Docker/README.md) | Docker Engine runner provisioning and recovery |
 
 ```sh
-dotnet add package Knightfall.ScaleSet.Client --version 0.1.0-alpha.1
+dotnet add package Knightfall.ScaleSet.Client --version 0.1.0-alpha.2
 ```
 
 Use the [authenticated client quickstart](docs/usage.md) for GitHub API access.
@@ -71,7 +71,7 @@ IAM role authorizes AWS operations.
 
 ## Documentation
 
-- [Alpha release notes](docs/releases/0.1.0-alpha.1.md)
+- [Alpha release notes](docs/releases/0.1.0-alpha.2.md)
 - [Publishing and provenance verification](docs/releases/PUBLISHING.md)
 - [Security policy](SECURITY.md)
 - [Product roadmap](docs/product/ROADMAP.md)

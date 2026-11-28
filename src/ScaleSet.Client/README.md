@@ -6,7 +6,7 @@ creates scale sets and message sessions, and requests just-in-time (JIT)
 configuration for ephemeral runners.
 
 ```sh
-dotnet add package Knightfall.ScaleSet.Client --version 0.1.0-alpha.1
+dotnet add package Knightfall.ScaleSet.Client --version 0.1.0-alpha.2
 ```
 
 Parse the GitHub URL with `GitHubTarget.Parse` and construct a client with

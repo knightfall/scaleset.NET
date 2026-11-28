@@ -1,4 +1,4 @@
-# Publishing 0.1.0-alpha.1
+# Publishing 0.1.0-alpha.2
 
 Run the [Package release workflow](../../.github/workflows/publish.yaml) manually
 from GitHub Actions. Leave both inputs at their defaults to build and verify a
@@ -28,9 +28,9 @@ candidate. To publish, run it on `main` with `publish` enabled and approve the
 
 1. Select the current `main` commit after the release notes, package metadata,
    and [release policy](../../.github/release/policy.json) match
-   `0.1.0-alpha.1`. Confirm the main CI checks in that policy succeeded on
+   `0.1.0-alpha.2`. Confirm the main CI checks in that policy succeeded on
    this commit, then create and push the protected lightweight tag
-   `v0.1.0-alpha.1` at that exact commit.
+   `v0.1.0-alpha.2` at that exact commit.
 2. Run **Package release** on `main` with `publish` enabled and
    `candidate_run_id` empty. This builds and verifies the candidate from the
    tagged commit in the publish run. Check the commit and candidate before
@@ -67,7 +67,7 @@ candidate and draft release during recovery. If the candidate is unavailable
 or the existing package payloads conflict, investigate before choosing a new
 version.
 
-## Compatibility notes for the next prerelease
+## Compatibility notes for 0.1.0-alpha.2
 
 Custom Hosting providers implement `IRunnerProvider.StartAsync(RunnerResource,
 string?, CancellationToken)`. Providers that deliver JIT at startup opt in
@@ -102,12 +102,12 @@ the downloaded `provenance-*.sigstore.json` file and run this command beside
 the downloaded package.
 
 ```sh
-gh attestation verify Knightfall.ScaleSet.Client.0.1.0-alpha.1.nupkg \
+gh attestation verify Knightfall.ScaleSet.Client.0.1.0-alpha.2.nupkg \
   --bundle "$PROVENANCE_BUNDLE" \
   --repo knightfall/scaleset.NET \
   --signer-workflow knightfall/scaleset.NET/.github/workflows/publish.yaml \
   --source-ref refs/heads/main \
-  --source-digest "$(git rev-parse 'refs/tags/v0.1.0-alpha.1^{commit}')" \
+  --source-digest "$(git rev-parse 'refs/tags/v0.1.0-alpha.2^{commit}')" \
   --deny-self-hosted-runners \
   --predicate-type https://slsa.dev/provenance/v1
 ```
@@ -116,4 +116,4 @@ For the matching SBOM attestation, use the `build-sbom-*.sigstore.json` bundle
 and predicate type `https://spdx.dev/Document/v2.2`. Verify attestations against
 the original GitHub release artifacts. NuGet.org adds a repository signature
 to package archives. Verify the registry copy with
-`dotnet nuget verify Knightfall.ScaleSet.Client.0.1.0-alpha.1.nupkg --all`.
+`dotnet nuget verify Knightfall.ScaleSet.Client.0.1.0-alpha.2.nupkg --all`.

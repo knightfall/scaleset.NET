@@ -9,7 +9,7 @@ arguments. The default command is `/home/runner/run.sh` and the default user
 is `runner`.
 
 ```sh
-dotnet add package Knightfall.ScaleSet.Providers.Docker --version 0.1.0-alpha.1
+dotnet add package Knightfall.ScaleSet.Providers.Docker --version 0.1.0-alpha.2
 ```
 
 The provider labels containers by controller, scale set, and operation so a

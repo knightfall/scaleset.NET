@@ -20,7 +20,7 @@
     <ProjectReference Include="../../src/ScaleSet.Listener/ScaleSet.Listener.csproj" />
   </ItemGroup>
   <ItemGroup Condition="'$(UseScaleSetProjectReferences)' != 'true'">
-    <PackageReference Include="Knightfall.ScaleSet.Client" Version="[0.1.0-alpha.1]" />
-    <PackageReference Include="Knightfall.ScaleSet.Listener" Version="[0.1.0-alpha.1]" />
+    <PackageReference Include="Knightfall.ScaleSet.Client" Version="[0.1.0-alpha.2]" />
+    <PackageReference Include="Knightfall.ScaleSet.Listener" Version="[0.1.0-alpha.2]" />
   </ItemGroup>
 </Project>

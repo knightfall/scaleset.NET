@@ -149,7 +149,7 @@
       "Knightfall.ScaleSet.Listener": {
         "type": "Project",
         "dependencies": {
-          "Knightfall.ScaleSet.Client": "[0.1.0-alpha.1, )",
+          "Knightfall.ScaleSet.Client": "[0.1.0-alpha.2, )",
           "Microsoft.Extensions.Logging.Abstractions": "[10.0.15, )"
         }
       },

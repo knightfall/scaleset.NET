@@ -3,7 +3,7 @@
     <!-- Ship existing API comments while allowing documentation coverage to grow. -->
     <NoWarn Condition="'$(GenerateDocumentationFile)' == 'true'">$(NoWarn);CS1591</NoWarn>
     <PackageReadmeFile>README.md</PackageReadmeFile>
-    <Version>0.1.0-alpha.1</Version>
+    <Version>0.1.0-alpha.2</Version>
     <PackageReleaseNotes>https://github.com/knightfall/scaleset.NET/releases/tag/v$(Version)</PackageReleaseNotes>
   </PropertyGroup>
   <ItemGroup Condition="'$(IsPackable)' != 'false'">

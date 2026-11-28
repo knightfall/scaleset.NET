@@ -25,7 +25,7 @@ refresh. Issues `#20`–`#21` track GHES and custom TLS transport work.
   Linux x64/arm64 container packaging, and a Compose deployment.
 - OpenTelemetry traces and metrics plus structured logs exported to a configured
   OTLP receiver.
-- Four .NET 10 packages at `0.1.0-alpha.1` in the `Knightfall.ScaleSet.*` family.
+- Four .NET 10 packages at `0.1.0-alpha.2` in the `Knightfall.ScaleSet.*` family.
   See the [usage guide](../usage.md) and [release runbook](../releases/PUBLISHING.md).
 
 The Docker product can run without Kubernetes. The current executable is wired
@@ -58,4 +58,3 @@ operations. No AWS resources have been inspected, deployed, or changed.
 - Private-registry Docker image authentication is not implemented.
 - Live engineering coverage is limited to the GitHub.com repository canaries.
   AWS-backed runner provisioning remains planned.
-- Registry publication and registry consumer verification remain pending.
