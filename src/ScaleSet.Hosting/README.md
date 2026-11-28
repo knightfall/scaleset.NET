@@ -5,7 +5,7 @@ capacity. Register the controller and a runner provider in your .NET Generic
 Host. The controller opens the durable state and owns the listener lifecycle.
 
 ```sh
-dotnet add package Knightfall.ScaleSet.Hosting --version 0.1.0-alpha.1
+dotnet add package Knightfall.ScaleSet.Hosting --version 0.1.0-alpha.2
 ```
 
 ## Run the controller in a .NET host

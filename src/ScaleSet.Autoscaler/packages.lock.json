@@ -174,21 +174,21 @@
       "Knightfall.ScaleSet.Hosting": {
         "type": "Project",
         "dependencies": {
-          "Knightfall.ScaleSet.Client": "[0.1.0-alpha.1, )",
-          "Knightfall.ScaleSet.Listener": "[0.1.0-alpha.1, )",
+          "Knightfall.ScaleSet.Client": "[0.1.0-alpha.2, )",
+          "Knightfall.ScaleSet.Listener": "[0.1.0-alpha.2, )",
           "Microsoft.Data.Sqlite": "[10.0.12, )"
         }
       },
       "Knightfall.ScaleSet.Listener": {
         "type": "Project",
         "dependencies": {
-          "Knightfall.ScaleSet.Client": "[0.1.0-alpha.1, )"
+          "Knightfall.ScaleSet.Client": "[0.1.0-alpha.2, )"
         }
       },
       "Knightfall.ScaleSet.Providers.Docker": {
         "type": "Project",
         "dependencies": {
-          "Knightfall.ScaleSet.Hosting": "[0.1.0-alpha.1, )"
+          "Knightfall.ScaleSet.Hosting": "[0.1.0-alpha.2, )"
         }
       },
       "Microsoft.Data.Sqlite": {

@@ -1,6 +1,6 @@
 # Usage
 
-The `0.1.0-alpha.1` packages target .NET 10. Use the libraries in an existing
+The `0.1.0-alpha.2` packages target .NET 10. Use the libraries in an existing
 application or build the Docker controller from this repository.
 
 ## Choose a GitHub credential
@@ -26,7 +26,7 @@ the client package from NuGet.org.
 ```sh
 dotnet new console --framework net10.0 --output scaleset-client
 cd scaleset-client
-dotnet add package Knightfall.ScaleSet.Client --version 0.1.0-alpha.1
+dotnet add package Knightfall.ScaleSet.Client --version 0.1.0-alpha.2
 ```
 
 Replace `Program.cs` with the following example. Set `SCALESET_TARGET_URL` to

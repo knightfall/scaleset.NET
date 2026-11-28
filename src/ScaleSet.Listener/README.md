@@ -6,7 +6,7 @@ listener along with the scale-set ID and available runner capacity, and call
 `RunAsync` with an `IScaleSetMessageHandler`.
 
 ```sh
-dotnet add package Knightfall.ScaleSet.Listener --version 0.1.0-alpha.1
+dotnet add package Knightfall.ScaleSet.Listener --version 0.1.0-alpha.2
 ```
 
 The listener delivers the session's initial statistics, then processes each

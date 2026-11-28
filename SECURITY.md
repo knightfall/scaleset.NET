@@ -6,4 +6,4 @@ Please report suspected vulnerabilities privately using [GitHub's private vulner
 
 ## Supported versions
 
-This project is prerelease software (`0.1.0-alpha.1`). Include the package version and source revision in your report; maintainers will assess affected versions and available fixes on a case-by-case basis.
+This project is prerelease software (`0.1.0-alpha.2`). Include the package version and source revision in your report; maintainers will assess affected versions and available fixes on a case-by-case basis.

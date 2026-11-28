@@ -23,9 +23,9 @@
     <ProjectReference Include="../../src/ScaleSet.Providers.Docker/ScaleSet.Providers.Docker.csproj" />
   </ItemGroup>
   <ItemGroup Condition="'$(UseScaleSetProjectReferences)' != 'true'">
-    <PackageReference Include="Knightfall.ScaleSet.Client" Version="0.1.0-alpha.1" />
-    <PackageReference Include="Knightfall.ScaleSet.Listener" Version="0.1.0-alpha.1" />
-    <PackageReference Include="Knightfall.ScaleSet.Hosting" Version="0.1.0-alpha.1" />
-    <PackageReference Include="Knightfall.ScaleSet.Providers.Docker" Version="0.1.0-alpha.1" />
+    <PackageReference Include="Knightfall.ScaleSet.Client" Version="0.1.0-alpha.2" />
+    <PackageReference Include="Knightfall.ScaleSet.Listener" Version="0.1.0-alpha.2" />
+    <PackageReference Include="Knightfall.ScaleSet.Hosting" Version="0.1.0-alpha.2" />
+    <PackageReference Include="Knightfall.ScaleSet.Providers.Docker" Version="0.1.0-alpha.2" />
   </ItemGroup>
 </Project>

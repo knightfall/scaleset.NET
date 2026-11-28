@@ -18,7 +18,7 @@ shell like Bash.
 dotnet pack ScaleSet.slnx --configuration Release --output "$PWD/artifacts/packages"
 worker=$(mktemp -d)
 mkdir "$worker/feed"
-cp artifacts/packages/Knightfall.ScaleSet.*.0.1.0-alpha.1.nupkg "$worker/feed/"
+cp artifacts/packages/Knightfall.ScaleSet.*.0.1.0-alpha.2.nupkg "$worker/feed/"
 cp examples/dotnet-worker/*.cs examples/dotnet-worker/*.csproj examples/dotnet-worker/NuGet.Local.Config "$worker/"
 dotnet restore "$worker/ScaleSet.Worker.Example.csproj" \
   --configfile "$worker/NuGet.Local.Config" --packages "$worker/packages"
