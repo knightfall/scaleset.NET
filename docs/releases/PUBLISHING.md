@@ -27,8 +27,8 @@ release candidate and publishes it when `publish` is enabled.
 
 1. Select the current `main` commit after the release notes, package metadata,
    and [release policy](../../.github/release/policy.json) match
-   `0.1.0-alpha.1`. Confirm the source checks in that policy succeeded on this
-   commit, then create and push the protected lightweight tag
+   `0.1.0-alpha.1`. Confirm the main CI checks in that policy succeeded on
+   this commit, then create and push the protected lightweight tag
    `v0.1.0-alpha.1` at that exact commit.
 2. Run **Package release** on `main` with `publish` enabled and
    `candidate_run_id` empty. This builds and verifies the candidate from the
