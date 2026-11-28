@@ -1,8 +1,9 @@
 # Publishing 0.1.0-alpha.1
 
-The [Package release workflow](../../.github/workflows/publish.yaml) builds and
-checks a read-only candidate on pull requests and pushes to `main`.
-Publication starts with a manual run on `main` with `publish` enabled.
+Run the [Package release workflow](../../.github/workflows/publish.yaml) manually
+from GitHub Actions. Leave both inputs at their defaults to build and verify a
+candidate. To publish, run it on `main` with `publish` enabled and approve the
+`production` deployment. Regular CI continues to run on pull requests.
 
 ## Configure GitHub and NuGet
 
@@ -27,13 +28,13 @@ Publication starts with a manual run on `main` with `publish` enabled.
 
 1. Select the current `main` commit after the release notes, package metadata,
    and [release policy](../../.github/release/policy.json) match
-   `0.1.0-alpha.1`. Confirm the required checks in that policy succeeded on
-   this commit, including the candidate build. Create and push the protected
-   lightweight tag `v0.1.0-alpha.1` at that exact commit.
+   `0.1.0-alpha.1`. Confirm the main CI checks in that policy succeeded on
+   this commit, then create and push the protected lightweight tag
+   `v0.1.0-alpha.1` at that exact commit.
 2. Run **Package release** on `main` with `publish` enabled and
-   `candidate_run_id` empty. Record the run ID and wait for the candidate
-   build. Check the commit and candidate before approving the `production`
-   deployment.
+   `candidate_run_id` empty. This builds and verifies the candidate from the
+   tagged commit in the publish run. Check the commit and candidate before
+   approving the `production` deployment.
 3. The publish job verifies the tag, checks, and candidate digests, signs
    provenance and the SPDX 2.2 build dependency SBOM, and verifies both
    bundles. It publishes four packages and their symbols to NuGet.org, uploads
@@ -46,11 +47,12 @@ Publication starts with a manual run on `main` with `publish` enabled.
 
 ## Recover a partial publish
 
-Rerun failed jobs in the original run when possible. To dispatch a new run,
-keep the tagged commit at the head of `main`, enable `publish`, and set
-`candidate_run_id` to the run that built the original artifact. The workflow
-checks the build job in that run and requires the original artifact to be
-available. Candidate artifacts have a 30-day retention period.
+Rerun failed jobs in the original publish run when possible. To dispatch a new
+run, keep the tagged commit at the head of `main`, enable `publish`, and set
+`candidate_run_id` to the successful **Package release** run that built the
+candidate for that exact commit. The workflow checks that run's branch, commit,
+and successful build, then requires the original artifact to be available.
+Candidate artifacts have a 30-day retention period.
 
 Existing package versions are checked against the original candidate before
 duplicate pushes are accepted. The publish job attaches each original symbol
