@@ -30,10 +30,12 @@ Publication starts with a manual run on `main` with `publish` enabled.
    `0.1.0-alpha.1`. Confirm the required checks in that policy succeeded on
    this commit, including the candidate build. Create and push the protected
    lightweight tag `v0.1.0-alpha.1` at that exact commit.
-2. Run **Package release** on `main` with `publish` enabled and
-   `candidate_run_id` empty. Record the run ID and wait for the candidate
-   build. Check the commit and candidate before approving the `production`
-   deployment.
+2. Find the successful **Package release** run triggered by the push to `main`
+   for this exact commit. Record its run ID after its candidate build succeeds.
+   Run **Package release** on `main` with `publish` enabled and set
+   `candidate_run_id` to that run ID. The publish run verifies and reuses the
+   existing candidate artifact, so it skips rebuilding. Confirm the commit and
+   candidate before approving the `production` deployment.
 3. The publish job verifies the tag, checks, and candidate digests, signs
    provenance and the SPDX 2.2 build dependency SBOM, and verifies both
    bundles. It publishes four packages and their symbols to NuGet.org, uploads
