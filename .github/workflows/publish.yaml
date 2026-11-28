@@ -2,8 +2,6 @@ name: Package release
 
 on:
   pull_request:
-  push:
-    branches: [main]
   workflow_dispatch:
     inputs:
       publish:
@@ -11,7 +9,7 @@ on:
         type: boolean
         default: false
       candidate_run_id:
-        description: Optional successful Package release run on main for this exact commit; reuse its candidate artifact and skip rebuilding
+        description: Optional existing Package release run ID on main whose candidate artifact should be reused on retry
         type: string
         required: false
         default: ''
