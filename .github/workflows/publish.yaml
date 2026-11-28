@@ -1,15 +1,14 @@
 name: Package release
 
 on:
-  pull_request:
   workflow_dispatch:
     inputs:
       publish:
-        description: Publish the verified 0.1.0-alpha.1 candidate (requires production approval)
+        description: Publish the verified candidate from main after production approval. Leave disabled to build and verify a candidate only.
         type: boolean
         default: false
       candidate_run_id:
-        description: Optional existing Package release run ID on main whose candidate artifact should be reused on retry
+        description: For partial publish recovery, enter the original successful candidate build's run ID for this commit on main. Leave empty to build a new candidate.
         type: string
         required: false
         default: ''
@@ -23,7 +22,7 @@ concurrency:
 jobs:
   build:
     name: Build release candidate
-    if: github.event_name != 'workflow_dispatch' || inputs.candidate_run_id == ''
+    if: inputs.candidate_run_id == ''
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
@@ -38,7 +37,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          ref: ${{ github.sha }}
           persist-credentials: false
       - uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
         with:
@@ -104,7 +103,7 @@ jobs:
       - name: Check actual package layouts and manifest integrity
         run: python3 .github/release/check-candidate.py "$RUNNER_TEMP/release"
         env:
-          RELEASE_EXPECTED_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+          RELEASE_EXPECTED_COMMIT: ${{ github.sha }}
       - name: Verify NuGet package and symbol retry behavior on loopback
         run: python3 .github/release/check-push-retry.py "$RUNNER_TEMP/release"
       - name: Run the external consumer against the candidate before publication
@@ -115,7 +114,7 @@ jobs:
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         id: upload
         with:
-          name: release-candidate-${{ github.event.pull_request.head.sha || github.sha }}
+          name: release-candidate-${{ github.sha }}
           path: ${{ runner.temp }}/release/
           if-no-files-found: error
           include-hidden-files: true
@@ -143,7 +142,7 @@ jobs:
           cmp "$RUNNER_TEMP/release/release.json" "$RUNNER_TEMP/downloaded-release/release.json"
           python3 .github/release/check-candidate.py "$RUNNER_TEMP/downloaded-release"
         env:
-          RELEASE_EXPECTED_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+          RELEASE_EXPECTED_COMMIT: ${{ github.sha }}
 
   publish:
     name: Attest and publish verified packages

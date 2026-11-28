@@ -1,8 +1,9 @@
 # Publishing 0.1.0-alpha.1
 
-The [Package release workflow](../../.github/workflows/publish.yaml) builds and
-checks a read-only candidate on pull requests. A manual run on `main` builds the
-release candidate and publishes it when `publish` is enabled.
+Run the [Package release workflow](../../.github/workflows/publish.yaml) manually
+from GitHub Actions. Leave both inputs at their defaults to build and verify a
+candidate. To publish, run it on `main` with `publish` enabled and approve the
+`production` deployment. Regular CI continues to run on pull requests.
 
 ## Configure GitHub and NuGet
 
