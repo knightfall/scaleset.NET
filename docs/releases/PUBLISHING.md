@@ -48,11 +48,12 @@ Publication starts with a manual run on `main` with `publish` enabled.
 
 ## Recover a partial publish
 
-Rerun failed jobs in the original run when possible. To dispatch a new run,
-keep the tagged commit at the head of `main`, enable `publish`, and set
-`candidate_run_id` to the run that built the original artifact. The workflow
-checks the build job in that run and requires the original artifact to be
-available. Candidate artifacts have a 30-day retention period.
+Rerun failed jobs in the original publish run when possible. To dispatch a new
+run, keep the tagged commit at the head of `main`, enable `publish`, and set
+`candidate_run_id` to the successful **Package release** run that built the
+candidate for that exact commit. The workflow checks that run's branch, commit,
+and successful build, then requires the original artifact to be available.
+Candidate artifacts have a 30-day retention period.
 
 Existing package versions are checked against the original candidate before
 duplicate pushes are accepted. The publish job attaches each original symbol
